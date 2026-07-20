@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "41967040411",
+    "project_id": "portal-trial",
+    "storage_bucket": "portal-trial.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:41967040411:android:19648d3803b7df463d533e",
+        "android_client_info": {
+          "package_name": "com.example.my_portal_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAHu8e7NI6ILCl2TGQhHCF6lNEZxSUGbg4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

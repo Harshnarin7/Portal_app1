@@ -1,0 +1,68 @@
+name: my_portal_app
+description: PORTAL Clinical Trial Management System — Multicenter RCT
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  open_filex: ^4.4.0
+  http: ^1.2.0
+  intl: ^0.19.0
+  shared_preferences: ^2.3.2
+  cupertino_icons: ^1.0.6
+  mobile_scanner: ^4.0.1
+  pdf: ^3.10.8
+  printing: ^5.12.0
+  path_provider: ^2.1.2
+  provider: ^6.1.2
+
+  # ── Auth & Secure Storage ───────────────────────────────────────────────
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.4.1
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/fonts/
+    - assets/splash/
+    - assets/app_icon/
+    - assets/images/
+
+  fonts:
+    - family: Manrope
+      fonts:
+        - asset: assets/fonts/Manrope-Regular.ttf
+        - asset: assets/fonts/Manrope-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Manrope-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Manrope-Bold.ttf
+          weight: 700
+
+flutter_native_splash:
+  color: "#0B1829"
+  color_dark: "#0B1829"
+  image: assets/splash/final_splash.png
+  image_dark: assets/splash/final_splash.png
+  android: true
+  ios: true
+  android_gravity: center
+  ios_content_mode: scaleAspectFit
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/app_icon/app_icon.png
+  min_sdk_android: 21
+  remove_alpha_ios: true
