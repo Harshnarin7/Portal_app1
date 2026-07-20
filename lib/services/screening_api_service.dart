@@ -42,6 +42,24 @@ class ScreeningApiService {
     }
   }
 
+  // ── Fetch PII (name/contact/UID) for a screening ────────────────────────
+  // /screenings/ and /screenings/{id} BOTH return ScreeningClinicalOut,
+  // which is deliberately de-identified — the backend stores mother/husband
+  // name, phone, maternal UID, and hospital admission number in a SEPARATE
+  // participant_pii table (DPDP/ICMR pseudonymisation — see backend
+  // pii_service.py) and only ever returns them from /pii/screening/{id}.
+  // Returns null on 403 (user not authorized to view PII for this site) or
+  // 404 (no PII record saved for this screening yet) instead of throwing,
+  // so the caller can just fall back to blank/"?" for that one patient.
+  Future<Map<String, dynamic>?> getPii(String screeningId) async {
+    try {
+      return await ApiClient.instance.get('/pii/screening/$screeningId');
+    } on ApiException catch (e) {
+      if (e.statusCode == 404 || e.statusCode == 403) return null;
+      rethrow;
+    }
+  }
+
   // ── Get all patients for current user's site ──────────────────────────────
   // FIX: was calling /screening/patients, which doesn't exist on the backend
   // — every call silently failed and fell back to local-only device storage,
@@ -58,4 +76,3 @@ class ScreeningApiService {
     return ApiClient.instance.get('/screening/stats');
   }
 }
-

@@ -163,7 +163,7 @@ final List<String> kMrveAllFields =
 
 const Map<String, List<String>> kMrveNursesBySite = {
   "PGIMER": [
-    "Mannat Guliani", "Shalini Dhiman", "Anureet Kaur",
+    "Mannat Guliani", "Shalini Dhiman", "Navkiran Kaur",
     "Geetika", "Priyanka Thakur", "Seemran Kaur",
     "Tanvi Saini", "Yashvi Jolly",
   ],

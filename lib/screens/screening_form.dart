@@ -215,7 +215,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   final Map<String, List<String>> _nursesBySite = {
     "PGIMER": [
-      "Mannat Guliani", "Shalini Dhiman", "Anureet Kaur",
+      "Mannat Guliani", "Shalini Dhiman", "Navkiran Kaur",
       "Geetika", "Priyanka Thakur", "Seemran Kaur",
       "Tanvi Saini", "Yashvi Jolly",
     ],
@@ -278,7 +278,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
     // ── Auto-save every 60 seconds ──
     _autoSaveTimer = Timer.periodic(const Duration(seconds: 60), (_) {
-      if (mounted && !_isFormCompletelyEmpty()) _saveDraft();
+      if (mounted && !_isFormCompletelyEmpty()) _saveDraft(silent: true);
     });
   }
 
@@ -726,7 +726,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   // ── DRAFT ──────────────────────────────────────────────────────────────────
 
-  Future<void> _saveDraft() async {
+  Future<void> _saveDraft({bool silent = false}) async {
     if (_isFormCompletelyEmpty()) return;
     await _assignScreeningIdIfNeeded();
 
@@ -783,7 +783,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     await prefs.setString(_currentDraftKey!, jsonEncode(draft));
     await _addDraftKey(_currentDraftKey!);
     if (!mounted) return;
-    _showDraftSavedMessage();
+    if (!silent) _showDraftSavedMessage();
   }
 
   Future<void> _loadDraftIfExists() async {
@@ -930,8 +930,13 @@ class _ScreeningFormState extends State<ScreeningForm>
       // same `/screenings/` record the web portal reads and writes.
       await _syncToBackend(isDraft: false);
 
-      // ── Generate PDF ──
-      await PdfService.generateCrfPdf(crf);
+      // ── Generate PDF in the background ──
+      // Don't block returning to the dashboard on this: it's CPU-bound and
+      // the dashboard already regenerates the PDF on demand (_generatePdf)
+      // when the record is opened, so waiting here just adds dead time to
+      // every single save.
+      // ignore: unawaited_futures
+      PdfService.generateCrfPdf(crf);
 
       // ── Clean up draft BEFORE popping ──
       final prefs = await SharedPreferences.getInstance();
@@ -1022,7 +1027,18 @@ class _ScreeningFormState extends State<ScreeningForm>
   if (confirm != true) return;
   if (!mounted) return;
 
+  // Show a non-dismissible spinner while syncing to the backend so the
+  // screen doesn't just appear frozen on a slow connection.
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const Center(child: CircularProgressIndicator()),
+  );
+
   final success = await _submit();
+
+  if (!mounted) return;
+  Navigator.pop(context); // close the spinner
 
   if (!mounted) return;
 

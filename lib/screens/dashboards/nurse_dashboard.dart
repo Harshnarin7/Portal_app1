@@ -503,7 +503,11 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
 
   Widget _crfCard(CRF c) {
     final ok = c.eligibilityStatus=='Eligible'&&c.consentStatus=='Yes';
-    final col = ok?_kSuccess:_kDanger;
+    final excluded = c.eligibilityStatus=='Not Eligible' ||
+        c.eligibilityStatus=='Screen Failure' ||
+        c.consentStatus=='No';
+    final col = ok ? _kSuccess : (excluded ? _kDanger : _kWarning);
+    final label = ok ? 'Enrolled' : (excluded ? 'Excluded' : 'Incomplete');
     return GestureDetector(
       onTap: () => _openPatientActions(c),
       child: Container(
@@ -532,7 +536,7 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
           padding:const EdgeInsets.symmetric(horizontal:7,vertical:3),
           decoration:BoxDecoration(color:col.withOpacity(0.1),
               borderRadius:BorderRadius.circular(6)),
-          child:Text(ok?'Enrolled':'Excluded',
+          child:Text(label,
               style:TextStyle(color:col,fontSize:10,fontWeight:FontWeight.w700))),
         const SizedBox(width:6),
         Icon(Icons.chevron_right_rounded, color:_kText3, size:18),

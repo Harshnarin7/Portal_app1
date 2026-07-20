@@ -1,0 +1,17 @@
+# Flutter
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+
+# Android
+android/.gradle/
+
+# IDE
+.idea/
+.vscode/
+
+# Misc
+.DS_Store
+Thumbs.db

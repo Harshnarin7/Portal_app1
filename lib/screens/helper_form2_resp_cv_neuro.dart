@@ -155,7 +155,7 @@ final List<String> kAllFields =
 
 const Map<String, List<String>> kNursesBySite = {
   "PGIMER": [
-    "Mannat Guliani", "Shalini Dhiman", "Anureet Kaur",
+    "Mannat Guliani", "Shalini Dhiman", "Navkiran Kaur",
     "Geetika", "Priyanka Thakur", "Seemran Kaur",
     "Tanvi Saini", "Yashvi Jolly",
   ],

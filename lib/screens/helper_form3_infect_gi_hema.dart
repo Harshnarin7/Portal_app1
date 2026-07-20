@@ -151,7 +151,7 @@ final List<String> kIghAllFields =
 
 const Map<String, List<String>> kIghNursesBySite = {
   "PGIMER": [
-    "Mannat Guliani", "Shalini Dhiman", "Anureet Kaur",
+    "Mannat Guliani", "Shalini Dhiman", "Navkiran Kaur",
     "Geetika", "Priyanka Thakur", "Seemran Kaur",
     "Tanvi Saini", "Yashvi Jolly",
   ],
