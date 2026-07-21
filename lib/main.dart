@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 
 import 'navigation/route_observer.dart';
@@ -47,6 +48,18 @@ class PortalApp extends StatelessWidget {
       theme:     AppTheme.lightThemeData(),
       darkTheme: AppTheme.darkThemeData(),
       themeMode: theme.mode,
+      // Forces DD/MM/YYYY everywhere the framework formats dates itself —
+      // including the manual-entry (pencil icon) mode of showDatePicker().
+      // Without this, the app falls back to the device/default locale,
+      // which is US (MM/DD/YYYY) on many phones/emulators regardless of
+      // being physically in India.
+      locale: const Locale('en', 'IN'),
+      supportedLocales: const [Locale('en', 'IN'), Locale('en', 'US')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       home:      const RootScreen(),
       routes: {
         '/login':           (_) => const LoginScreen(),

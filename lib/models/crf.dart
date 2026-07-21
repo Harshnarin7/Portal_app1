@@ -53,9 +53,9 @@ class CRF {
   final String relationshipOther;
   final String consentTakenBy;
 
-  // ===============================
-  // ENROLLMENT (assigned during Form B randomization)
-  // ===============================
+  // Present only after randomization (Form B). Used to gate access to
+  // enrollment-scoped forms (Helper Forms 2-4, FiO2 AUC) — empty string
+  // means "not yet randomized, those forms aren't applicable yet".
   final String enrollmentId;
 
   CRF({
@@ -95,7 +95,7 @@ class CRF {
     required this.relationshipOther,
     required this.consentTakenBy,
 
-    this.enrollmentId = '',
+    this.enrollmentId = "",
   });
 
   // ===============================
@@ -182,9 +182,9 @@ class CRF {
 
       // ✅ SAFE FALLBACKS FOR OLD DATA
       gestationKnownInWeeks:
-          gest["gestationKnownInWeeks"] ?? "No",
+          gest["gestationKnownInWeeks"] ?? false,
       eddKnown:
-          gest["eddKnown"] ?? "No",
+          gest["eddKnown"] ?? false,
 
       exclusion: exc["present"] ?? false,
       exclusionReason: exc["reason"] ?? "",
