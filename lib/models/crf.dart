@@ -53,6 +53,11 @@ class CRF {
   final String relationshipOther;
   final String consentTakenBy;
 
+  // ===============================
+  // ENROLLMENT (assigned during Form B randomization)
+  // ===============================
+  final String enrollmentId;
+
   CRF({
     required this.screeningId,
     required this.site,
@@ -89,6 +94,8 @@ class CRF {
     required this.relationshipToParticipant,
     required this.relationshipOther,
     required this.consentTakenBy,
+
+    this.enrollmentId = '',
   });
 
   // ===============================
@@ -140,6 +147,8 @@ class CRF {
         "relationshipOther": relationshipOther,
         "consentTakenBy": consentTakenBy,
       },
+
+      "enrollmentId": enrollmentId,
     };
   }
 
@@ -188,6 +197,8 @@ class CRF {
           fin["relationshipToParticipant"] ?? "",
       relationshipOther: fin["relationshipOther"] ?? "",
       consentTakenBy: fin["consentTakenBy"] ?? "",
+
+      enrollmentId: json["enrollmentId"] ?? "",
     );
   }
 
