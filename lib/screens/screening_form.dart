@@ -194,7 +194,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   };
 
   String _insufficientReason  = "";
-  String _resuscitationReason = "";
+  Set<String> _resuscitationReasons = {}; // multi-select — was a single String
   String _resuscitationOther  = "";
   String _anomalyDetails      = "";
   String _hydropsType         = "";
@@ -323,6 +323,26 @@ class _ScreeningFormState extends State<ScreeningForm>
         });
       }
     }
+
+    // Auto-fill "13. Screened by" from the logged-in account rather than
+    // asking the nurse to find her own name in a dropdown. Two reasons:
+    //  1. _nursesBySite only ever had entries for PGIMER — nurses at
+    //     GMCH/GMCH-A/AMC/IOG had an empty dropdown and couldn't fill this
+    //     required field at all.
+    //  2. With individually-named logins, the logged-in user IS the
+    //     correct answer — letting someone pick a colleague's name from a
+    //     list undermines per-person audit trail.
+    // Only auto-fill for a brand-new screening — if a draft/existing
+    // record already has a screened_by value, don't overwrite it.
+    if (!widget.loadDraft && mounted) {
+      final user = context.read<AuthProvider>().user;
+      if (user != null && user.fullName.trim().isNotEmpty) {
+        final parts = user.fullName.trim().split(RegExp(r'\s+'))
+            .where((p) => p.toLowerCase() != 'dr.' && p.toLowerCase() != 'dr').toList();
+        final displayName = parts.isNotEmpty ? parts.first : user.fullName.trim();
+        setState(() => _screenedByCtrl.text = displayName);
+      }
+    }
   }
 
   Future<void> _logout() async {
@@ -387,7 +407,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       _proceedToConsent   = false;
       _consentPopupShown  = false;
       _insufficientReason  = "";
-      _resuscitationReason = "";
+      _resuscitationReasons = {};
       _resuscitationOther  = "";
       _anomalyDetails      = "";
       _hydropsType         = "";
@@ -535,8 +555,8 @@ class _ScreeningFormState extends State<ScreeningForm>
           if (_insufficientReason.trim().isEmpty) return false;
           break;
         case "RESUSCITATION":
-          if (_resuscitationReason.isEmpty) return false;
-          if (_resuscitationReason == "Other" && _resuscitationOther.trim().isEmpty) return false;
+          if (_resuscitationReasons.isEmpty) return false;
+          if (_resuscitationReasons.contains("Other") && _resuscitationOther.trim().isEmpty) return false;
           break;
         case "ANOMALY":
           if (_anomalyDetails.trim().isEmpty) return false;
@@ -686,9 +706,9 @@ class _ScreeningFormState extends State<ScreeningForm>
       'exclusion_reasons': exclusionLabels.isNotEmpty ? exclusionLabels.join(", ") : null,
       'reason_for_insufficient_time': _exclusionAnswers["INSUFFICIENT"] == "Yes" && _insufficientReason.trim().isNotEmpty
           ? _insufficientReason.trim() : null,
-      'decision_forego_resuscitation_reason': _exclusionAnswers["RESUSCITATION"] == "Yes" && _resuscitationReason.isNotEmpty
-          ? _resuscitationReason : null,
-      'decision_forego_resuscitation_reason_other': _resuscitationReason == "Other" && _resuscitationOther.trim().isNotEmpty
+      'decision_forego_resuscitation_reason': _exclusionAnswers["RESUSCITATION"] == "Yes" && _resuscitationReasons.isNotEmpty
+          ? _resuscitationReasons.join(", ") : null,
+      'decision_forego_resuscitation_reason_other': _resuscitationReasons.contains("Other") && _resuscitationOther.trim().isNotEmpty
           ? _resuscitationOther.trim() : null,
       'major_structural_anomalies_if_yes': _exclusionAnswers["ANOMALY"] == "Yes" && _anomalyDetails.trim().isNotEmpty
           ? _anomalyDetails.trim() : null,
@@ -764,7 +784,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       "expectedDelivery"    : _expectedDeliveryCtrl.text,
       "exclusionAnswers"    : _exclusionAnswers,
       "insufficientReason"  : _insufficientReason,
-      "resuscitationReason" : _resuscitationReason,
+      "resuscitationReasons": _resuscitationReasons.toList(),
       "resuscitationOther"  : _resuscitationOther,
       "anomalyDetails"      : _anomalyDetails,
       "hydropsType"         : _hydropsType,
@@ -818,7 +838,13 @@ class _ScreeningFormState extends State<ScreeningForm>
       _exclusionAnswers.addAll(
           Map<String, String?>.from(data["exclusionAnswers"] ?? {}));
       _insufficientReason        = data["insufficientReason"] ?? "";
-      _resuscitationReason       = data["resuscitationReason"] ?? "";
+      if (data["resuscitationReasons"] != null) {
+        _resuscitationReasons = Set<String>.from(data["resuscitationReasons"]);
+      } else if ((data["resuscitationReason"] ?? "").toString().isNotEmpty) {
+        _resuscitationReasons = {data["resuscitationReason"].toString()};
+      } else {
+        _resuscitationReasons = {};
+      }
       _resuscitationOther        = data["resuscitationOther"] ?? "";
       _anomalyDetails            = data["anomalyDetails"] ?? "";
       _hydropsType               = data["hydropsType"] ?? "";
@@ -1212,7 +1238,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       ),
     );
     if (confirmed == true) {
-      setState(() { _selectedSite = newSite; _screenedByCtrl.clear(); });
+      setState(() { _selectedSite = newSite; });
     } else {
       setState(() {});
     }
@@ -1457,11 +1483,16 @@ class _ScreeningFormState extends State<ScreeningForm>
           Text("23. If yes, reason (select all that apply) *", style: TextStyle(color: c.textSecondary, fontSize: 13)),
           const SizedBox(height: 6),
           ...["Periviable", "Socio-economic", "Major CMF", "Other"].map((v) =>
-              _styledRadio(v, _resuscitationReason, c, (val) =>
-                  setState(() => _resuscitationReason = val!))),
-          if (_submitted && _resuscitationReason.isEmpty)
-            Text("Please select a reason", style: TextStyle(color: c.danger, fontSize: 12)),
-          if (_resuscitationReason == "Other") ...[
+              _multiCheckboxTile(v, _resuscitationReasons, c, () => setState(() {
+                if (_resuscitationReasons.contains(v)) {
+                  _resuscitationReasons.remove(v);
+                } else {
+                  _resuscitationReasons.add(v);
+                }
+              }))),
+          if (_submitted && _resuscitationReasons.isEmpty)
+            Text("Please select at least one reason", style: TextStyle(color: c.danger, fontSize: 12)),
+          if (_resuscitationReasons.contains("Other")) ...[
             const SizedBox(height: 8),
             TextFormField(
               decoration: _requiredDecoration("Please specify…"),
@@ -1499,6 +1530,41 @@ class _ScreeningFormState extends State<ScreeningForm>
       default:
         return const SizedBox.shrink();
     }
+  }
+
+  // Same visual language as _styledRadio, but a square checkbox indicator
+  // (not a circle) to visually signal "multi-select" vs "pick one", and
+  // toggles membership in a Set instead of replacing a single value.
+  Widget _multiCheckboxTile(String value, Set<String> selectedSet, AppColors c,
+      VoidCallback onToggle) {
+    final selected = selectedSet.contains(value);
+    return GestureDetector(
+      onTap: onToggle,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? c.primarySoft : c.surface,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: selected ? c.primary : c.border),
+        ),
+        child: Row(children: [
+          Container(
+            width: 16, height: 16,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: selected ? c.primary : c.border, width: 2),
+              color: selected ? c.primary : Colors.transparent,
+            ),
+            child: selected ? const Icon(Icons.check, color: Colors.white, size: 12) : null,
+          ),
+          const SizedBox(width: 10),
+          Text(value, style: TextStyle(
+              color: selected ? c.primary : c.textSecondary,
+              fontWeight: selected ? FontWeight.w700 : FontWeight.w500, fontSize: 13)),
+        ]),
+      ),
+    );
   }
 
   Widget _styledRadio(String value, String groupValue, AppColors c,
@@ -2248,19 +2314,15 @@ class _ScreeningFormState extends State<ScreeningForm>
         ),
         const SizedBox(height: 12),
 
-        DropdownButtonFormField<String>(
-          value: _screenedByCtrl.text.isEmpty ? "Select" : _screenedByCtrl.text,
-          decoration: _requiredDecoration("13. Screened by (First name)"),
-          dropdownColor: c.surface,
-          items: [
-            _ddItem("Select", c, hint: true),
-            ...(_nursesBySite[_selectedSite] ?? []).map((n) => _ddItem(n, c)),
-          ],
-          onChanged: (value) {
-            setState(() => _screenedByCtrl.text = value ?? "Select");
-            _assignScreeningIdIfNeeded();
-          },
-          validator: (v) => _submitted && (v == null || v == "Select") ? "Required" : null,
+        TextFormField(
+          controller: _screenedByCtrl,
+          readOnly: true,
+          decoration: _requiredDecoration("13. Screened by").copyWith(
+            helperText: "Auto-filled from your login",
+            helperStyle: TextStyle(color: c.textTertiary, fontSize: 11),
+          ),
+          validator: (v) => _submitted && (v == null || v.trim().isEmpty || v == "Select")
+              ? "Required" : null,
           style: TextStyle(color: c.textPrimary),
         ),
         const SizedBox(height: 16),
