@@ -104,24 +104,46 @@ class FormsApiService {
   }
 
   // ── FiO2 AUC Helper Form ─────────────────────────────────────────────────
+  // FIX: was calling /forms/fio2/save and /forms/fio2/{babyUid} — neither
+  // exists on the backend at all. Every save silently 404'd and fell back
+  // to local-only storage; this form has never actually synced to the
+  // server. Real endpoints are POST/PUT /fio2-auc/, keyed by enrollmentId
+  // (not babyUid — the backend's FiO2AUC table has no baby_uid column at
+  // all, only enrollment_id), and expect pre-computed summary values
+  // (total_auc, mean_daily_fio2, excess_o2_auc) plus the raw log data.
 
   Future<void> saveFiO2({
-    required String babyUid,
-    required Map<String, dynamic> blocks,
-    String? updatedBy,
+    required String enrollmentId,
+    required List<Map<String, dynamic>> blocks,
+    required double totalAuc,
+    required double meanDailyFio2,
+    required double excessO2Auc,
+    bool hasExistingRecord = false,
   }) async {
-    await ApiClient.instance.post('/forms/fio2/save', body: {
-      'baby_uid'   : babyUid,
-      'blocks_json': jsonEncode(blocks),
-      'updated_by' : updatedBy,
-    });
+    final body = {
+      'enrollment_id'    : enrollmentId,
+      'total_auc'        : totalAuc,
+      'mean_daily_fio2'  : meanDailyFio2,
+      'excess_o2_auc'    : excessO2Auc,
+      'fio2_logs'        : blocks,
+    };
+    if (hasExistingRecord) {
+      await ApiClient.instance.put('/fio2-auc/$enrollmentId', body: body);
+    } else {
+      await ApiClient.instance.post('/fio2-auc/', body: body);
+    }
   }
 
-  Future<Map<String, dynamic>> loadFiO2(String babyUid) async {
+  Future<Map<String, dynamic>?> loadFiO2(String enrollmentId) async {
     try {
-      return await ApiClient.instance.get('/forms/fio2/$babyUid');
+      // Backend returns a LIST (most recent first) — most callers just
+      // want the latest entry, matching update_fio2_auc's own "most
+      // recent record" semantics.
+      final list = await ApiClient.instance.getList('/fio2-auc/$enrollmentId');
+      if (list.isEmpty) return null;
+      return list.first as Map<String, dynamic>;
     } on ApiException catch (e) {
-      if (e.statusCode == 404) return {'blocks': {}};
+      if (e.statusCode == 404) return null;
       rethrow;
     }
   }

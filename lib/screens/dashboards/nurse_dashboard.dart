@@ -232,7 +232,18 @@ class _NurseHome extends StatefulWidget {
 // Used by both the nurse Home tab (top-5 preview) and the full Patients tab,
 // so both screens always show identical, correctly-merged data instead of
 // two copies of this logic drifting apart.
-Future<List<CRF>> fetchPatientCrfs() async {
+//
+// `piiLimit`: PII is fetched with ONE extra API call PER patient — with a
+// site of any real size that's dozens/hundreds of parallel requests on
+// every single load, which is why the dashboard was slow. When piiLimit is
+// given, only the most recent `piiLimit` patients (the ones about to
+// actually be shown — patients.map below builds oldest→newest, and callers
+// then .reversed the result to put newest first) get a real PII fetch;
+// everyone else gets a CRF with blank name/phone/hospital fields, which is
+// fine since those records aren't rendered anyway. Pass null (default) to
+// fetch PII for everyone — needed by the Patients tab so search-by-name
+// works across the full list.
+Future<List<CRF>> fetchPatientCrfs({int? piiLimit}) async {
   try {
     final patients = await ScreeningApiService.instance.getPatients();
 
@@ -246,8 +257,12 @@ Future<List<CRF>> fetchPatientCrfs() async {
     // (not authorized for this site) and 404 (no PII saved yet) and
     // returns null, so one missing/forbidden record can't break the rest
     // of the list.
-    final piiResults = await Future.wait(patients.map((p) async {
-      final sid = p['screening_id']?.toString() ?? '';
+    final piiStart = piiLimit == null
+        ? 0
+        : (patients.length - piiLimit).clamp(0, patients.length);
+    final piiResults = await Future.wait(List.generate(patients.length, (i) async {
+      if (i < piiStart) return const <String, dynamic>{};
+      final sid = patients[i]['screening_id']?.toString() ?? '';
       if (sid.isEmpty) return const <String, dynamic>{};
       try {
         return await ScreeningApiService.instance.getPii(sid) ??
@@ -337,9 +352,21 @@ Future<List<CRF>> fetchPatientCrfs() async {
 }
 
 // ── Shared patient status helpers ───────────────────────────────────────────
-bool _isEnrolled(CRF c) => c.eligibilityStatus=='Eligible'&&c.consentStatus=='Yes';
-bool _isExcluded(CRF c) => c.eligibilityStatus=='Not Eligible' ||
-    c.eligibilityStatus=='Screen Failure' || c.consentStatus=='No';
+// Mirrors backend/main.py's compute_screening_status() exactly:
+//   Screen Failure -> failed gestation/exclusion criteria (genuinely excluded)
+//   Eligible       -> passed criteria AND consent_given == "Yes" (enrolled)
+//   Not Eligible   -> passed criteria but consent isn't "Yes" YET (pending/
+//                     not-approached) — this is NOT the same as excluded!
+// FIX: previously any status other than "Eligible" (including "Not Eligible",
+// which really just means "not confirmed enrolled yet") was shown as red
+// "Excluded" — so a clinically-eligible patient whose consent was still
+// pending showed up as wrongly excluded. Now only a real Screen Failure or
+// an explicit consent refusal ("No") counts as Excluded; anything else that
+// isn't yet Enrolled shows as "Incomplete" (pending), matching what the
+// backend is actually telling us.
+bool _isEnrolled(CRF c) => c.eligibilityStatus == 'Eligible';
+bool _isExcluded(CRF c) =>
+    c.eligibilityStatus == 'Screen Failure' || c.consentStatus == 'No';
 Color patientStatusColor(CRF c) =>
     _isEnrolled(c) ? _kSuccess : (_isExcluded(c) ? _kDanger : _kWarning);
 String patientStatusLabel(CRF c) =>
@@ -676,7 +703,13 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
     await prefs.setStringList('screening_draft_keys', vkeys);
 
     // ── Load patients from BACKEND (site-isolated), PII merged in ──────
-    final crfs = await fetchPatientCrfs();
+    // Home only ever shows the 5 most recent patients — fetching real PII
+    // for the entire site's patient list here was the main reason this
+    // screen got slower as the site grew. Limit it to the 5 that actually
+    // get rendered; the "enrolled"/"excluded" counts below don't need PII
+    // at all (they're computed from screening_status/consent_given, which
+    // come from the de-identified list already).
+    final crfs = await fetchPatientCrfs(piiLimit: 5);
 
     if (!mounted) return;
     setState(() { _crfs=crfs.reversed.toList(); _drafts=drafts; _loading=false; });
@@ -694,10 +727,8 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
 
   @override
   Widget build(BuildContext context) {
-    final enrolled = _crfs.where((c)=>
-        c.eligibilityStatus=='Eligible'&&c.consentStatus=='Yes').length;
-    final excluded = _crfs.where((c)=>
-        c.eligibilityStatus=='Not Eligible'||c.consentStatus=='No').length;
+    final enrolled = _crfs.where(_isEnrolled).length;
+    final excluded = _crfs.where(_isExcluded).length;
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView(

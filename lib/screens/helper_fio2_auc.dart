@@ -120,6 +120,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC>
 
   // "day-block" → BlockData  (day: 1..7, block: 0 or 1)
   Map<String, BlockData> _blocks = {};
+  bool _hasExistingRecord = false;
 
   @override
   void initState() {
@@ -146,11 +147,18 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC>
   Future<void> _loadData() async {
     Map<String, BlockData> saved = {};
     try {
-      final remote = await FormsApiService.instance.loadFiO2(widget.babyUid);
-      final raw = remote['blocks'] as Map<String, dynamic>? ?? {};
-      if (raw.isNotEmpty) {
-        saved = raw.map((k, v) =>
-            MapEntry(k, BlockData.fromJson(v as Map<String, dynamic>)));
+      final remote = await FormsApiService.instance.loadFiO2(widget.enrollmentId);
+      // Backend stores fio2_logs as a LIST of {block, entries} objects, not
+      // a Map — each entry carries its own block key as a field.
+      final rawList = remote?['fio2_logs'] as List<dynamic>? ?? [];
+      if (remote != null) _hasExistingRecord = true;
+      if (rawList.isNotEmpty) {
+        for (final item in rawList) {
+          final map = item as Map<String, dynamic>;
+          final blockKey = map['block'] as String?;
+          if (blockKey == null) continue;
+          saved[blockKey] = BlockData.fromJson(map);
+        }
       } else {
         saved = await _FiO2Storage.load(widget.babyUid);
       }
@@ -167,11 +175,20 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC>
   Future<void> _persist() async {
     await _FiO2Storage.save(widget.babyUid, _blocks);
     try {
-      final blocksMap = _blocks.map((k, v) => MapEntry(k, v.toJson()));
+      // Convert Map<String, BlockData> -> List<{block, entries}>, matching
+      // the backend's FiO2AUCLogCreate.fio2_logs: Optional[List[Dict]].
+      final blocksList = _blocks.entries
+          .map((e) => {'block': e.key, ...e.value.toJson()})
+          .toList();
       await FormsApiService.instance.saveFiO2(
-        babyUid: widget.babyUid,
-        blocks : blocksMap,
+        enrollmentId    : widget.enrollmentId,
+        blocks          : blocksList,
+        totalAuc        : _totalAUC(),
+        meanDailyFio2   : _meanFiO2(),
+        excessO2Auc     : _excessO2(),
+        hasExistingRecord: _hasExistingRecord,
       );
+      _hasExistingRecord = true; // subsequent saves this session should PUT
     } catch (e) {
       debugPrint('FiO2 backend sync failed: $e');
     }

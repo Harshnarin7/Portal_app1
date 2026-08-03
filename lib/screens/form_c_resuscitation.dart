@@ -1061,7 +1061,7 @@ class _FormCResuscitationDetailsState
         child: Container(height: 1, color: c.borderLight),
       ),
       title: Column(mainAxisSize: MainAxisSize.min, children: [
-        Text("Form C: Resuscitation Details",
+        Text("Form B: Resuscitation Details",
             style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800,
                 color: c.textPrimary, letterSpacing: .3)),
         const SizedBox(height: 2),
