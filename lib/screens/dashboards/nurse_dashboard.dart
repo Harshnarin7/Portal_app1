@@ -1,12 +1,18 @@
 // lib/screens/dashboards/nurse_dashboard.dart — CLEAN REWRITE
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../models/crf.dart';
+import '../../models/form_b.dart';
+import '../../models/form_c.dart';
+import '../../models/birth_resuscitation.dart';
 import '../../models/user.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/api_service.dart';
+import '../../services/pdf_service.dart';
 import '../../services/screening_api_service.dart';
 import '../../services/forms_api_service.dart';
 import '../admin/user_management_screen.dart';
@@ -195,14 +201,38 @@ class _UserMgmtPage extends StatelessWidget {
 }
 
 // ── NURSE DASHBOARD ──────────────────────────────────────────────────────────
-class NurseDashboard extends StatelessWidget {
+class NurseDashboard extends StatefulWidget {
   const NurseDashboard({super.key});
+  @override
+  State<NurseDashboard> createState() => _NurseDashboardState();
+}
+
+class _NurseDashboardState extends State<NurseDashboard> {
+  final ValueNotifier<int> _tabIndex = ValueNotifier<int>(0);
+  final ValueNotifier<String> _patientFilter = ValueNotifier<String>('All');
+
+  @override
+  void dispose() {
+    _tabIndex.dispose();
+    _patientFilter.dispose();
+    super.dispose();
+  }
+
+  void _openPatients({String filter = 'All'}) {
+    _patientFilter.value = filter;
+    _tabIndex.value = 1;
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = context.read<AuthProvider>().user!;
     return DashboardShell(
       user: user,
-      pages: [_NurseHome(user: user), _NursePatientsPage(user: user)],
+      tabIndex: _tabIndex,
+      pages: [
+        _NurseHome(user: user, onOpenPatients: _openPatients),
+        _NursePatientsPage(user: user, filterNotifier: _patientFilter),
+      ],
       navItems: const [
         BottomNavigationBarItem(icon: Icon(Icons.home_outlined),
             activeIcon: Icon(Icons.home_rounded), label: 'Home'),
@@ -223,7 +253,8 @@ class NurseDashboard extends StatelessWidget {
 
 class _NurseHome extends StatefulWidget {
   final UserProfile user;
-  const _NurseHome({required this.user});
+  final void Function({String filter}) onOpenPatients;
+  const _NurseHome({required this.user, required this.onOpenPatients});
   @override
   State<_NurseHome> createState() => _NurseHomeState();
 }
@@ -233,62 +264,54 @@ class _NurseHome extends StatefulWidget {
 // so both screens always show identical, correctly-merged data instead of
 // two copies of this logic drifting apart.
 //
-// `piiLimit`: PII is fetched with ONE extra API call PER patient — with a
-// site of any real size that's dozens/hundreds of parallel requests on
-// every single load, which is why the dashboard was slow. When piiLimit is
-// given, only the most recent `piiLimit` patients (the ones about to
-// actually be shown — patients.map below builds oldest→newest, and callers
-// then .reversed the result to put newest first) get a real PII fetch;
-// everyone else gets a CRF with blank name/phone/hospital fields, which is
-// fine since those records aren't rendered anyway. Pass null (default) to
-// fetch PII for everyone — needed by the Patients tab so search-by-name
-// works across the full list.
+// `piiLimit`: PII is fetched in batch for display names. When set, only the
+// first `piiLimit` patients get PII — API returns newest-first
+// (`created_at.desc`), so that is the latest N shown on Home / pickers.
+// Pass null to fetch PII for everyone (Patients tab search-by-name).
 Future<List<CRF>> fetchPatientCrfs({int? piiLimit}) async {
   try {
-    final patients = await ScreeningApiService.instance.getPatients();
+    // Same site-scoped list webforms uses — raise limit so AWS patients
+    // created on web appear here (and vice versa). Newest first from API.
+    final patients = await ScreeningApiService.instance.getPatients(limit: 200);
 
-    // NOTE: GET /screenings/ is deliberately the de-identified "clinical
-    // view" (per backend's own ScreeningClinicalOut docstring) — it does
-    // NOT include PII (mother/husband name, phone, hospital no, maternal
-    // UID). That's why patient cards used to show a bare "?" avatar and a
-    // blank name line. The real PII lives behind a separate per-record
-    // endpoint (getPii → GET /pii/screening/{id}) — fetch it for every
-    // patient in parallel and merge it in. getPii already swallows 403
-    // (not authorized for this site) and 404 (no PII saved yet) and
-    // returns null, so one missing/forbidden record can't break the rest
-    // of the list.
-    final piiStart = piiLimit == null
-        ? 0
-        : (patients.length - piiLimit).clamp(0, patients.length);
-    final piiResults = await Future.wait(List.generate(patients.length, (i) async {
-      if (i < piiStart) return const <String, dynamic>{};
+    // Newest-first: PII for the first N rows (the ones actually shown).
+    final piiCount = piiLimit == null
+        ? patients.length
+        : piiLimit.clamp(0, patients.length);
+    final piiIds = <String>[];
+    for (var i = 0; i < piiCount; i++) {
       final sid = patients[i]['screening_id']?.toString() ?? '';
-      if (sid.isEmpty) return const <String, dynamic>{};
+      if (sid.isNotEmpty) piiIds.add(sid);
+    }
+
+    Map<String, Map<String, dynamic>> piiById = {};
+    if (piiIds.isNotEmpty) {
       try {
-        return await ScreeningApiService.instance.getPii(sid) ??
-            const <String, dynamic>{};
+        // One round-trip instead of N × GET /pii/screening/{id}
+        piiById = await ScreeningApiService.instance.getPiiBatch(piiIds);
       } catch (_) {
-        return const <String, dynamic>{};
+        // Fallback for older backends without /pii/batch
+        final pairs = await Future.wait(piiIds.map((sid) async {
+          try {
+            final pii = await ScreeningApiService.instance.getPii(sid);
+            return MapEntry(sid, pii ?? const <String, dynamic>{});
+          } catch (_) {
+            return MapEntry(sid, const <String, dynamic>{});
+          }
+        }));
+        piiById = {
+          for (final e in pairs)
+            if (e.value.isNotEmpty) e.key: e.value,
+        };
       }
-    }));
+    }
 
     return List.generate(patients.length, (i) {
       final p = patients[i];
-      final pii = piiResults[i];
-      // Map backend field names to CRF model field names.
-      // FIX: previous keys (eligibility_status, consent_status, site,
-      // site_code, screening_date_time, mother_first_name, etc.) don't
-      // exist on the real backend response at all — this is why
-      // "Continue to Form B" never appeared: eligibilityStatus/
-      // consentStatus always fell back to "", so _isEligible() was
-      // always false regardless of the patient's actual status.
-      //
-      // CRF.fromJson expects a NESTED structure (identification/maternal/
-      // gestation/exclusion/finalDecision groups) — this used to build a
-      // FLAT map instead, which meant even with correct field names,
-      // every value still came out empty (json["identification"] didn't
-      // exist, so it always fell back to {}). This was the second half of
-      // why "Continue to Form B" never worked — nesting it correctly now.
+      final sid = p['screening_id']?.toString() ?? '';
+      final pii = (i < piiCount && sid.isNotEmpty)
+          ? (piiById[sid] ?? const <String, dynamic>{})
+          : const <String, dynamic>{};
       final mapped = {
         "identification": {
           'screeningId'       : p['screening_id'] ?? '',
@@ -298,13 +321,6 @@ Future<List<CRF>> fetchPatientCrfs({int? piiLimit}) async {
           'screenedBy'        : p['screened_by'] ?? '',
         },
         "maternal": {
-          // Prefer the PII record; fall back to the clinical-view keys
-          // (in case a future backend change inlines them), then to the
-          // ORIGINAL create-payload key names (screening_form.dart posts
-          // 'mother_contact'/'husband_contact'/'hospital_admission_number',
-          // which never matched the 'mother_phone'/'hospital_no' this used
-          // to read — so phone/hospital no. were silently blank even when
-          // PII was available).
           'motherFirstName' : pii['mother_first_name'] ?? p['mother_first_name'] ?? '',
           'motherSurname'   : pii['mother_surname'] ?? p['mother_surname'] ?? '',
           'husbandFirstName': pii['husband_first_name'] ?? p['husband_first_name'] ?? '',
@@ -338,15 +354,14 @@ Future<List<CRF>> fetchPatientCrfs({int? piiLimit}) async {
           'relationshipOther'        : p['relationship_other'] ?? '',
           'consentTakenBy'           : p['consent_taken_by'] ?? '',
         },
-        // Not part of the original CRF.fromJson shape — read directly by
-        // the patient actions menu below to decide which forms are
-        // available (Helper Forms need a real enrollment_id).
         'enrollmentId': p['enrollment_id'] ?? '',
       };
       return CRF.fromJson(mapped);
     });
   } catch (_) {
-    // Fallback to local if backend unreachable
+    // Only use device cache when the server is unreachable — never prefer
+    // local-only data over a successful empty site list (that hid AWS /
+    // webform patients).
     return ApiService().loadAllCRFs();
   }
 }
@@ -436,12 +451,30 @@ Widget buildPatientCard(CRF c, VoidCallback onTap) {
   );
 }
 
-// ── Shared patient actions menu — lists every form actually built into this
-// app. Helper Forms are enrollment-scoped (need a real enrollment_id from
-// Form B's randomization step), so they're disabled with an explanatory note
-// until that exists — rather than silently crashing on a missing ID.
-void showPatientActionsSheet(BuildContext context, CRF c) {
-  final hasEnrollment = c.enrollmentId.isNotEmpty;
+// ── Shared patient actions menu.
+// Gate: until Form B is saved → only Form B open.
+// After Form B (PPV required + randomised) → only Form C open.
+// After Form C saved → helper forms unlock; Form B/C remain viewable.
+Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
+  final api = ApiService();
+  final formB = await api.loadFormB(c.screeningId);
+  final formC = await api.loadFormC(c.screeningId);
+
+  final formBDone = formB != null;
+  final formCDone = formC != null;
+  final needsFormC = formBDone &&
+      formB!.requiredResuscitation == true &&
+      formB.randomized == true;
+  final hasEnrollment = c.enrollmentId.isNotEmpty ||
+      (formB?.enrollmentId.isNotEmpty == true);
+
+  // Until Form C is the required next step, Form B stays available.
+  // While Form C is pending, only Form C is open.
+  final formBOpen = !(needsFormC && !formCDone);
+  final formCOpen = needsFormC;
+  final helpersEnabled = formCDone && hasEnrollment;
+
+  if (!context.mounted) return;
   showModalBottomSheet(
     context: context,
     backgroundColor: _kSurface,
@@ -462,7 +495,22 @@ void showPatientActionsSheet(BuildContext context, CRF c) {
             ]),
           ),
           const Divider(height: 20),
-          _buildActionTile(ctx, 'Form B — Birth & Resuscitation', Icons.child_care_rounded, true,
+          _buildActionTile(ctx, 'Export PDF', Icons.picture_as_pdf_rounded, true,
+            () => exportPatientPdf(context, c)),
+          _buildActionTile(
+            ctx,
+            'View filled forms',
+            Icons.visibility_rounded,
+            formBDone || formCDone,
+            () => showFilledFormsSheet(context, c, formB: formB, formC: formC),
+          ),
+          _buildActionTile(
+            ctx,
+            formBDone
+                ? 'Form B — Birth & Resuscitation ✓'
+                : 'Form B — Birth & Resuscitation',
+            Icons.child_care_rounded,
+            formBOpen,
             () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => FormBBirthResuscitation(
                   screeningId: c.screeningId,
                   maternalUid: c.maternalUid,
@@ -473,46 +521,94 @@ void showPatientActionsSheet(BuildContext context, CRF c) {
                   gestDays: c.gestationDays,
                   siteId: c.siteId,
                 )))),
-          _buildActionTile(ctx, 'Form C — Resuscitation Details', Icons.monitor_heart_rounded, true,
-            () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => FormCResuscitationDetails(
-                  screeningId: c.screeningId,
-                  gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
-                  motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  babyUid: c.maternalUid,
-                )))),
-          _buildActionTile(ctx, 'Helper Form 2 — Resp/CV/Neuro', Icons.favorite_rounded, hasEnrollment,
+          _buildActionTile(
+            ctx,
+            formCDone
+                ? 'Form C — Resuscitation Details ✓'
+                : 'Form C — Resuscitation Details',
+            Icons.monitor_heart_rounded,
+            formCOpen,
+            () async {
+              BirthResuscitationData? shared;
+              final eid = formB?.enrollmentId.trim() ?? '';
+              if (eid.isNotEmpty) {
+                try {
+                  final remote = await FormsApiService.instance
+                      .loadBirthResuscitation(eid);
+                  if (remote != null) {
+                    shared = BirthResuscitationData.fromJson(remote);
+                  }
+                } catch (_) {}
+              }
+              if (!context.mounted) return;
+              Navigator.push(context, MaterialPageRoute(builder: (_) => FormCResuscitationDetails(
+                    screeningId: c.screeningId,
+                    gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
+                    motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                    babyUid: formB?.babyUid.isNotEmpty == true
+                        ? formB!.babyUid
+                        : c.maternalUid,
+                    formB: formB,
+                    shared: shared,
+                  )));
+            }),
+          _buildActionTile(ctx, 'Helper Form 2 — Resp/CV/Neuro', Icons.favorite_rounded, helpersEnabled,
             () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm2RespCvNeuro(
-                  enrollmentId: c.enrollmentId,
+                  enrollmentId: c.enrollmentId.isNotEmpty
+                      ? c.enrollmentId
+                      : (formB?.enrollmentId ?? ''),
                   gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                   motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  babyUid: c.maternalUid,
+                  babyUid: formB?.babyUid.isNotEmpty == true
+                      ? formB!.babyUid
+                      : c.maternalUid,
                   site: c.site.isNotEmpty ? c.site : 'PGIMER',
                 )))),
-          _buildActionTile(ctx, 'Helper Form 3 — Infection/GI/Hema', Icons.bloodtype_rounded, hasEnrollment,
+          _buildActionTile(ctx, 'Helper Form 3 — Infection/GI/Hema', Icons.bloodtype_rounded, helpersEnabled,
             () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm3InfectGIHema(
-                  enrollmentId: c.enrollmentId,
+                  enrollmentId: c.enrollmentId.isNotEmpty
+                      ? c.enrollmentId
+                      : (formB?.enrollmentId ?? ''),
                   gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                   motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  babyUid: c.maternalUid,
+                  babyUid: formB?.babyUid.isNotEmpty == true
+                      ? formB!.babyUid
+                      : c.maternalUid,
                 )))),
-          _buildActionTile(ctx, 'Helper Form 4 — Metab/Renal/Vasc/Eye', Icons.visibility_rounded, hasEnrollment,
+          _buildActionTile(ctx, 'Helper Form 4 — Metab/Renal/Vasc/Eye', Icons.visibility_rounded, helpersEnabled,
             () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm4MetabRenalVascEye(
-                  enrollmentId: c.enrollmentId,
+                  enrollmentId: c.enrollmentId.isNotEmpty
+                      ? c.enrollmentId
+                      : (formB?.enrollmentId ?? ''),
                   gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                   motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  babyUid: c.maternalUid,
+                  babyUid: formB?.babyUid.isNotEmpty == true
+                      ? formB!.babyUid
+                      : c.maternalUid,
                 )))),
-          _buildActionTile(ctx, 'Helper Form — FiO2 / AUC', Icons.air_rounded, hasEnrollment,
+          _buildActionTile(ctx, 'Helper Form — FiO2 / AUC', Icons.air_rounded, helpersEnabled,
             () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperFiO2AUC(
-                  enrollmentId: c.enrollmentId,
+                  enrollmentId: c.enrollmentId.isNotEmpty
+                      ? c.enrollmentId
+                      : (formB?.enrollmentId ?? ''),
                   gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                   motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  babyUid: c.maternalUid,
+                  babyUid: formB?.babyUid.isNotEmpty == true
+                      ? formB!.babyUid
+                      : c.maternalUid,
                 )))),
-          if (!hasEnrollment) Padding(
+          Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-            child: Text('Helper Forms unlock after Form B is randomized (enrollment ID assigned).',
-                style: TextStyle(color: _kText3, fontSize: 11)),
+            child: Text(
+              !formBDone
+                  ? 'Complete Form B first — other forms stay locked.'
+                  : (needsFormC && !formCDone)
+                      ? 'Form B saved — open Form C next. Other forms stay locked until Form C is submitted.'
+                      : formCDone
+                          ? 'Form C submitted — helper forms are unlocked.'
+                          : 'Form B complete — no Form C required for this case.',
+              style: const TextStyle(color: _kText3, fontSize: 11),
+            ),
           ),
           const SizedBox(height: 8),
         ]),
@@ -532,11 +628,141 @@ Widget _buildActionTile(BuildContext ctx, String label, IconData icon, bool enab
   );
 }
 
+/// Lists previously saved forms and opens them in read-only mode.
+Future<void> showFilledFormsSheet(
+  BuildContext context,
+  CRF c, {
+  FormB? formB,
+  FormC? formC,
+}) async {
+  final formBDone = formB != null;
+  final formCDone = formC != null;
+  if (!formBDone && !formCDone) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('No filled forms yet for this patient.')),
+    );
+    return;
+  }
+  if (!context.mounted) return;
+  showModalBottomSheet(
+    context: context,
+    backgroundColor: _kSurface,
+    shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+    builder: (ctx) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Previously filled forms',
+                  style: TextStyle(
+                      color: _kText1, fontWeight: FontWeight.w800, fontSize: 15)),
+            ),
+          ),
+          const Divider(height: 20),
+          if (formBDone)
+            ListTile(
+              leading: const Icon(Icons.child_care_rounded, color: _kPrimary),
+              title: const Text('Form B — Birth & Resuscitation',
+                  style: TextStyle(
+                      color: _kText1, fontWeight: FontWeight.w600, fontSize: 13)),
+              trailing: TextButton.icon(
+                icon: const Icon(Icons.visibility_rounded, size: 16),
+                label: const Text('View'),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => FormBBirthResuscitation(
+                        screeningId: c.screeningId,
+                        maternalUid: c.maternalUid,
+                        motherName:
+                            '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                        motherPhone: c.motherPhone,
+                        husbandPhone: c.husbandPhone,
+                        gestWeeks: c.gestationWeeks,
+                        gestDays: c.gestationDays,
+                        siteId: c.siteId,
+                        viewOnly: true,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          if (formCDone)
+            ListTile(
+              leading: const Icon(Icons.monitor_heart_rounded, color: _kPrimary),
+              title: const Text('Form C — Resuscitation Details',
+                  style: TextStyle(
+                      color: _kText1, fontWeight: FontWeight.w600, fontSize: 13)),
+              trailing: TextButton.icon(
+                icon: const Icon(Icons.visibility_rounded, size: 16),
+                label: const Text('View'),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => FormCResuscitationDetails(
+                        screeningId: c.screeningId,
+                        gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
+                        motherName:
+                            '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                        babyUid: formB?.babyUid.isNotEmpty == true
+                            ? formB!.babyUid
+                            : c.maternalUid,
+                        formB: formB,
+                        viewOnly: true,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          const SizedBox(height: 8),
+        ]),
+      ),
+    ),
+  );
+}
+
+Future<void> exportPatientPdf(BuildContext context, CRF c) async {
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const Center(child: CircularProgressIndicator(color: _kPrimary)),
+  );
+  try {
+    final api = ApiService();
+    final formB = await api.loadFormB(c.screeningId);
+    final formC = await api.loadFormC(c.screeningId);
+    final File file = (formB != null && formC != null)
+        ? await PdfService.generateFullTrialPdf(crf: c, formB: formB, formC: formC)
+        : await PdfService.generateCrfPdf(c);
+    if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+    await OpenFilex.open(file.path);
+  } catch (e) {
+    if (context.mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('PDF error: $e'), backgroundColor: _kDanger),
+      );
+    }
+  }
+}
+
 // ── NURSE: full "Patients" tab — every patient at this site, searchable and
 // filterable, with the same actions menu available from the Home tab.
 class _NursePatientsPage extends StatefulWidget {
   final UserProfile user;
-  const _NursePatientsPage({required this.user});
+  final ValueNotifier<String>? filterNotifier;
+  const _NursePatientsPage({required this.user, this.filterNotifier});
   @override
   State<_NursePatientsPage> createState() => _NursePatientsPageState();
 }
@@ -547,19 +773,32 @@ class _NursePatientsPageState extends State<_NursePatientsPage> with RouteAware 
   String _query = '';
   String _filter = 'All'; // All / Enrolled / Excluded / Incomplete
 
-  @override void initState() { super.initState(); _load(); }
+  @override void initState() {
+    super.initState();
+    _filter = widget.filterNotifier?.value ?? 'All';
+    widget.filterNotifier?.addListener(_onExternalFilter);
+    _load();
+  }
+  void _onExternalFilter() {
+    final next = widget.filterNotifier?.value ?? 'All';
+    if (next != _filter && mounted) setState(() => _filter = next);
+  }
   @override void didChangeDependencies() {
     super.didChangeDependencies();
     routeObserver.subscribe(this, ModalRoute.of(context)! as PageRoute);
   }
-  @override void dispose() { routeObserver.unsubscribe(this); super.dispose(); }
+  @override void dispose() {
+    widget.filterNotifier?.removeListener(_onExternalFilter);
+    routeObserver.unsubscribe(this);
+    super.dispose();
+  }
   @override void didPopNext() => _load();
 
   Future<void> _load() async {
     setState(() => _loading = true);
     final crfs = await fetchPatientCrfs();
     if (!mounted) return;
-    setState(() { _all = crfs.reversed.toList(); _loading = false; });
+    setState(() { _all = crfs; _loading = false; });
   }
 
   List<CRF> get _filtered {
@@ -587,7 +826,10 @@ class _NursePatientsPageState extends State<_NursePatientsPage> with RouteAware 
             fontSize: 11.5, fontWeight: FontWeight.w700,
             color: selected ? Colors.white : color)),
         selected: selected,
-        onSelected: (_) => setState(() => _filter = label),
+        onSelected: (_) {
+          setState(() => _filter = label);
+          widget.filterNotifier?.value = label;
+        },
         selectedColor: color,
         backgroundColor: color.withOpacity(0.10),
         side: BorderSide(color: color.withOpacity(selected ? 0 : 0.3)),
@@ -690,29 +932,45 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
     // ── Load drafts from local SharedPreferences ───────────────────────
     final prefs = await SharedPreferences.getInstance();
     final keys  = prefs.getStringList('screening_draft_keys') ?? [];
+
+    // Screening IDs already on the server (web + mobile share this list).
+    // Used to drop stale local drafts for cases that are already complete online.
+    Set<String> serverIds = {};
+    try {
+      final patients = await ScreeningApiService.instance.getPatients(limit: 200);
+      serverIds = patients
+          .map((p) => p['screening_id']?.toString() ?? '')
+          .where((s) => s.isNotEmpty)
+          .toSet();
+    } catch (_) {}
+
     final drafts = <Map<String,dynamic>>[];
     final vkeys  = <String>[];
     for (final k in keys) {
       final raw = prefs.getString(k); if (raw==null) continue;
       final d = jsonDecode(raw) as Map<String,dynamic>;
       final sid = d['screeningId'] as String? ?? '';
+      final consent = (d['consentStatus'] ?? '').toString().trim();
+      final consentDone = consent.isNotEmpty && consent != 'Select';
+      final onServer = sid.isNotEmpty && serverIds.contains(sid);
+      // Same case already perfect on web → don't keep a ghost "Draft" card.
+      if (onServer && consentDone) {
+        await prefs.remove(k);
+        continue;
+      }
       vkeys.add(k);
       drafts.add({'key':k,'screeningId':sid.isEmpty?'Draft':sid,
-          'motherName':'${d['motherFirstName']??''} ${d['motherSurname']??''}'});
+          'motherName':'${d['motherFirstName']??d['motherFirst']??''} ${d['motherSurname']??''}'});
     }
     await prefs.setStringList('screening_draft_keys', vkeys);
 
     // ── Load patients from BACKEND (site-isolated), PII merged in ──────
-    // Home only ever shows the 5 most recent patients — fetching real PII
-    // for the entire site's patient list here was the main reason this
-    // screen got slower as the site grew. Limit it to the 5 that actually
-    // get rendered; the "enrolled"/"excluded" counts below don't need PII
-    // at all (they're computed from screening_status/consent_given, which
-    // come from the de-identified list already).
+    // Home only ever shows the 5 most recent patients — API is newest-first,
+    // so piiLimit: 5 loads names for the top of the list.
     final crfs = await fetchPatientCrfs(piiLimit: 5);
 
     if (!mounted) return;
-    setState(() { _crfs=crfs.reversed.toList(); _drafts=drafts; _loading=false; });
+    setState(() { _crfs=crfs; _drafts=drafts; _loading=false; });
 
     // ── Load stats from backend ────────────────────────────────────────
     try {
@@ -782,13 +1040,16 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
           ),
           const SizedBox(height:18),
           Row(children: [
-            _st('Total',_total>0?_total:_crfs.length,_kPrimary,Icons.people_alt_rounded),
+            _st('Total',_total>0?_total:_crfs.length,_kPrimary,Icons.people_alt_rounded,
+                () => widget.onOpenPatients(filter: 'All')),
             const SizedBox(width:10),
-            _st('Enrolled',_enrolled2>0?_enrolled2:enrolled,_kSuccess,Icons.check_circle_rounded),
+            _st('Enrolled',_enrolled2>0?_enrolled2:enrolled,_kSuccess,Icons.check_circle_rounded,
+                () => widget.onOpenPatients(filter: 'Enrolled')),
             const SizedBox(width:10),
-            _st('Excluded',_excluded2>0?_excluded2:excluded,_kDanger,Icons.block_rounded),
+            _st('Excluded',_excluded2>0?_excluded2:excluded,_kDanger,Icons.block_rounded,
+                () => widget.onOpenPatients(filter: 'Excluded')),
             const SizedBox(width:10),
-            _st('Drafts',_drafts.length,_kWarning,Icons.pending_rounded),
+            _st('Drafts',_drafts.length,_kWarning,Icons.pending_rounded, _showDraftsSheet),
           ]),
           const SizedBox(height:20),
           const Text('Quick actions', style:TextStyle(fontSize:14,
@@ -799,11 +1060,11 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
                 ()=>Navigator.push(context,MaterialPageRoute(
                     builder:(_)=>const ScreeningForm(loadDraft:false)))),
             const SizedBox(width:10),
-            _ac(Icons.pending_actions_rounded,'My\nDrafts',_kWarning,(){}),
+            _ac(Icons.pending_actions_rounded,'My\nDrafts',_kWarning, _showDraftsSheet),
             const SizedBox(width:10),
-            _ac(Icons.calendar_today_rounded,'Visit\nSchedule',_kSuccess,(){}),
+            _ac(Icons.calendar_today_rounded,'Visit\nSchedule',_kSuccess, _showVisitSchedule),
             const SizedBox(width:10),
-            _ac(Icons.picture_as_pdf_rounded,'Export\nPDF',_kDanger,(){}),
+            _ac(Icons.picture_as_pdf_rounded,'Export\nPDF',_kDanger, _showExportPdfPicker),
           ]),
           const SizedBox(height:22),
           if (_drafts.isNotEmpty) ...[
@@ -830,9 +1091,304 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
   String _g(){ final h=DateTime.now().hour;
     if(h<12)return 'morning'; if(h<17)return 'afternoon'; return 'evening'; }
 
-  Widget _st(String l,int v,Color c,IconData i) => Expanded(child:Container(
+  Future<void> _showDraftsSheet() async {
+    if (_drafts.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('No drafts yet. Start a new screening to create one.'),
+      ));
+      return;
+    }
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: _kSurface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(children: [
+              const Icon(Icons.pending_actions_rounded, color: _kWarning, size: 20),
+              const SizedBox(width: 8),
+              Text('My Drafts (${_drafts.length})',
+                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: _kText1)),
+            ]),
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(ctx).size.height * 0.55,
+              ),
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: _drafts.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
+                itemBuilder: (_, i) {
+                  final d = _drafts[i];
+                  final name = (d['motherName'] as String? ?? '').trim();
+                  return ListTile(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: const BorderSide(color: _kBorder),
+                    ),
+                    leading: const Icon(Icons.description_outlined, color: _kWarning),
+                    title: Text('${d['screeningId']}',
+                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: _kText1)),
+                    subtitle: Text(name.isEmpty ? 'No name entered yet' : name,
+                        style: const TextStyle(fontSize: 11, color: _kText3)),
+                    trailing: const Text('Resume',
+                        style: TextStyle(color: _kWarning, fontWeight: FontWeight.w700, fontSize: 12)),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      await Navigator.push(context, MaterialPageRoute(
+                        builder: (_) => ScreeningForm(loadDraft: true, draftKey: d['key']),
+                      ));
+                      await _load();
+                    },
+                  );
+                },
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showVisitSchedule() async {
+    // Fetch fuller list — Home only keeps top-5 in memory for speed.
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator(color: _kPrimary)),
+    );
+    List<CRF> all;
+    try {
+      all = await fetchPatientCrfs(piiLimit: 40);
+    } catch (_) {
+      all = _crfs;
+    }
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    // Work queue: drafts + patients needing Form B + enrolled follow-ups.
+    final needFormB = all.where((c) {
+      final consent = c.consentStatus.trim().toLowerCase();
+      return !_isExcluded(c) &&
+          c.enrollmentId.isEmpty &&
+          (consent == 'yes' || consent.contains('trial'));
+    }).take(15).toList();
+    final enrolled = all.where(_isEnrolled).take(10).toList();
+
+    if (!mounted) return;
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: _kSurface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(ctx).size.height * 0.7,
+            ),
+            child: ListView(shrinkWrap: true, children: [
+              const Row(children: [
+                Icon(Icons.calendar_today_rounded, color: _kSuccess, size: 20),
+                SizedBox(width: 8),
+                Text('Visit Schedule',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: _kText1)),
+              ]),
+              const SizedBox(height: 4),
+              const Text('Pending work at your site',
+                  style: TextStyle(fontSize: 11.5, color: _kText3)),
+              const SizedBox(height: 14),
+              if (_drafts.isEmpty && needFormB.isEmpty && enrolled.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 28),
+                  child: Center(child: Text('Nothing pending right now',
+                      style: TextStyle(color: _kText3, fontSize: 13))),
+                ),
+              if (_drafts.isNotEmpty) ...[
+                const Text('Drafts to resume',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: _kText1)),
+                const SizedBox(height: 8),
+                ..._drafts.map((d) {
+                  final name = (d['motherName'] as String? ?? '').trim();
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.pending_actions_rounded, color: _kWarning),
+                    title: Text('${d['screeningId']}',
+                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+                    subtitle: Text(name.isEmpty ? 'Draft screening' : name,
+                        style: const TextStyle(fontSize: 11, color: _kText3)),
+                    trailing: const Icon(Icons.chevron_right_rounded, color: _kText3),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      await Navigator.push(context, MaterialPageRoute(
+                        builder: (_) => ScreeningForm(loadDraft: true, draftKey: d['key']),
+                      ));
+                      await _load();
+                    },
+                  );
+                }),
+                const SizedBox(height: 10),
+              ],
+              if (needFormB.isNotEmpty) ...[
+                const Text('Ready for Form B',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: _kText1)),
+                const SizedBox(height: 8),
+                ...needFormB.map((c) => ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.child_care_rounded, color: _kPrimary),
+                      title: Text(
+                        '${c.motherFirstName} ${c.motherSurname}'.trim().isEmpty
+                            ? c.screeningId
+                            : '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                      ),
+                      subtitle: Text('${c.screeningId} · consent obtained',
+                          style: const TextStyle(fontSize: 11, color: _kText3)),
+                      trailing: const Icon(Icons.chevron_right_rounded, color: _kText3),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        showPatientActionsSheet(context, c);
+                      },
+                    )),
+                const SizedBox(height: 10),
+              ],
+              if (enrolled.isNotEmpty) ...[
+                const Text('Enrolled — continue forms',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: _kText1)),
+                const SizedBox(height: 8),
+                ...enrolled.map((c) => ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.check_circle_rounded, color: _kSuccess),
+                      title: Text(
+                        '${c.motherFirstName} ${c.motherSurname}'.trim().isEmpty
+                            ? c.screeningId
+                            : '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                      ),
+                      subtitle: Text('${c.screeningId} · enrolled',
+                          style: const TextStyle(fontSize: 11, color: _kText3)),
+                      trailing: const Icon(Icons.chevron_right_rounded, color: _kText3),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        showPatientActionsSheet(context, c);
+                      },
+                    )),
+              ],
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  widget.onOpenPatients(filter: 'All');
+                },
+                child: const Text('Open all patients',
+                    style: TextStyle(fontWeight: FontWeight.w700)),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showExportPdfPicker() async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator(color: _kPrimary)),
+    );
+    List<CRF> all;
+    try {
+      all = await fetchPatientCrfs(piiLimit: 40);
+    } catch (_) {
+      all = _crfs;
+    }
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    if (all.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('No patients to export yet.'),
+      ));
+      return;
+    }
+
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: _kSurface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Row(children: [
+              Icon(Icons.picture_as_pdf_rounded, color: _kDanger, size: 20),
+              SizedBox(width: 8),
+              Text('Export PDF',
+                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: _kText1)),
+            ]),
+            const SizedBox(height: 4),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Choose a patient to generate their CRF PDF',
+                  style: TextStyle(fontSize: 11.5, color: _kText3)),
+            ),
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(ctx).size.height * 0.55,
+              ),
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: all.length.clamp(0, 40),
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (_, i) {
+                  final c = all[i];
+                  final name = '${c.motherFirstName} ${c.motherSurname}'.trim();
+                  return ListTile(
+                    leading: const Icon(Icons.picture_as_pdf_outlined, color: _kDanger),
+                    title: Text(name.isEmpty ? c.screeningId : name,
+                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: _kText1)),
+                    subtitle: Text(c.screeningId,
+                        style: const TextStyle(fontSize: 11, color: _kText3)),
+                    trailing: const Icon(Icons.download_rounded, color: _kText3, size: 18),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      await exportPatientPdf(context, c);
+                    },
+                  );
+                },
+              ),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                widget.onOpenPatients(filter: 'All');
+              },
+              child: const Text('Browse all patients',
+                  style: TextStyle(fontWeight: FontWeight.w700)),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _st(String l,int v,Color c,IconData i, VoidCallback onTap) => Expanded(child:
+    Material(color:_kSurface, borderRadius:BorderRadius.circular(16),
+      child:InkWell(onTap:onTap, borderRadius:BorderRadius.circular(16),
+        child:Container(
     padding:const EdgeInsets.fromLTRB(11,12,11,12),
-    decoration:BoxDecoration(color:_kSurface,
+    decoration:BoxDecoration(
         borderRadius:BorderRadius.circular(16),
         boxShadow:[BoxShadow(color:c.withOpacity(0.12),
             blurRadius:10, offset:const Offset(0,4))]),
@@ -850,7 +1406,7 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
       Text(l,style:const TextStyle(color:_kText3,fontSize:9,
           fontWeight:FontWeight.w600)),
     ]),
-  ));
+  ))));
 
   Widget _ac(IconData i,String l,Color c,VoidCallback t) => Expanded(child:
     Material(color:_kSurface, borderRadius:BorderRadius.circular(16),

@@ -11,11 +11,39 @@ import '../../models/user.dart';
 import '../../providers/auth_provider.dart';
 import '../profile_screen.dart';
 
+/// Lets child pages switch the bottom-nav tab (e.g. Home → Patients).
+class DashboardNavigator extends InheritedWidget {
+  final int currentIndex;
+  final void Function(int index) goToTab;
+
+  const DashboardNavigator({
+    super.key,
+    required this.currentIndex,
+    required this.goToTab,
+    required super.child,
+  });
+
+  static DashboardNavigator? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<DashboardNavigator>();
+
+  static DashboardNavigator of(BuildContext context) {
+    final nav = maybeOf(context);
+    assert(nav != null, 'DashboardNavigator not found in context');
+    return nav!;
+  }
+
+  @override
+  bool updateShouldNotify(DashboardNavigator oldWidget) =>
+      currentIndex != oldWidget.currentIndex;
+}
+
 class DashboardShell extends StatefulWidget {
   final UserProfile user;
   final List<Widget> pages;
   final List<BottomNavigationBarItem> navItems;
   final Widget? fab;
+  /// Optional external tab index control (e.g. nurse Home → Patients).
+  final ValueNotifier<int>? tabIndex;
 
   const DashboardShell({
     super.key,
@@ -23,6 +51,7 @@ class DashboardShell extends StatefulWidget {
     required this.pages,
     required this.navItems,
     this.fab,
+    this.tabIndex,
   });
 
   @override
@@ -52,6 +81,25 @@ class _DashboardShellState extends State<DashboardShell> {
     super.initState();
     _secondsLeft = _sessionMinutes * 60;
     _startCountdown();
+    widget.tabIndex?.addListener(_onExternalTab);
+    if (widget.tabIndex != null) {
+      _idx = widget.tabIndex!.value.clamp(0, widget.pages.length - 1);
+    }
+  }
+
+  void _onExternalTab() {
+    final next = widget.tabIndex?.value;
+    if (next == null || !mounted) return;
+    final clamped = next.clamp(0, widget.pages.length - 1);
+    if (clamped != _idx) setState(() => _idx = clamped);
+  }
+
+  void _goToTab(int index) {
+    final clamped = index.clamp(0, widget.pages.length - 1);
+    if (widget.tabIndex != null) {
+      widget.tabIndex!.value = clamped;
+    }
+    if (clamped != _idx) setState(() => _idx = clamped);
   }
 
   void _startCountdown() {
@@ -68,6 +116,7 @@ class _DashboardShellState extends State<DashboardShell> {
 
   @override
   void dispose() {
+    widget.tabIndex?.removeListener(_onExternalTab);
     _countdownTimer?.cancel();
     super.dispose();
   }
@@ -111,12 +160,16 @@ class _DashboardShellState extends State<DashboardShell> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: _bg,
-      appBar: _buildAppBar(),
-      body: IndexedStack(index: _idx, children: widget.pages),
-      bottomNavigationBar: _buildBottomNav(),
-      floatingActionButton: widget.fab,
+    return DashboardNavigator(
+      currentIndex: _idx,
+      goToTab: _goToTab,
+      child: Scaffold(
+        backgroundColor: _bg,
+        appBar: _buildAppBar(),
+        body: IndexedStack(index: _idx, children: widget.pages),
+        bottomNavigationBar: _buildBottomNav(),
+        floatingActionButton: widget.fab,
+      ),
     );
   }
 
@@ -214,7 +267,7 @@ class _DashboardShellState extends State<DashboardShell> {
   BottomNavigationBar _buildBottomNav() {
     return BottomNavigationBar(
       currentIndex: _idx,
-      onTap: (i) => setState(() => _idx = i),
+      onTap: _goToTab,
       backgroundColor: _surface,
       selectedItemColor: _primary,
       unselectedItemColor: _text3,

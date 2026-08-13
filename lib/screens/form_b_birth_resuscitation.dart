@@ -17,6 +17,8 @@ class FormBBirthResuscitation extends StatefulWidget {
   final int gestWeeks;
   final int gestDays;
   final String siteId;
+  /// When true, form is read-only (previously filled review).
+  final bool viewOnly;
 
   const FormBBirthResuscitation({
     super.key,
@@ -28,6 +30,7 @@ class FormBBirthResuscitation extends StatefulWidget {
     required this.gestWeeks,
     required this.gestDays,
     required this.siteId,
+    this.viewOnly = false,
   });
 
   @override
@@ -179,16 +182,19 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       _showMsg("Please select respiratory effort status"); return;
     }
     if (_poorMuscleTone == null) { _showMsg("Please select muscle tone status"); return; }
-    if (_hrAbove100 == null) { _showMsg("Please select heart rate > 100 status"); return; }
+    if (_hrAbove100 == null) { _showMsg("Please select HR < 100 status"); return; }
+    if (_initialStepsRequired == null) {
+      _showMsg("Please select initial steps status"); return;
+    }
     if (_requiredResuscitation == null) {
-      _showMsg("Please select resuscitation requirement"); return;
+      _showMsg("Please select whether baby requires ventilation (PPV)"); return;
     }
 
-    if (_requiredResuscitation == false) {
-      _showParticipationEndedDialog(); return;
+    // Build shared B1–B3 payload for ALL exits (including end-participation).
+    // Backend requires enrollment_id — only randomised cases sync to server.
+    if (_requiredResuscitation == true && _randomized == null) {
+      _showMsg("Please select randomization status"); return;
     }
-
-    if (_randomized == null) { _showMsg("Please select randomization status"); return; }
     if (_randomized == false && _notRandomizedReason == null) {
       _showMsg("Please select reason for not randomizing"); return;
     }
@@ -199,17 +205,23 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       if (_blenderCode == null || _blenderCode!.isEmpty) {
         _showMsg("Please select blender code"); return;
       }
-      if (_enrollmentNumberCtrl.text.length != 3) {
+      if (_enrollmentNumberCtrl.text.trim().isEmpty) {
+        _showMsg("Please enter enrollment number"); return;
+      }
+      if (_enrollmentNumberCtrl.text.trim().length != 3) {
         _showMsg("Enrollment number must be exactly 3 digits"); return;
       }
     }
 
-    final enrollmentId =
-        "${widget.siteId}-${_blenderCode ?? ''}-${_enrollmentNumberCtrl.text.padLeft(3, '0')}";
+    final enrollmentId = _randomized == true
+        ? "${widget.siteId}-${_blenderCode ?? ''}-${_enrollmentNumberCtrl.text.padLeft(3, '0')}"
+        : null;
 
-    // Build the SHARED birth-resuscitation payload (B1–B3 portion).
-    // Form C mounts the same object next and fills B4–B6, so both screens
-    // upsert into the ONE backend row keyed by enrollment_id.
+    String? randDateIso;
+    if (_randomized == true && _randomizationDateCtrl.text.trim().isNotEmpty) {
+      randDateIso = _toIsoDate(_randomizationDateCtrl.text.trim());
+    }
+
     final shared = BirthResuscitationData()
       ..screeningId           = widget.screeningId
       ..enrollmentId          = enrollmentId
@@ -233,12 +245,6 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       ..vaginalDeliveryType   = _delivery == "Vaginal" ? _vaginalType : null
       ..lscsType              = _delivery == "LSCS"    ? _lscsType    : null
       ..indicationForDelivery = List<String>.from(_indications)
-      ..indicationEdfDetail   = _indications.contains("Absent/Reversed EDF")
-                                  ? _edfDetailCtrl.text.trim() : null
-      ..fetalIndicationDetail = _indications.contains("Fetal indication")
-                                  ? _fetalDetailCtrl.text.trim() : null
-      ..obstetricIndicationDetail = _indications.contains("Obstetric indication")
-                                  ? _obstetricDetailCtrl.text.trim() : null
       ..indicationForDeliveryOther = _indications.contains("Other")
                                   ? _indicationOtherCtrl.text.trim() : null
       ..poorRespEfforts       = _poorRespiratoryEffort
@@ -246,17 +252,15 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       ..hrAbove100            = _hrAbove100
       ..initialSteps          = _initialStepsRequired
       ..requiredResuscitation = _requiredResuscitation
-      ..randomised            = _randomized
-      ..randomisationDate     = _randomizationDateCtrl.text.trim().isEmpty
-                                  ? null : _randomizationDateCtrl.text.trim()
-      ..strata                = _strata
+      ..ppvRequired           = _requiredResuscitation == true ? true : null
+      ..randomised            = _requiredResuscitation == true ? _randomized : null
+      ..randomisationDate     = randDateIso
+      ..strata                = _randomized == true ? _strata : null
       ..enrollmentReasonNotRandomized      = _randomized == false
                                   ? _notRandomizedReason : null
       ..enrollmentReasonNotRandomizedOther = _notRandomizedReason == "Other"
                                   ? _notRandomizedOtherCtrl.text.trim() : null;
 
-    // Legacy local-cache save (SharedPreferences) kept so existing offline
-    // flow keeps working while both screens migrate to the shared model.
     final formB = FormB(
       screeningId          : widget.screeningId,
       babyUid              : _babyUidCtrl.text,
@@ -269,23 +273,40 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       gender               : _gender ?? "",
       requiredResuscitation: _requiredResuscitation ?? false,
       randomized           : _randomized ?? false,
-      enrollmentId         : enrollmentId,
+      enrollmentId         : enrollmentId ?? "",
       poorRespiratoryEffort: _poorRespiratoryEffort,
       poorMuscleTone       : _poorMuscleTone,
       initialStepsRequired : _initialStepsRequired,
     );
     await ApiService().saveFormB(formB);
 
-    // Save to backend using the SHARED payload (matches web BirthResuscitationForm)
-    try {
-      await FormsApiService.instance
-          .saveBirthResuscitation(shared.toJson());
-    } catch (e) {
-      debugPrint('Birth-resuscitation backend save failed: $e');
+    // Server sync only when enrollment_id exists (backend requires it).
+    if (enrollmentId != null && enrollmentId.isNotEmpty) {
+      try {
+        await FormsApiService.instance.saveBirthResuscitation(shared.toJson());
+      } catch (e) {
+        if (!mounted) return;
+        _showMsg("Save failed — check connection and try again. ($e)");
+        return;
+      }
+    }
+
+    if (_requiredResuscitation == false) {
+      _showParticipationEndedDialog();
+      return;
+    }
+
+    if (_randomized == false) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text("Form B saved locally (not randomised — server sync needs enrollment ID)"),
+        backgroundColor: AppTheme.of(context).warning,
+      ));
+      Navigator.of(context).pop(true);
+      return;
     }
 
     if (!mounted) return;
-
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -300,7 +321,11 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           shared     : shared,
         ),
       ),
-    );
+    ).then((result) {
+      if (result == true && mounted) {
+        Navigator.of(context).pop(true);
+      }
+    });
   }
 
   /// Parses the DOB display text ("DD/MM/YY") back to a DateTime for the
@@ -315,6 +340,23 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     if (d == null || m == null || yy == null) return null;
     final year = yy < 100 ? 2000 + yy : yy;
     return DateTime(year, m, d);
+  }
+
+  /// Accepts D/M/YYYY or DD/MM/YYYY (or already ISO) → YYYY-MM-DD for web date inputs.
+  String? _toIsoDate(String s) {
+    final t = s.trim();
+    if (t.isEmpty) return null;
+    if (RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(t)) return t;
+    final parts = t.split(RegExp(r'[/-]'));
+    if (parts.length != 3) return t;
+    final d = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    final y = int.tryParse(parts[2]);
+    if (d == null || m == null || y == null) return t;
+    final year = y < 100 ? 2000 + y : y;
+    return '${year.toString().padLeft(4, '0')}-'
+        '${m.toString().padLeft(2, '0')}-'
+        '${d.toString().padLeft(2, '0')}';
   }
 
   void _showMsg(String msg) {
@@ -746,7 +788,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     return Scaffold(
       backgroundColor: c.bg,
       appBar: _buildAppBar(c),
-      bottomNavigationBar: _buildBottomBar(c),
+      bottomNavigationBar: widget.viewOnly ? null : _buildBottomBar(c),
       body: Container(
         decoration: BoxDecoration(
           gradient: LinearGradient(
@@ -756,12 +798,37 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
             stops: const [0.0, 0.35],
           ),
         ),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
-          child: Form(
-            key: _formKey,
-            child: Column(children: [
-              _buildIdentificationSection(c),
+        child: AbsorbPointer(
+          absorbing: widget.viewOnly,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+            child: Form(
+              key: _formKey,
+              child: Column(children: [
+                if (widget.viewOnly) ...[
+                  Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 14),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: c.primarySoft,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: c.primary.withOpacity(0.35)),
+                    ),
+                    child: Row(children: [
+                      Icon(Icons.visibility_rounded, color: c.primary, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text("View only — previously filled Form B",
+                            style: TextStyle(
+                                color: c.primary,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13)),
+                      ),
+                    ]),
+                  ),
+                ],
+                _buildIdentificationSection(c),
               _buildBirthDetailsSection(c),
               _buildConditionSection(c),
               if (_requiredResuscitation == false) _buildEndParticipationBanner(c),
@@ -769,6 +836,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
               const SizedBox(height: 20),
             ]),
           ),
+        ),
         ),
       ),
     );
@@ -857,17 +925,17 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       c          : c,
       children   : [
         Row(children: [
-          Expanded(child: _infoTile("Screening ID", widget.screeningId, c)),
+          Expanded(child: _infoTile("1. Screening ID", widget.screeningId, c)),
           const SizedBox(width: 10),
-          Expanded(child: _infoTile("Maternal UID", widget.maternalUid, c)),
+          Expanded(child: _infoTile("2. Maternal UID", widget.maternalUid, c)),
         ]),
         const SizedBox(height: 10),
-        _infoTile("Mother's Name", widget.motherName, c),
+        _infoTile("3. Mother's First Name", widget.motherName, c),
         const SizedBox(height: 10),
         Row(children: [
-          Expanded(child: _infoTile("Mother Phone",  widget.motherPhone,  c)),
+          Expanded(child: _infoTile("5. Mobile No. — Mother",  widget.motherPhone,  c)),
           const SizedBox(width: 10),
-          Expanded(child: _infoTile("Husband Phone", widget.husbandPhone, c)),
+          Expanded(child: _infoTile("5. Mobile No. — Husband", widget.husbandPhone, c)),
         ]),
 
         const SizedBox(height: 18),
@@ -893,9 +961,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           onChanged: (v) =>
               setState(() => _babyUidMaxReached = v.length == 12),
           validator: (v) {
-            if (v != null && v.trim().isNotEmpty && v.length != 12) {
-              return "Baby UID must be exactly 12 digits";
-            }
+            if (v == null || v.trim().isEmpty) return "Required";
+            if (v.length != 12) return "Baby UID must be exactly 12 digits";
             return null;
           },
         ),
@@ -903,7 +970,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
         TextFormField(
           controller: _babyAdmissionCtrl,
-          decoration: _input("6. Baby Admission No (optional)", c),
+          decoration: _input("6. Baby Admission No.", c),
           style: TextStyle(color: c.textPrimary),
         ),
         const SizedBox(height: 12),
@@ -912,7 +979,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           controller: _babyAnnualNumberCtrl,
           keyboardType: TextInputType.number,
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          decoration: _input("7. Baby Annual Number (REDCap)", c),
+          decoration: _input("7. Baby Annual No.", c),
           style: TextStyle(color: c.textPrimary),
         ),
       ],
@@ -929,8 +996,13 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       c          : c,
       children   : [
         _infoTile(
-            "Gestation",
-            "${widget.gestWeeks} wks ${widget.gestDays} days",
+            "11. Gestation at Screening (auto)",
+            "${widget.gestWeeks}w ${widget.gestDays}d",
+            c),
+        const SizedBox(height: 10),
+        _infoTile(
+            "12. Gestation at Randomization (auto)",
+            "${widget.gestWeeks}w ${widget.gestDays}d",
             c),
         const SizedBox(height: 16),
 
@@ -942,14 +1014,14 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
             FilteringTextInputFormatter.digitsOnly,
             LengthLimitingTextInputFormatter(4),
           ],
-          decoration: _input("13. Birth Weight (grams) *", c),
+          decoration: _input("13. Birth Weight (g) *", c),
           style: TextStyle(color: c.textPrimary),
           validator: (v) {
             if (v == null || v.trim().isEmpty) return "Birth weight is required";
             final w = int.tryParse(v);
             if (w == null) return "Enter a valid number";
             if (w < 300)   return "Too low (min 300 g)";
-            if (w > 5000)  return "Too high (max 5000 g)";
+            if (w > 6000)  return "Too high (max 6000 g)";
             return null;
           },
         ),
@@ -1039,9 +1111,10 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           children: [
             "pPROM",
             "PTL",
-            "Absent/Reversed EDF",
-            "Fetal indication",
-            "Obstetric indication",
+            "APH",
+            "Placenta Previa",
+            "PIH",
+            "PE/Imminent Eclampsia",
             "Other",
           ].map((opt) {
             final sel = _indications.contains(opt);
@@ -1063,9 +1136,6 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                   } else {
                     _indications.remove(opt);
                     if (opt == "Other") _indicationOtherCtrl.clear();
-                    if (opt == "Absent/Reversed EDF") _edfDetailCtrl.clear();
-                    if (opt == "Fetal indication") _fetalDetailCtrl.clear();
-                    if (opt == "Obstetric indication") _obstetricDetailCtrl.clear();
                   }
                 });
               },
@@ -1077,47 +1147,11 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
               padding: const EdgeInsets.only(top: 4),
               child: Text("Select at least one indication",
                   style: TextStyle(color: c.danger, fontSize: 11))),
-        if (_indications.contains("Absent/Reversed EDF")) ...[
-          const SizedBox(height: 10),
-          TextFormField(
-            controller: _edfDetailCtrl,
-            decoration: _input("18. Absent/Reversed EDF — details *", c),
-            style: TextStyle(color: c.textPrimary),
-            validator: (v) => (_indications.contains("Absent/Reversed EDF") &&
-                    (v == null || v.trim().isEmpty))
-                ? "Required"
-                : null,
-          ),
-        ],
-        if (_indications.contains("Fetal indication")) ...[
-          const SizedBox(height: 10),
-          TextFormField(
-            controller: _fetalDetailCtrl,
-            decoration: _input("18. Fetal indication — details *", c),
-            style: TextStyle(color: c.textPrimary),
-            validator: (v) => (_indications.contains("Fetal indication") &&
-                    (v == null || v.trim().isEmpty))
-                ? "Required"
-                : null,
-          ),
-        ],
-        if (_indications.contains("Obstetric indication")) ...[
-          const SizedBox(height: 10),
-          TextFormField(
-            controller: _obstetricDetailCtrl,
-            decoration: _input("18. Obstetric indication — details *", c),
-            style: TextStyle(color: c.textPrimary),
-            validator: (v) => (_indications.contains("Obstetric indication") &&
-                    (v == null || v.trim().isEmpty))
-                ? "Required"
-                : null,
-          ),
-        ],
         if (_indications.contains("Other")) ...[
           const SizedBox(height: 10),
           TextFormField(
             controller: _indicationOtherCtrl,
-            decoration: _input("18. Specify other indication *", c),
+            decoration: _input("Specify other indication *", c),
             style: TextStyle(color: c.textPrimary),
             validator: (v) {
               if (_indications.contains("Other") &&
@@ -1144,7 +1178,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
         if (_delivery == "Vaginal")
           _pillRadio(
-            title    : "16. Type of Vaginal Delivery *",
+            title    : "16. Vaginal Delivery Type *",
             options  : const ["Spontaneous", "Augmented", "Induced"],
             value    : _vaginalType,
             onChanged: (v) => setState(() => _vaginalType = v),
@@ -1154,7 +1188,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
         if (_delivery == "LSCS")
           _pillRadio(
-            title    : "17. Type of LSCS *",
+            title    : "17. LSCS Type *",
             options  : const ["Emergency", "Elective"],
             value    : _lscsType,
             onChanged: (v) => setState(() => _lscsType = v),
@@ -1179,7 +1213,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   Widget _buildConditionSection(AppColors c) {
     return _sectionCard(
-      title      : "CONDITION AT BIRTH",
+      title      : "CONDITION AT BIRTH & RANDOMIZATION",
       icon       : Icons.monitor_heart_rounded,
       accentColor: c.warning,
       c          : c,
@@ -1204,8 +1238,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       children: _conditionExpanded
           ? [
               _boolChoiceChip(
-                title     : "19. Respiratory Effort",
-                trueLabel : "Absent / Poor",
+                title     : "19. Respiratory effort",
+                trueLabel : "Absent/poor",
                 falseLabel: "Normal",
                 value     : _poorRespiratoryEffort,
                 onChanged : (v) =>
@@ -1215,8 +1249,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 c         : c,
               ),
               _boolChoiceChip(
-                title     : "20. Muscle Tone",
-                trueLabel : "Limp / Poor",
+                title     : "20. Muscle tone",
+                trueLabel : "Limp/poor",
                 falseLabel: "Normal",
                 value     : _poorMuscleTone,
                 onChanged : (v) => setState(() => _poorMuscleTone = v),
@@ -1224,20 +1258,21 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 falseColor: c.success,
                 c         : c,
               ),
+              // CRF asks HR < 100; stored inverted as hr_above_100 (same as web).
               _boolChoiceChip(
-                title     : "21. Heart Rate > 100",
-                trueLabel : "Yes",
-                falseLabel: "No",
-                value     : _hrAbove100,
-                onChanged : (v) => setState(() => _hrAbove100 = v),
-                trueColor : c.success,
-                falseColor: c.danger,
+                title     : "21. HR < 100",
+                trueLabel : "YES",
+                falseLabel: "NO",
+                value     : _hrAbove100 == null ? null : !_hrAbove100!,
+                onChanged : (v) => setState(() => _hrAbove100 = !v),
+                trueColor : c.danger,
+                falseColor: c.success,
                 c         : c,
               ),
               _boolChoiceChip(
-                title     : "22. Initial Steps Required",
+                title     : "22. Initial steps",
                 trueLabel : "Required",
-                falseLabel: "Not Required",
+                falseLabel: "Not required",
                 value     : _initialStepsRequired,
                 onChanged : (v) =>
                     setState(() => _initialStepsRequired = v),
@@ -1246,9 +1281,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 c         : c,
               ),
               _boolChoiceChip(
-                title     : "23. Resuscitation Beyond Initial Steps",
+                title     : "23. Does baby require ventilation (PPV)?",
                 trueLabel : "Required",
-                falseLabel: "Not Required",
+                falseLabel: "Not required",
                 value     : _requiredResuscitation,
                 onChanged : (v) =>
                     setState(() => _requiredResuscitation = v),
@@ -1288,7 +1323,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                     fontWeight: FontWeight.w800,
                     fontSize: 14)),
             const SizedBox(height: 3),
-            Text("No resuscitation beyond initial steps required.",
+            Text("No ventilation (PPV) required — end participation.",
                 style: TextStyle(
                     color: c.danger.withOpacity(0.75), fontSize: 12)),
           ]),

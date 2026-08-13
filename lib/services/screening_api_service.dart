@@ -61,13 +61,44 @@ class ScreeningApiService {
   }
 
   // ── Get all patients for current user's site ──────────────────────────────
-  // FIX: was calling /screening/patients, which doesn't exist on the backend
-  // — every call silently failed and fell back to local-only device storage,
-  // meaning the dashboard never showed real screenings from the server at
-  // all. /screenings/ is the real, working, site-scoped list endpoint.
-  Future<List<Map<String, dynamic>>> getPatients() async {
-    final data = await ApiClient.instance.getList('/screenings/');
+  // Same /screenings/ resource as webforms ViewEntries. Explicit limit so we
+  // are not stuck on the old backend default of 50 (which hid older patients
+  // that still appeared on the website).
+  Future<List<Map<String, dynamic>>> getPatients({
+    int limit = 200,
+    int skip = 0,
+  }) async {
+    final data = await ApiClient.instance.getList(
+      '/screenings/?limit=$limit&skip=$skip',
+    );
     return data.cast<Map<String, dynamic>>();
+  }
+
+  // ── Batch PII for a patient list (1 request instead of N) ─────────────────
+  Future<Map<String, Map<String, dynamic>>> getPiiBatch(
+    List<String> screeningIds,
+  ) async {
+    final ids = screeningIds.where((s) => s.trim().isNotEmpty).toList();
+    if (ids.isEmpty) return {};
+    try {
+      final res = await ApiClient.instance.post(
+        '/pii/batch',
+        body: {'screening_ids': ids},
+      );
+      final raw = res['items'];
+      if (raw is! Map) return {};
+      final out = <String, Map<String, dynamic>>{};
+      raw.forEach((key, value) {
+        if (value is Map) {
+          out[key.toString()] = Map<String, dynamic>.from(value);
+        }
+      });
+      return out;
+    } on ApiException catch (e) {
+      // Older backends without /pii/batch — caller can fall back to per-id.
+      if (e.statusCode == 404 || e.statusCode == 405) rethrow;
+      rethrow;
+    }
   }
 
   // ── Get dashboard stats ───────────────────────────────────────────────────

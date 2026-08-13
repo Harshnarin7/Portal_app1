@@ -3,11 +3,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/crf.dart';
 import '../services/api_service.dart';
 import '../widgets/success_banner.dart';
+import '../widgets/notes_box.dart';
 import '../services/pdf_service.dart';
 import 'form_b_birth_resuscitation.dart';
 import 'package:flutter/foundation.dart';
@@ -15,6 +16,7 @@ import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../services/screening_api_service.dart';
 import '../services/forms_api_service.dart';
+import '../services/api_client.dart';
 import 'dashboard_screen.dart';
 
 // ── Theme ──────────────────────────────────────────────────────────────────
@@ -41,7 +43,7 @@ class ScreeningForm extends StatefulWidget {
 }
 
 class _ScreeningFormState extends State<ScreeningForm>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
 
   final _formKey = GlobalKey<FormState>();
   final ApiService _api = ApiService();
@@ -50,6 +52,9 @@ class _ScreeningFormState extends State<ScreeningForm>
   bool _submitted = false;
   bool _proceedToConsent = false;
   bool _consentPopupShown = false;
+  String _duplicateWarn = "";
+  /// Live (as-you-type) hospital admission validation — same as web handleChange/blur.
+  String? _hospitalNoLiveError;
 
   // Consent refusal
   Set<String> _consentRefusalReasons = {};
@@ -82,8 +87,9 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   String _consentTakenBy = "Select";
 
-  // ── Auto-save timer ──
+  // ── Auto-save / draft durability (match web ~10s server autosave) ──
   Timer? _autoSaveTimer;
+  Timer? _draftDebounce;
 
   bool _idAssigned = false;
   bool _exclusionPresent = false;
@@ -157,14 +163,30 @@ class _ScreeningFormState extends State<ScreeningForm>
   }
 
   bool _isFormCompletelyEmpty() {
-    return _motherFirstCtrl.text.trim().isEmpty &&
-        _motherSurnameCtrl.text.trim().isEmpty &&
-        _husbandFirstCtrl.text.trim().isEmpty &&
-        _husbandSurnameCtrl.text.trim().isEmpty &&
-        _motherPhoneCtrl.text.trim().isEmpty &&
-        _husbandPhoneCtrl.text.trim().isEmpty &&
-        _maternalUidCtrl.text.trim().isEmpty &&
-        _hospitalNoCtrl.text.trim().isEmpty;
+    // Include A1/gestation + exclusions + consent so filling only GA still drafts
+    // (previously GA-only work was lost on back / kill before 60s timer).
+    final hasIdentity = _motherFirstCtrl.text.trim().isNotEmpty ||
+        _motherSurnameCtrl.text.trim().isNotEmpty ||
+        _husbandFirstCtrl.text.trim().isNotEmpty ||
+        _husbandSurnameCtrl.text.trim().isNotEmpty ||
+        _motherPhoneCtrl.text.trim().isNotEmpty ||
+        _husbandPhoneCtrl.text.trim().isNotEmpty ||
+        _maternalUidCtrl.text.trim().isNotEmpty ||
+        _hospitalNoCtrl.text.trim().isNotEmpty;
+    final hasGestation = _gestationKnownInWeeks != null ||
+        _gaSource != null ||
+        _lmpCtrl.text.trim().isNotEmpty ||
+        _expectedDeliveryCtrl.text.trim().isNotEmpty ||
+        (_gestWeeksCtrl.text.trim().isNotEmpty &&
+            _gestWeeksCtrl.text.trim() != "0") ||
+        _gaAssessmentMethod != "Select";
+    final hasExclusion = _exclusionAnswers.values.any((v) => v != null);
+    final hasConsent = _consentStatus != "Select" ||
+        _proceedToConsent ||
+        _consentTakenBy != "Select";
+    final hasMeta = _screeningDateTimeCtrl.text.trim().isNotEmpty ||
+        (_assignedScreeningId != null && _assignedScreeningId!.isNotEmpty);
+    return !(hasIdentity || hasGestation || hasExclusion || hasConsent || hasMeta);
   }
 
   // Controllers
@@ -178,7 +200,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   final TextEditingController _husbandPhoneCtrl  = TextEditingController();
   final TextEditingController _maternalUidCtrl   = TextEditingController();
   final TextEditingController _hospitalNoCtrl    = TextEditingController();
-  final TextEditingController _gestWeeksCtrl     = TextEditingController(text: "24");
+  final TextEditingController _gestWeeksCtrl     = TextEditingController();
   final TextEditingController _gestDaysCtrl      = TextEditingController(text: "0");
   final TextEditingController _expectedDeliveryCtrl = TextEditingController();
   final TextEditingController _lmpCtrl           = TextEditingController();
@@ -219,12 +241,69 @@ class _ScreeningFormState extends State<ScreeningForm>
       "Geetika", "Priyanka Thakur", "Seemran Kaur",
       "Tanvi Saini", "Yashvi Jolly",
     ],
+    "GMCH": ["Research Nurse"],
+    "IOG": ["Research Nurse"],
+    "AFMC": ["Research Nurse"],
+    "GMCH-A": ["Research Nurse"],
+    "AMC": ["Research Nurse"],
   };
+
+  List<String> _siteScreeners = [];
 
   String _selectedSite = "PGIMER";
 
   late AnimationController _scanController;
   late Animation<double> _scanAnimation;
+
+  String _maternalUidLabel() {
+    return "15. Maternal UID (CR number)";
+  }
+
+  List<TextInputFormatter> _maternalUidFormatters() {
+    if (_selectedSite == "AMC") {
+      return [
+        FilteringTextInputFormatter.allow(RegExp(r'[0-9/]')),
+        LengthLimitingTextInputFormatter(15),
+      ];
+    }
+    return [
+      FilteringTextInputFormatter.digitsOnly,
+      LengthLimitingTextInputFormatter(12),
+    ];
+  }
+
+  String _hospitalNoLabel() {
+    if (_selectedSite == "GMCH-A") {
+      return "16. Hospital Admission Number";
+    }
+    if (_selectedSite == "GMCH") {
+      return "16. Hospital Admission Number";
+    }
+    if (_selectedSite == "IOG") {
+      return "16. Hospital Admission Number";
+    }
+    if (_selectedSite == "AMC") {
+      return "16. Hospital Admission Number";
+    }
+    return "16. Hospital Admission Number";
+  }
+
+  List<TextInputFormatter> _hospitalNoFormatters() {
+    if (_selectedSite == "AMC") {
+      return [
+        FilteringTextInputFormatter.allow(RegExp(r'[0-9/]')),
+        LengthLimitingTextInputFormatter(15),
+      ];
+    }
+    int maxLen = 15;
+    if (_selectedSite == "PGIMER") maxLen = 10;
+    if (_selectedSite == "GMCH-A" || _selectedSite == "GMCH") maxLen = 11;
+    if (_selectedSite == "IOG") maxLen = 6;
+    return [
+      FilteringTextInputFormatter.digitsOnly,
+      LengthLimitingTextInputFormatter(maxLen),
+    ];
+  }
 
   // ── VALIDATORS ─────────────────────────────────────────────────────────────
 
@@ -235,9 +314,10 @@ class _ScreeningFormState extends State<ScreeningForm>
       final datePart = parts[0];
       final d        = datePart.split("/");
       final selectedDate = DateTime(int.parse(d[2]), int.parse(d[1]), int.parse(d[0]));
-      final diff = DateTime.now().difference(selectedDate).inDays;
-      if (diff > 7) return "Screening date cannot be older than 7 days";
-      if (diff < 0) return "Screening date cannot be in the future";
+      final today = DateTime.now();
+      final todayDate = DateTime(today.year, today.month, today.day);
+      // Match web ScreeningForm: maxDate=today only (no 7-day lookback rule).
+      if (selectedDate.isAfter(todayDate)) return "Screening date cannot be in the future";
       return null;
     } catch (_) {
       return "Invalid date format";
@@ -249,14 +329,13 @@ class _ScreeningFormState extends State<ScreeningForm>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     _maternalUidFocus.addListener(() {
       if (!_maternalUidFocus.hasFocus) {
         setState(() => _maternalUidLimitReached = false);
       }
     });
-
-    _loadUserContext();
 
     _scanController = AnimationController(
       vsync: this,
@@ -267,24 +346,72 @@ class _ScreeningFormState extends State<ScreeningForm>
       CurvedAnimation(parent: _scanController, curve: Curves.easeInOut),
     );
 
-    if (widget.loadDraft && widget.draftKey != null) {
-      _currentDraftKey = widget.draftKey;
-      _loadDraftIfExists();
-    }
-
     _maternalUidCtrl.addListener(() {
       setState(() => _maternalUidLimitReached = _maternalUidCtrl.text.length >= 15);
     });
 
-    // ── Auto-save every 60 seconds ──
-    _autoSaveTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+    _attachDraftListeners();
+
+    // Match web ~10s autosave cadence
+    _autoSaveTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       if (mounted && !_isFormCompletelyEmpty()) _saveDraft(silent: true);
+    });
+
+    // Load site context first, then draft — avoids clearing restored IDs/fields.
+    _bootstrapForm();
+  }
+
+  Future<void> _bootstrapForm() async {
+    await _loadUserContext();
+    if (!mounted) return;
+    if (widget.loadDraft && widget.draftKey != null) {
+      _currentDraftKey = widget.draftKey;
+      await _loadDraftIfExists();
+    }
+  }
+
+  void _attachDraftListeners() {
+    final ctrls = [
+      _motherFirstCtrl, _motherSurnameCtrl, _husbandFirstCtrl, _husbandSurnameCtrl,
+      _motherPhoneCtrl, _husbandPhoneCtrl, _maternalUidCtrl, _hospitalNoCtrl,
+      _gestWeeksCtrl, _gestDaysCtrl, _lmpCtrl, _expectedDeliveryCtrl,
+      _screeningDateTimeCtrl, _screenedByCtrl,
+    ];
+    for (final c in ctrls) {
+      c.addListener(_scheduleDraftSave);
+    }
+  }
+
+  void _scheduleDraftSave() {
+    _draftDebounce?.cancel();
+    _draftDebounce = Timer(const Duration(seconds: 2), () {
+      if (mounted && !_isFormCompletelyEmpty()) {
+        _saveDraft(silent: true);
+      }
     });
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      if (!_isFormCompletelyEmpty()) {
+        _saveDraft(silent: true);
+      }
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _autoSaveTimer?.cancel();
+    _draftDebounce?.cancel();
+    // Flush once more before controllers are disposed
+    if (!_isFormCompletelyEmpty()) {
+      // Fire-and-forget; dispose must stay sync
+      _saveDraft(silent: true);
+    }
     _screeningIdCtrl.dispose();
     _enrollmentIdCtrl.dispose();
     _motherFirstCtrl.dispose();
@@ -295,13 +422,13 @@ class _ScreeningFormState extends State<ScreeningForm>
     _husbandPhoneCtrl.dispose();
     _maternalUidCtrl.dispose();
     _hospitalNoCtrl.dispose();
+    _scanController.dispose();
     _gestWeeksCtrl.dispose();
     _gestDaysCtrl.dispose();
     _expectedDeliveryCtrl.dispose();
     _lmpCtrl.dispose();
     _screeningDateTimeCtrl.dispose();
     _screenedByCtrl.dispose();
-    _scanController.dispose();
     _husbandPhoneFocus.dispose();
     _motherPhoneFocus.dispose();
     _maternalUidFocus.dispose();
@@ -315,74 +442,157 @@ class _ScreeningFormState extends State<ScreeningForm>
     _userRole = prefs.getString("user_role") ?? "admin";
     if (_userRole == "site") {
       final site = prefs.getString("site_name");
-      if (site != null) {
+      if (site != null && mounted) {
         setState(() {
           _selectedSite = site;
-          _screeningIdCtrl.clear();
-          _idAssigned = false;
+          // Never wipe an in-progress / draft screening ID on reopen.
+          if (!widget.loadDraft) {
+            _screeningIdCtrl.clear();
+            _idAssigned = false;
+          }
         });
       }
     }
 
-    // Auto-fill "13. Screened by" from the logged-in account rather than
-    // asking the nurse to find her own name in a dropdown. Two reasons:
-    //  1. _nursesBySite only ever had entries for PGIMER — nurses at
-    //     GMCH/GMCH-A/AMC/IOG had an empty dropdown and couldn't fill this
-    //     required field at all.
-    //  2. With individually-named logins, the logged-in user IS the
-    //     correct answer — letting someone pick a colleague's name from a
-    //     list undermines per-person audit trail.
-    // Only auto-fill for a brand-new screening — if a draft/existing
-    // record already has a screened_by value, don't overwrite it.
+    // Auto-fill screened_by with FULL name (web uses full_name for audit)
     if (!widget.loadDraft && mounted) {
       final user = context.read<AuthProvider>().user;
       if (user != null && user.fullName.trim().isNotEmpty) {
-        final parts = user.fullName.trim().split(RegExp(r'\s+'))
-            .where((p) => p.toLowerCase() != 'dr.' && p.toLowerCase() != 'dr').toList();
-        final displayName = parts.isNotEmpty ? parts.first : user.fullName.trim();
-        setState(() => _screenedByCtrl.text = displayName);
+        setState(() => _screenedByCtrl.text = user.fullName.trim());
       }
+    }
+
+    await _loadSiteScreeners();
+  }
+
+  Future<void> _loadSiteScreeners() async {
+    try {
+      final list = await ApiClient.instance.getList(
+        '/sites/${Uri.encodeComponent(_selectedSite)}/screeners',
+      );
+      final names = list.map((e) => e.toString()).where((s) => s.trim().isNotEmpty).toList();
+      if (mounted && names.isNotEmpty) {
+        setState(() => _siteScreeners = names);
+        // Match web: autofill screened_by only when nurse list contains login name.
+        final user = context.read<AuthProvider>().user;
+        final target = user?.fullName.trim().toLowerCase() ?? "";
+        if (target.isNotEmpty && _screenedByCtrl.text.trim().isEmpty) {
+          String? match;
+          for (final n in names) {
+            if (n.trim().toLowerCase() == target) { match = n; break; }
+          }
+          if (match != null) {
+            setState(() => _screenedByCtrl.text = match!);
+          }
+        }
+      }
+    } catch (_) {
+      // Fall back to hardcoded _nursesBySite
     }
   }
 
+  Future<void> _checkDuplicateMotherName() async {
+    final name = _motherFirstCtrl.text.trim();
+    if (name.isEmpty || _selectedSite.isEmpty) {
+      if (_duplicateWarn.isNotEmpty && mounted) setState(() => _duplicateWarn = "");
+      return;
+    }
+    try {
+      final patients = await ScreeningApiService.instance.getPatients(limit: 200);
+      final currentId = _assignedScreeningId;
+      final hits = <String>[];
+      for (final p in patients) {
+        final sid = p['screening_id']?.toString() ?? '';
+        if (currentId != null && sid == currentId) continue;
+        // PII may be absent from list payload — batch not needed for warning; web uses dedicated search.
+        final mf = (p['mother_first_name'] ?? '').toString().trim();
+        if (mf.toLowerCase() == name.toLowerCase()) hits.add(sid.isEmpty ? '?' : sid);
+      }
+      // Also check via PII batch for recent patients when list is de-identified
+      if (hits.isEmpty) {
+        final ids = patients
+            .map((p) => p['screening_id']?.toString() ?? '')
+            .where((s) => s.isNotEmpty && s != currentId)
+            .take(40)
+            .toList();
+        if (ids.isNotEmpty) {
+          try {
+            final pii = await ScreeningApiService.instance.getPiiBatch(ids);
+            pii.forEach((sid, row) {
+              final mf = (row['mother_first_name'] ?? '').toString().trim();
+              if (mf.toLowerCase() == name.toLowerCase()) hits.add(sid);
+            });
+          } catch (_) {}
+        }
+      }
+      final msg = hits.isEmpty
+          ? ""
+          : '⚠️ A participant named "$name" already exists at $_selectedSite (${hits.first}). Please verify this is not a duplicate.';
+      if (mounted) setState(() => _duplicateWarn = msg);
+    } catch (_) {}
+  }
+
   Future<void> _logout() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.clear();
+    // Do NOT prefs.clear() — that wiped screening drafts. Clear auth only.
+    await context.read<AuthProvider>().logout();
     if (!mounted) return;
     Navigator.of(context).pushNamedAndRemoveUntil("/login", (route) => false);
   }
 
   // ── GESTATION HELPERS ──────────────────────────────────────────────────────
 
-  void _recalculateGestationFromEDD(DateTime edd) {
-    final today   = DateTime.now();
-    final diffDays = edd.difference(today).inDays;
-    int gestDays  = 280 - diffDays;
-    if (gestDays < 0) gestDays = 0;
-    setState(() {
-      _gestWeeksCtrl.text = (gestDays ~/ 7).toString();
-      _gestDaysCtrl.text  = (gestDays % 7).toString();
-    });
-    if (_isGestationOutOfRange()) _showGestationOutOfRangePopup();
+  DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
+  /// Calendar-day difference (b − a), matching web `calendarDaysBetween`.
+  int _calendarDaysBetween(DateTime a, DateTime b) {
+    final a0 = _dateOnly(a);
+    final b0 = _dateOnly(b);
+    return b0.difference(a0).inDays;
   }
 
-  // Eligibility range matches webform ScreeningForm.jsx getEligibilityStatus():
-  // eligible = 24w0d .. 31w6d inclusive (t < 24*7 => low, t > 31*7+6 => high)
+  /// Naegele: EDD = LMP + 280 days.
+  DateTime _eddFromLmp(DateTime lmp) => _dateOnly(lmp).add(const Duration(days: 280));
+
+  /// GA from LMP (preferred when LMP is known) — completed weeks/days since LMP.
+  void _setGestationFromLmp(DateTime lmp) {
+    final gestDays = _calendarDaysBetween(lmp, DateTime.now());
+    final safe = gestDays < 0 ? 0 : gestDays;
+    _gestWeeksCtrl.text = (safe ~/ 7).toString();
+    _gestDaysCtrl.text = (safe % 7).toString();
+  }
+
+  /// Match web `gestAgeFromEdd` — GA = 280 − (EDD − today).
+  void _setGestationFromEdd(DateTime edd) {
+    final daysUntilEdd = _calendarDaysBetween(DateTime.now(), edd);
+    var gestDays = 280 - daysUntilEdd;
+    if (gestDays < 0) gestDays = 0;
+    _gestWeeksCtrl.text = (gestDays ~/ 7).toString();
+    _gestDaysCtrl.text = (gestDays % 7).toString();
+  }
+
+  void _recalculateGestationFromEDD(DateTime edd) {
+    setState(() => _setGestationFromEdd(edd));
+  }
+
+  // Eligibility range matches web ScreeningForm.jsx getEligibilityStatus():
+  // eligible = 25w0d .. 31w6d inclusive (t < 25*7 => low, t > 31*7+6 => high)
   bool _isGestationOutOfRange() {
     final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
     final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
-    if (weeks < 24) return true;
-    if (weeks > 31) return true;
-    if (weeks == 31 && days > 6) return true;
+    final t = weeks * 7 + days;
+    if (_gestWeeksCtrl.text.trim().isEmpty) return false;
+    if (t < 25 * 7) return true;
+    if (t > 31 * 7 + 6) return true;
     return false;
   }
 
   bool get _isEligibleGestation {
     final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
     final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
-    if (weeks < 24) return false;
-    if (weeks > 31) return false;
-    if (weeks == 31 && days > 6) return false;
+    final t = weeks * 7 + days;
+    if (_gestWeeksCtrl.text.trim().isEmpty) return false;
+    if (t < 25 * 7) return false;
+    if (t > 31 * 7 + 6) return false;
     return true;
   }
 
@@ -391,7 +601,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       _gestationKnownInWeeks = null;
       _eddKnown              = null;
       _gaSource              = null;
-      _gestWeeksCtrl.text    = "24";
+      _gestWeeksCtrl.text    = "";
       _gestDaysCtrl.text     = "0";
       _expectedDeliveryCtrl.clear();
       _lmpCtrl.clear();
@@ -479,52 +689,11 @@ class _ScreeningFormState extends State<ScreeningForm>
       });
     }
 
-    if (_allExclusionsNo && !_consentPopupShown) {
+    // Match web ScreeningForm: when all exclusions are No, A5 consent
+    // appears immediately (no Proceed Now/Later gate).
+    if (_allExclusionsNo && !_proceedToConsent) {
+      _proceedToConsent = true;
       _consentPopupShown = true;
-      final c = AppTheme.of(context);
-      Future.microtask(() {
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => AlertDialog(
-            backgroundColor: c.surface,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: Row(children: [
-              Icon(Icons.check_circle_rounded, color: c.success, size: 20),
-              const SizedBox(width: 8),
-              Text("Proceed for Consent?",
-                  style: TextStyle(color: c.success, fontWeight: FontWeight.w800, fontSize: 15)),
-            ]),
-            content: Text(
-              "None of the exclusions are fulfilled.\n\nFit to proceed for the consent.\n\nDo you want to proceed?",
-              style: TextStyle(color: c.textSecondary, fontSize: 13),
-            ),
-            actions: [
-              // ── FIX: "Later" saves draft then pops back to dashboard ──
-              TextButton(
-                onPressed: () async {
-                  setState(() => _proceedToConsent = true);
-                  Navigator.pop(context); // close dialog first
-                  await _saveDraft();
-                  if (!mounted) return;
-                  Navigator.of(context).pop(true); // go back to dashboard
-                },
-                child: Text("Later", style: TextStyle(color: c.warning, fontWeight: FontWeight.w600)),
-              ),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: c.success, foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-                onPressed: () {
-                  Navigator.pop(context);
-                  setState(() => _proceedToConsent = true);
-                },
-                child: const Text("Now"),
-              ),
-            ],
-          ),
-        );
-      });
     }
 
     if (currentYesKeys.isEmpty) _previousYesExclusions.clear();
@@ -697,6 +866,11 @@ class _ScreeningFormState extends State<ScreeningForm>
       'husband_contact'   : _husbandPhoneCtrl.text.trim().isNotEmpty ? _husbandPhoneCtrl.text.trim() : null,
       'maternal_uid'      : _maternalUidCtrl.text.trim().isNotEmpty ? _maternalUidCtrl.text.trim() : null,
       'hospital_admission_number': _hospitalNoCtrl.text.trim().isNotEmpty ? _hospitalNoCtrl.text.trim() : null,
+      // Persist GA path the same way as web buildPayloadFrom
+      'gestation_known': _gestationKnownInWeeks == true
+          ? "Yes"
+          : (_gestationKnownInWeeks == false ? "No" : null),
+      'ga_source': _gestationKnownInWeeks == false ? (_gaSource) : null,
       'gestation_weeks': weeks ?? (useDraftFallbacks ? 0 : null),
       'gestation_days' : days  ?? 0,
       'gestation_method': gaMethod,
@@ -722,6 +896,10 @@ class _ScreeningFormState extends State<ScreeningForm>
       'reason_not_approached'      : _notApproachedReasons.isNotEmpty ? _notApproachedReasons.join(", ") : null,
       'reason_not_approached_other': _notApproachedOtherText.trim().isNotEmpty ? _notApproachedOtherText.trim() : null,
       'video_pis_shown': _videoPisShown != "Select" ? _videoPisShown : null,
+      'consent_form_version': 'v1.0',
+      'consent_language': 'English',
+      if (_consentStatus == "Yes" || _consentStatus == "Trial run")
+        'consent_datetime': DateTime.now().toIso8601String(),
     };
   }
 
@@ -746,6 +924,26 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   // ── DRAFT ──────────────────────────────────────────────────────────────────
 
+  /// Clears the on-device draft entry (SharedPreferences). Safe to call repeatedly.
+  Future<void> _clearLocalDraft() async {
+    if (_currentDraftKey == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_currentDraftKey!);
+    await _removeDraftKey(_currentDraftKey!);
+    _currentDraftKey = null;
+  }
+
+  /// True when Form A has been filled far enough that keeping a "Draft" card
+  /// next to the same record on the web patient list is confusing.
+  bool _looksFullyFilledForDraftClear() {
+    final consentDone = _consentStatus != "Select" && _consentStatus.trim().isNotEmpty;
+    if (consentDone) return true;
+    if (_exclusionPresent && _allExclusionsAnswered) return true;
+    if (_gestationKnownInWeeks == false && _eddKnown == false) return true;
+    if (_isGestationOutOfRange()) return true;
+    return false;
+  }
+
   Future<void> _saveDraft({bool silent = false}) async {
     if (_isFormCompletelyEmpty()) return;
     await _assignScreeningIdIfNeeded();
@@ -757,16 +955,33 @@ class _ScreeningFormState extends State<ScreeningForm>
       await _syncToBackend(isDraft: true);
     } catch (_) {}
 
+    // If this screening is already complete enough AND on the server, do NOT
+    // keep a local "Draft" — that is why nurses saw the same case as Draft on
+    // mobile while it already looked perfect on the website.
+    if (_serverConfirmedId && _looksFullyFilledForDraftClear()) {
+      await _clearLocalDraft();
+      if (!mounted) return;
+      if (!silent) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text("Saved to server — removed from local drafts"),
+        ));
+      }
+      return;
+    }
+
     final prefs = await SharedPreferences.getInstance();
     _currentDraftKey ??= "draft_${DateTime.now().millisecondsSinceEpoch}";
 
     final draft = {
       "screeningId"         : _assignedScreeningId,
+      "enrollmentId"        : _enrollmentId,
+      "serverConfirmedId"   : _serverConfirmedId,
       "site"                : _selectedSite,
       "savedAt"             : DateTime.now().toIso8601String(),
       "screeningDateTime"   : _screeningDateTimeCtrl.text,
       "screenedBy"          : _screenedByCtrl.text,
       "motherFirst"         : _motherFirstCtrl.text,
+      "motherFirstName"     : _motherFirstCtrl.text, // dashboard list key
       "motherSurname"       : _motherSurnameCtrl.text,
       "husbandFirst"        : _husbandFirstCtrl.text,
       "husbandSurname"      : _husbandSurnameCtrl.text,
@@ -815,11 +1030,16 @@ class _ScreeningFormState extends State<ScreeningForm>
     setState(() {
       _assignedScreeningId       = data["screeningId"];
       _screeningIdCtrl.text      = _assignedScreeningId ?? "";
+      _enrollmentId              = data["enrollmentId"]?.toString();
       _selectedSite              = data["site"] ?? _selectedSite;
-      _idAssigned                = true;
+      _idAssigned                = (_assignedScreeningId ?? "").isNotEmpty;
+      // Real server IDs look like "01-0007"; LOCAL placeholders must still POST
+      final sid = _assignedScreeningId ?? "";
+      _serverConfirmedId = data["serverConfirmedId"] == true ||
+          RegExp(r'^\d{2}-\d+$').hasMatch(sid);
       _screeningDateTimeCtrl.text= data["screeningDateTime"] ?? "";
       _screenedByCtrl.text       = data["screenedBy"] ?? "";
-      _motherFirstCtrl.text      = data["motherFirst"] ?? "";
+      _motherFirstCtrl.text      = data["motherFirst"] ?? data["motherFirstName"] ?? "";
       _motherSurnameCtrl.text    = data["motherSurname"] ?? "";
       _husbandFirstCtrl.text     = data["husbandFirst"] ?? "";
       _husbandSurnameCtrl.text   = data["husbandSurname"] ?? "";
@@ -831,7 +1051,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       _eddKnown                  = data["eddKnown"];
       _gaSource                  = data["gaSource"];
       _lmpCtrl.text              = data["lmpDate"] ?? "";
-      _gestWeeksCtrl.text        = data["gestWeeks"] ?? "24";
+      _gestWeeksCtrl.text        = data["gestWeeks"] ?? "";
       _gestDaysCtrl.text         = data["gestDays"] ?? "0";
       _gaAssessmentMethod        = data["gaMethod"] ?? "Select";
       _expectedDeliveryCtrl.text = data["expectedDelivery"] ?? "";
@@ -861,7 +1081,48 @@ class _ScreeningFormState extends State<ScreeningForm>
       _videoPisShown             = data["videoPisShown"] ?? "Select";
       _proceedToConsent          = data["proceedToConsent"] ?? false;
       _currentDraftKey           = widget.draftKey;
+      _hospitalNoLiveError       = _hospitalNoLiveMessage(_hospitalNoCtrl.text);
     });
+
+    // Prefer LMP→GA when LMP is known; otherwise recompute from EDD.
+    if (_gestationKnownInWeeks == false) {
+      if (_gaSource == "LMP" && _lmpCtrl.text.trim().isNotEmpty) {
+        final lmp = _parseDdMmYyyy(_lmpCtrl.text);
+        if (lmp != null) {
+          final edd = _eddFromLmp(lmp);
+          setState(() {
+            _expectedDeliveryCtrl.text = "${edd.day}/${edd.month}/${edd.year}";
+            _setGestationFromLmp(lmp);
+          });
+        }
+      } else if (_gaSource == "EDD" && _expectedDeliveryCtrl.text.trim().isNotEmpty) {
+        final edd = _parseDdMmYyyy(_expectedDeliveryCtrl.text);
+        if (edd != null) {
+          setState(() => _setGestationFromEdd(edd));
+        }
+      }
+    } else if (_gestationKnownInWeeks == true &&
+        _gaAssessmentMethod == "LMP" &&
+        _lmpCtrl.text.trim().isNotEmpty) {
+      final lmp = _parseDdMmYyyy(_lmpCtrl.text);
+      if (lmp != null) {
+        final edd = _eddFromLmp(lmp);
+        setState(() {
+          _expectedDeliveryCtrl.text = "${edd.day}/${edd.month}/${edd.year}";
+        });
+      }
+    }
+  }
+
+  DateTime? _parseDdMmYyyy(String raw) {
+    try {
+      final part = raw.trim().split(RegExp(r'\s+')).first;
+      final d = part.split("/");
+      if (d.length != 3) return null;
+      return DateTime(int.parse(d[2]), int.parse(d[1]), int.parse(d[0]));
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> _addDraftKey(String key) async {
@@ -951,26 +1212,19 @@ class _ScreeningFormState extends State<ScreeningForm>
     );
 
     try {
-      await _api.saveCRF(crf);
-      // Save to the real PORTAL backend — POST to create / PUT to update the
-      // same `/screenings/` record the web portal reads and writes.
+      // Sync to shared backend FIRST so web + mobile stay aligned.
       await _syncToBackend(isDraft: false);
 
-      // ── Generate PDF in the background ──
-      // Don't block returning to the dashboard on this: it's CPU-bound and
-      // the dashboard already regenerates the PDF on demand (_generatePdf)
-      // when the record is opened, so waiting here just adds dead time to
-      // every single save.
+      // Local device CRF store (best-effort — must not block draft cleanup).
+      try {
+        await _api.saveCRF(crf);
+      } catch (_) {}
+
       // ignore: unawaited_futures
       PdfService.generateCrfPdf(crf);
 
-      // ── Clean up draft BEFORE popping ──
-      final prefs = await SharedPreferences.getInstance();
-      if (_currentDraftKey != null) {
-        await prefs.remove(_currentDraftKey!);
-        await _removeDraftKey(_currentDraftKey!);
-        _currentDraftKey = null;
-      }
+      // Always drop local draft once the server has the final record.
+      await _clearLocalDraft();
 
       return true; // signal success to caller
 
@@ -996,7 +1250,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   if (weeks != null && days != null) {
     final totalDays = (weeks * 7) + days;
 
-    if (totalDays < (24 * 7) ||
+    if (totalDays < (25 * 7) ||
         totalDays > (31 * 7) + 6) {
       _showGestationOutOfRangePopup();
       return;
@@ -1090,7 +1344,7 @@ class _ScreeningFormState extends State<ScreeningForm>
               style: TextStyle(color: c.danger, fontWeight: FontWeight.w800, fontSize: 15)),
         ]),
         content: Text(
-          "Gestational age cannot be determined.\n\nPlease do not proceed with screening.",
+          "Gestational age cannot be determined.\n\nPlease do not proceed with screening. Your progress was saved as a draft.",
           style: TextStyle(color: c.textSecondary, fontSize: 13),
         ),
         actions: [
@@ -1098,7 +1352,9 @@ class _ScreeningFormState extends State<ScreeningForm>
             style: ElevatedButton.styleFrom(
                 backgroundColor: c.danger, foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-            onPressed: () {
+            onPressed: () async {
+              await _saveDraft(silent: true);
+              if (!context.mounted) return;
               Navigator.pop(context); // close dialog
               Navigator.pop(context, true); // go back to dashboard
             },
@@ -1124,7 +1380,7 @@ class _ScreeningFormState extends State<ScreeningForm>
               style: TextStyle(color: c.danger, fontWeight: FontWeight.w800, fontSize: 15)),
         ]),
         content: Text(
-          "Gestational age is outside the eligible range (24+0 to 31+6 weeks).\n\nScreening has been ended.",
+          "Gestational age is outside the eligible range (25+0 to 31+6 weeks).\n\nScreening has been ended. Your progress was saved as a draft.",
           style: TextStyle(color: c.textSecondary, fontSize: 13),
         ),
         actions: [
@@ -1132,13 +1388,42 @@ class _ScreeningFormState extends State<ScreeningForm>
             style: ElevatedButton.styleFrom(
                 backgroundColor: c.danger, foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-            onPressed: () {
+            onPressed: () async {
+              await _saveDraft(silent: true);
+              if (!context.mounted) return;
               Navigator.pop(context); // close dialog
               Navigator.pop(context, true); // go back to dashboard
             },
             child: const Text("OK"),
           ),
         ],
+      ),
+    );
+  }
+
+  // ── QR SCAN ────────────────────────────────────────────────────────────────
+
+  Future<void> _scanCRNumber() async {
+    final c = AppTheme.of(context);
+    await showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: c.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: SizedBox(
+          width: 320, height: 320,
+          child: MobileScanner(
+            onDetect: (capture) {
+              final code = capture.barcodes.first.rawValue ?? "";
+              if (code.isNotEmpty) {
+                Navigator.pop(context);
+                _maternalUidCtrl.text = code;
+                ScaffoldMessenger.of(context)
+                    .showSnackBar(SnackBar(content: Text("Scanned: $code")));
+              }
+            },
+          ),
+        ),
       ),
     );
   }
@@ -1179,33 +1464,6 @@ class _ScreeningFormState extends State<ScreeningForm>
           duration: const Duration(milliseconds: 400),
           curve: Curves.easeInOut, alignment: 0.1);
     });
-  }
-
-  // ── QR SCAN ────────────────────────────────────────────────────────────────
-
-  Future<void> _scanCRNumber() async {
-    final c = AppTheme.of(context);
-    await showDialog(
-      context: context,
-      builder: (context) => Dialog(
-        backgroundColor: c.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        child: SizedBox(
-          width: 320, height: 320,
-          child: MobileScanner(
-            onDetect: (capture) {
-              final code = capture.barcodes.first.rawValue ?? "";
-              if (code.isNotEmpty) {
-                Navigator.pop(context);
-                _maternalUidCtrl.text = code;
-                ScaffoldMessenger.of(context)
-                    .showSnackBar(SnackBar(content: Text("Scanned: $code")));
-              }
-            },
-          ),
-        ),
-      ),
-    );
   }
 
   Future<void> saveFormAToFirebase(Map<String, dynamic> data) async {
@@ -1359,11 +1617,14 @@ class _ScreeningFormState extends State<ScreeningForm>
             IconButton(
               icon: Icon(Icons.remove_circle_outline_rounded, color: c.danger, size: 20),
               onPressed: () {
-                final value = int.tryParse(controller.text) ?? min;
-                if (value > min) {
-                  setState(() => controller.text = "${value - 1}");
-                  if (_isGestationOutOfRange()) _showGestationOutOfRangePopup();
-                }
+                final parsed = int.tryParse(controller.text);
+                setState(() {
+                  if (parsed == null) {
+                    controller.text = "$min";
+                  } else if (parsed > min) {
+                    controller.text = "${parsed - 1}";
+                  }
+                });
               },
             ),
             Expanded(
@@ -1373,6 +1634,7 @@ class _ScreeningFormState extends State<ScreeningForm>
                 textAlign: TextAlign.center,
                 readOnly: !enabled,
                 validator: validator,
+                onChanged: (_) => setState(() {}),
                 style: TextStyle(color: c.textPrimary,
                     fontWeight: FontWeight.w700, fontSize: 16),
                 decoration: const InputDecoration(border: InputBorder.none),
@@ -1381,11 +1643,14 @@ class _ScreeningFormState extends State<ScreeningForm>
             IconButton(
               icon: Icon(Icons.add_circle_outline_rounded, color: c.success, size: 20),
               onPressed: () {
-                final value = int.tryParse(controller.text) ?? min;
-                if (value < max) {
-                  setState(() => controller.text = "${value + 1}");
-                  if (_isGestationOutOfRange()) _showGestationOutOfRangePopup();
-                }
+                final parsed = int.tryParse(controller.text);
+                setState(() {
+                  if (parsed == null) {
+                    controller.text = "$min";
+                  } else if (parsed < max) {
+                    controller.text = "${parsed + 1}";
+                  }
+                });
               },
             ),
           ]),
@@ -1469,7 +1734,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       case "INSUFFICIENT":
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           TextFormField(
-            decoration: _requiredDecoration("25. If yes, specify reason"),
+            decoration: _requiredDecoration("24. If yes, specify"),
             style: TextStyle(color: c.textPrimary),
             onChanged: (v) => _insufficientReason = v,
           ),
@@ -1480,7 +1745,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
       case "RESUSCITATION":
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text("23. If yes, reason (select all that apply) *", style: TextStyle(color: c.textSecondary, fontSize: 13)),
+          Text("22. If yes (select all that apply) *", style: TextStyle(color: c.textSecondary, fontSize: 13)),
           const SizedBox(height: 6),
           ...["Periviable", "Socio-economic", "Major CMF", "Other"].map((v) =>
               _multiCheckboxTile(v, _resuscitationReasons, c, () => setState(() {
@@ -1507,7 +1772,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       case "ANOMALY":
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           TextFormField(
-            decoration: _requiredDecoration("19a. If yes, specify structural anomaly"),
+            decoration: _requiredDecoration("If yes, specify"),
             style: TextStyle(color: c.textPrimary),
             onChanged: (v) => _anomalyDetails = v,
           ),
@@ -1518,7 +1783,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
       case "HYDROPS":
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text("21. If yes, select fetal hydrops type *", style: TextStyle(color: c.textSecondary, fontSize: 13)),
+          Text("20. If yes *", style: TextStyle(color: c.textSecondary, fontSize: 13)),
           const SizedBox(height: 6),
           ...["Immune", "Non-immune", "Unclear"].map((v) =>
               _styledRadio(v, _hydropsType, c, (val) =>
@@ -1665,7 +1930,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   Widget build(BuildContext context) {
     final c = AppTheme.of(context);
     final nameFormatter = <TextInputFormatter>[
-      FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z ]')),
+      FilteringTextInputFormatter.allow(RegExp(r"[\p{L} .'\-]", unicode: true)),
     ];
 
     return WillPopScope(
@@ -1734,7 +1999,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
                     if (_isEligibleGestation) _buildExclusionSection(c),
 
-                    if (_isEligibleGestation && _allExclusionsNo && _proceedToConsent)
+                    if (_isEligibleGestation && (_allExclusionsNo || (_consentStatus != "Select" && _consentStatus.isNotEmpty)))
                       _buildConsentSection(c),
 
                     if (_submitted && _formKey.currentState?.validate() == false)
@@ -1755,6 +2020,11 @@ class _ScreeningFormState extends State<ScreeningForm>
                           )),
                         ]),
                       ),
+
+                    // Same as web NotesBox — optional local notes keyed by screening id.
+                    NotesBox(
+                      formKey: "form_a_${(_assignedScreeningId != null && _assignedScreeningId!.isNotEmpty) ? _assignedScreeningId! : "new"}",
+                    ),
 
                     const SizedBox(height: 40),
                   ],
@@ -1784,7 +2054,7 @@ class _ScreeningFormState extends State<ScreeningForm>
             style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800,
                 color: c.textPrimary, letterSpacing: .3)),
         const SizedBox(height: 2),
-        Text("Pregnant women < 32 weeks at admission",
+        Text("Eligibility Assessment · 25 weeks 0 days to 31 weeks 6 days",
             style: TextStyle(fontSize: 11, color: c.primary.withOpacity(0.7),
                 fontWeight: FontWeight.w500)),
       ]),
@@ -1849,7 +2119,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           Expanded(
             child: OutlinedButton.icon(
               icon: Icon(Icons.save_outlined, size: 16, color: c.warning),
-              label: Text("Draft", style: TextStyle(color: c.warning, fontWeight: FontWeight.w700)),
+              label: Text("Save for Later", style: TextStyle(color: c.warning, fontWeight: FontWeight.w700, fontSize: 12)),
               onPressed: () async {
                 await _saveDraft();
                 if (!mounted) return;
@@ -1871,7 +2141,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           flex: 2,
           child: ElevatedButton.icon(
             icon: const Icon(Icons.check_circle_outline_rounded, size: 16, color: Colors.white),
-            label: const Text("Save & Close",
+            label: const Text("Save",
                 style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
             // ── FIX: onPressed is async, _confirmSaveAndClose is awaited ──
             onPressed: () async {
@@ -1930,18 +2200,11 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Widget _buildGestationSection(AppColors c) {
     return _sectionCard(
-      title: "A1 · GESTATION ASSESSMENT",
+      title: "A1 · Screening",
       icon: Icons.pregnant_woman_rounded,
       accentColor: c.primary,
-      trailing: TextButton.icon(
-        onPressed: _resetGestationSection,
-        icon: Icon(Icons.refresh_rounded, size: 16, color: c.textSecondary),
-        label: Text("Reset", style: TextStyle(color: c.textSecondary, fontSize: 12)),
-        style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6)),
-      ),
       children: [
-        Text("1. Gestation in weeks clearly mentioned?",
+        Text("1. Gestation in weeks clearly mentioned",
             style: TextStyle(color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600)),
         const SizedBox(height: 10),
         Row(children: [
@@ -1952,42 +2215,27 @@ class _ScreeningFormState extends State<ScreeningForm>
 
         if (_gestationKnownInWeeks == true) ...[
           const SizedBox(height: 18),
-          Text("2. Best estimate GA (weeks / days) · 3. Method of assessment",
+          Text("2. Best estimate gestational age — Weeks",
               style: TextStyle(color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           Row(children: [
-            Expanded(child: Column(children: [
-              Text("2a. Weeks", style: TextStyle(color: c.textTertiary, fontSize: 12)),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text("Weeks", style: TextStyle(color: c.textTertiary, fontSize: 12)),
               const SizedBox(height: 6),
-              _numberStepper(controller: _gestWeeksCtrl, min: 24, max: 31),
+              // Eligible window starts at 25+0 (matches study eligibility + web banner).
+              _numberStepper(controller: _gestWeeksCtrl, min: 25, max: 45),
             ])),
             const SizedBox(width: 12),
-            Expanded(child: Column(children: [
-              Text("2b. Days", style: TextStyle(color: c.textTertiary, fontSize: 12)),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text("Days", style: TextStyle(color: c.textTertiary, fontSize: 12)),
               const SizedBox(height: 6),
               _numberStepper(controller: _gestDaysCtrl, min: 0, max: 6),
             ])),
           ]),
-          const SizedBox(height: 16),
-          TextFormField(
-            controller: _expectedDeliveryCtrl,
-            readOnly: true,
-            decoration: _inputDecoration("4. Expected Delivery Date (Optional)").copyWith(
-              suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18),
-            ),
-            style: TextStyle(color: c.textPrimary),
-            onTap: () async {
-              final picked = await showDatePicker(
-                context: context,
-                initialDate: DateTime.now(),
-                firstDate: DateTime(2020), lastDate: DateTime(2035),
-              );
-              if (picked != null) {
-                _expectedDeliveryCtrl.text =
-                    "${picked.day}/${picked.month}/${picked.year}";
-              }
-            },
-          ),
+          if (_gestWeeksCtrl.text.trim().isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _gestationResultBanner(c),
+          ],
           const SizedBox(height: 14),
           DropdownButtonFormField<String>(
             value: _gaAssessmentMethod,
@@ -1995,28 +2243,27 @@ class _ScreeningFormState extends State<ScreeningForm>
             decoration: _requiredDecoration("3. Method of gestation assessment"),
             items: [
               _ddItem("Select", c, hint: true),
-              _ddItem("LMP", c), _ddItem("Early USG (<24w)", c),
-              _ddItem("Fundal Height", c), _ddItem("Method not known", c),
+              _ddItem("LMP", c),
+              _ddItem("Early USG (<24w)", c),
+              _ddItem("Fundal Height", c),
+              _ddItem("Method not known", c),
             ],
             onChanged: (v) => setState(() {
               _gaAssessmentMethod = v!;
-              // Matches web: switching away from LMP clears the LMP-specific
-              // fields so a stale date doesn't linger under a different method.
               if (v != "LMP") {
                 _lmpCtrl.clear();
+                _expectedDeliveryCtrl.clear();
               }
             }),
             style: TextStyle(color: c.textPrimary),
           ),
 
-          // "3a. LMP Date" — matches web ScreeningForm.jsx exactly: shown
-          // whenever Method of gestation assessment = LMP. Required, since
-          // web enforces this as a required field when this method is chosen.
+          // Web uses the same number "3." for LMP date when method = LMP.
           if (_gaAssessmentMethod == "LMP") ...[
             const SizedBox(height: 12),
             TextFormField(
               controller: _lmpCtrl, readOnly: true,
-              decoration: _requiredDecoration("3a. LMP Date").copyWith(
+              decoration: _requiredDecoration("3. LMP date").copyWith(
                 suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18)),
               style: TextStyle(color: c.textPrimary),
               onTap: () async {
@@ -2027,13 +2274,17 @@ class _ScreeningFormState extends State<ScreeningForm>
                 );
                 if (picked != null) {
                   _lmpCtrl.text = "${picked.day}/${picked.month}/${picked.year}";
-                  // Auto-calc EDD from LMP, same formula used by the other
-                  // LMP field below and by web's parseDateOnly/+280 days logic.
-                  final edd = picked.add(const Duration(days: 280));
+                  final edd = _eddFromLmp(picked);
                   _expectedDeliveryCtrl.text = "${edd.day}/${edd.month}/${edd.year}";
                   setState(() {});
                 }
               },
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: _expectedDeliveryCtrl, readOnly: true,
+              decoration: _inputDecoration("EDD (auto-calculated from LMP)"),
+              style: TextStyle(color: c.textPrimary),
             ),
           ],
         ],
@@ -2041,16 +2292,17 @@ class _ScreeningFormState extends State<ScreeningForm>
         if (_gestationKnownInWeeks == false) ...[
           const SizedBox(height: 18),
           DropdownButtonFormField<String>(
-            value: _gaSource,
+            value: _gaSource ?? "Select",
             dropdownColor: c.surface,
-            decoration: _requiredDecoration("5. If No, is any of the following known?"),
+            decoration: _requiredDecoration("4. If No, is any of the following known?"),
             items: [
+              _ddItem("Select", c, hint: true),
               _ddItem("LMP", c), _ddItem("EDD", c), _ddItem("Neither", c),
             ],
             onChanged: (v) {
               setState(() {
-                _gaSource = v;
-                _eddKnown = (v == "LMP" || v == "EDD") ? true : false;
+                _gaSource = (v == null || v == "Select") ? null : v;
+                _eddKnown = (_gaSource == "LMP" || _gaSource == "EDD");
                 _lmpCtrl.clear();
                 _expectedDeliveryCtrl.clear();
                 _gestWeeksCtrl.clear();
@@ -2064,7 +2316,7 @@ class _ScreeningFormState extends State<ScreeningForm>
             const SizedBox(height: 16),
             TextFormField(
               controller: _lmpCtrl, readOnly: true,
-              decoration: _requiredDecoration("6. LMP Date").copyWith(
+              decoration: _requiredDecoration("5. If LMP known, LMP").copyWith(
                 suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18)),
               style: TextStyle(color: c.textPrimary),
               onTap: () async {
@@ -2075,11 +2327,10 @@ class _ScreeningFormState extends State<ScreeningForm>
                 );
                 if (picked != null) {
                   _lmpCtrl.text = "${picked.day}/${picked.month}/${picked.year}";
-                  final edd = picked.add(const Duration(days: 280));
+                  final edd = _eddFromLmp(picked);
                   _expectedDeliveryCtrl.text = "${edd.day}/${edd.month}/${edd.year}";
-                  final totalDays = DateTime.now().difference(picked).inDays;
-                  _gestWeeksCtrl.text = (totalDays ~/ 7).toString();
-                  _gestDaysCtrl.text  = (totalDays % 7).toString();
+                  // Prefer LMP→GA directly (avoids wrong GA from a stale EDD).
+                  _setGestationFromLmp(picked);
                   setState(() {});
                 }
               },
@@ -2087,8 +2338,24 @@ class _ScreeningFormState extends State<ScreeningForm>
             const SizedBox(height: 12),
             TextFormField(
               controller: _expectedDeliveryCtrl, readOnly: true,
-              decoration: _requiredDecoration("Expected Delivery Date (auto-calculated)"),
+              decoration: _inputDecoration("EDD (auto-calculated in app)"),
               style: TextStyle(color: c.textPrimary),
+            ),
+            const SizedBox(height: 12),
+            InputDecorator(
+              decoration: _inputDecoration(
+                  "7. Calculated gestational age (auto calculated in app)"),
+              child: Text(
+                _gestWeeksCtrl.text.trim().isEmpty
+                    ? "____ weeks ; ____ days"
+                    : "${_gestWeeksCtrl.text} weeks ; ${_gestDaysCtrl.text.isEmpty ? "0" : _gestDaysCtrl.text} days",
+                style: TextStyle(
+                    color: _gestWeeksCtrl.text.trim().isEmpty
+                        ? c.textTertiary
+                        : c.textPrimary,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15),
+              ),
             ),
           ],
 
@@ -2096,7 +2363,7 @@ class _ScreeningFormState extends State<ScreeningForm>
             const SizedBox(height: 16),
             TextFormField(
               controller: _expectedDeliveryCtrl, readOnly: true,
-              decoration: _requiredDecoration("7. Expected Delivery Date").copyWith(
+              decoration: _requiredDecoration("6. If LMP not known, EDD").copyWith(
                 suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18)),
               style: TextStyle(color: c.textPrimary),
               onTap: () async {
@@ -2108,17 +2375,31 @@ class _ScreeningFormState extends State<ScreeningForm>
                 if (picked != null) {
                   _expectedDeliveryCtrl.text =
                       "${picked.day}/${picked.month}/${picked.year}";
-                  final remaining = picked.difference(DateTime.now()).inDays;
-                  final totalGest = 280 - remaining;
-                  _gestWeeksCtrl.text = (totalGest ~/ 7).toString();
-                  _gestDaysCtrl.text  = (totalGest % 7).toString();
+                  _setGestationFromEdd(picked);
                   setState(() {});
                 }
               },
             ),
+            const SizedBox(height: 12),
+            InputDecorator(
+              decoration: _inputDecoration(
+                  "7. Calculated gestational age (auto calculated in app)"),
+              child: Text(
+                _gestWeeksCtrl.text.trim().isEmpty
+                    ? "____ weeks ; ____ days"
+                    : "${_gestWeeksCtrl.text} weeks ; ${_gestDaysCtrl.text.isEmpty ? "0" : _gestDaysCtrl.text} days",
+                style: TextStyle(
+                    color: _gestWeeksCtrl.text.trim().isEmpty
+                        ? c.textTertiary
+                        : c.textPrimary,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15),
+              ),
+            ),
           ],
 
-          if (_gaSource == "LMP" || _gaSource == "EDD") ...[
+          if ((_gaSource == "LMP" || _gaSource == "EDD") &&
+              _gestWeeksCtrl.text.trim().isNotEmpty) ...[
             const SizedBox(height: 16),
             _gestationResultBanner(c),
           ],
@@ -2144,8 +2425,15 @@ class _ScreeningFormState extends State<ScreeningForm>
         setState(() {
           _gestationKnownInWeeks = value;
           _gaSource = null;
-          _gestWeeksCtrl.text = value ? "24" : "";
-          _gestDaysCtrl.text  = value ? "0"  : "";
+          _eddKnown = null;
+          // Field 2 starts at eligible window: 25 weeks 0 days.
+          if (value == true) {
+            _gestWeeksCtrl.text = "25";
+            _gestDaysCtrl.text = "0";
+          } else {
+            _gestWeeksCtrl.text = "";
+            _gestDaysCtrl.text = "";
+          }
           _gaAssessmentMethod = "Select";
           _lmpCtrl.clear();
           _expectedDeliveryCtrl.clear();
@@ -2181,37 +2469,58 @@ class _ScreeningFormState extends State<ScreeningForm>
   Widget _gestationResultBanner(AppColors c) {
     final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
     final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
-    final inRange = weeks >= 24 && (weeks < 31 || (weeks == 31 && days <= 6));
+    final inRange = (() {
+      final t = weeks * 7 + days;
+      return t >= 25 * 7 && t <= 31 * 7 + 6;
+    })();
+    final tooHigh = weeks * 7 + days > 31 * 7 + 6;
     final color   = inRange ? c.success : c.danger;
     final soft    = inRange ? c.successSoft : c.dangerSoft;
+    final weeksText = _gestWeeksCtrl.text.trim().isEmpty ? "____" : _gestWeeksCtrl.text;
+    final daysText = _gestDaysCtrl.text.trim().isEmpty ? "____" : _gestDaysCtrl.text;
 
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: soft,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withOpacity(0.3)),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text("8. Calculated Gestational Age",
-            style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 13)),
-        const SizedBox(height: 8),
-        Text("${_gestWeeksCtrl.text} weeks  ${_gestDaysCtrl.text} days",
-            style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.w800)),
-        if (!inRange) ...[
-          const SizedBox(height: 8),
-          Row(children: [
-            Icon(Icons.warning_amber_rounded, color: c.danger, size: 16),
-            const SizedBox(width: 6),
-            Expanded(child: Text(
-              weeks < 25
-                  ? "Below 24 weeks — cannot proceed."
-                  : "Above 31+6 weeks — cannot proceed.",
-              style: TextStyle(color: c.danger, fontSize: 12, fontWeight: FontWeight.w600),
-            )),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: soft,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: color.withOpacity(0.3)),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text("7. Calculated gestational age (auto calculated in app)",
+                style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 13)),
+            const SizedBox(height: 8),
+            Text("$weeksText weeks ; $daysText days",
+                style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 6),
+            Text(
+              inRange
+                  ? "Participant is eligible for the study."
+                  : "Participant is not eligible for the study.",
+              style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
+            ),
           ]),
+        ),
+        if (tooHigh) ...[
+          const SizedBox(height: 10),
+          _infoBanner(
+            icon: Icons.cancel_rounded,
+            text: "If ≥32 weeks – cannot proceed. Gestational age is outside the eligibility window (25 weeks 0 days to 31 weeks 6 days).",
+            color: c.danger, softColor: c.dangerSoft, c: c,
+          ),
         ],
-      ]),
+        if (!inRange && !tooHigh && _gestWeeksCtrl.text.trim().isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _infoBanner(
+            icon: Icons.cancel_rounded,
+            text: "Gestational age <25 weeks — outside eligibility window (25w0d–31w6d). Cannot proceed.",
+            color: c.danger, softColor: c.dangerSoft, c: c,
+          ),
+        ],
+      ],
     );
   }
 
@@ -2244,13 +2553,13 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Widget _buildIdentificationSection(AppColors c, List<TextInputFormatter> nameFormatter) {
     return _sectionCard(
-      title: "A2 · IDENTIFICATION",
+      title: "A2 · Identification",
       icon: Icons.badge_rounded,
       accentColor: c.primary,
       children: [
         TextFormField(
           controller: _screeningIdCtrl, readOnly: true,
-          decoration: _inputDecoration("9. Screening ID"),
+          decoration: _inputDecoration("8. Screening ID (auto filled)"),
           style: TextStyle(color: c.textPrimary),
         ),
         const SizedBox(height: 12),
@@ -2260,7 +2569,7 @@ class _ScreeningFormState extends State<ScreeningForm>
             child: DropdownButtonFormField<String>(
               value: _selectedSite,
               dropdownColor: c.surface,
-              decoration: _inputDecoration("10. Site"),
+              decoration: _requiredDecoration("9. Site"),
               items: _siteMap.keys.map((s) =>
                   DropdownMenuItem(value: s,
                       child: Text(s, style: TextStyle(color: c.textPrimary)))).toList(),
@@ -2275,7 +2584,7 @@ class _ScreeningFormState extends State<ScreeningForm>
             child: TextFormField(
               readOnly: true,
               controller: TextEditingController(text: _siteMap[_selectedSite]),
-              decoration: _inputDecoration("11. Site ID"),
+              decoration: _inputDecoration("10. Site ID (auto filled)"),
               style: TextStyle(color: c.textPrimary),
             ),
           ),
@@ -2284,7 +2593,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
         TextFormField(
           controller: _screeningDateTimeCtrl, readOnly: true,
-          decoration: _requiredDecoration("12. Screening Date & Time", hint: "Tap to choose").copyWith(
+          decoration: _requiredDecoration("11. Screening Date & Time", hint: "Tap to choose").copyWith(
             suffixIcon: Icon(Icons.access_time_rounded, color: c.textTertiary, size: 18),
           ),
           style: TextStyle(color: c.textPrimary),
@@ -2314,17 +2623,30 @@ class _ScreeningFormState extends State<ScreeningForm>
         ),
         const SizedBox(height: 12),
 
-        TextFormField(
-          controller: _screenedByCtrl,
-          readOnly: true,
-          decoration: _requiredDecoration("13. Screened by").copyWith(
-            helperText: "Auto-filled from your login",
-            helperStyle: TextStyle(color: c.textTertiary, fontSize: 11),
-          ),
-          validator: (v) => _submitted && (v == null || v.trim().isEmpty || v == "Select")
-              ? "Required" : null,
-          style: TextStyle(color: c.textPrimary),
-        ),
+        Builder(builder: (_) {
+          final opts = _consentNurseOptions();
+          final cur = _screenedByCtrl.text.trim();
+          final value = cur.isEmpty
+              ? "Select"
+              : (opts.contains(cur) || cur == "Select" ? cur : cur);
+          return DropdownButtonFormField<String>(
+            value: value,
+            decoration: _requiredDecoration("12. Screened by (First name)"),
+            dropdownColor: c.surface,
+            items: [
+              _ddItem("Select", c, hint: true),
+              if (cur.isNotEmpty && cur != "Select" && !opts.contains(cur))
+                _ddItem(cur, c),
+              ...opts.map((n) => _ddItem(n, c)),
+            ],
+            onChanged: (v) => setState(() {
+              _screenedByCtrl.text = (v == null || v == "Select") ? "" : v;
+            }),
+            validator: (v) => _submitted && (v == null || v == "Select" || v.trim().isEmpty)
+                ? "Required" : null,
+            style: TextStyle(color: c.textPrimary),
+          );
+        }),
         const SizedBox(height: 16),
 
         Padding(
@@ -2335,18 +2657,36 @@ class _ScreeningFormState extends State<ScreeningForm>
                     color: c.primary.withOpacity(0.5),
                     borderRadius: BorderRadius.circular(2))),
             const SizedBox(width: 8),
-            Text("A3 · MATERNAL IDENTIFICATION",
+            Text("A3 · Maternal Identification",
                 style: TextStyle(color: c.textSecondary,
                     fontSize: 12, fontWeight: FontWeight.w700, letterSpacing: .3)),
           ]),
         ),
 
+        if (_duplicateWarn.isNotEmpty) ...[
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: c.warningSoft,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: c.warning.withOpacity(0.35)),
+            ),
+            child: Text(_duplicateWarn,
+                style: TextStyle(color: c.warning, fontSize: 12, fontWeight: FontWeight.w600)),
+          ),
+        ],
+
         Row(children: [
           Expanded(
             child: TextFormField(
               controller: _motherFirstCtrl,
-              onChanged: (_) => _assignScreeningIdIfNeeded(),
-              decoration: _requiredDecoration("14a. Mother's First Name"),
+              onChanged: (_) {
+                _assignScreeningIdIfNeeded();
+                _checkDuplicateMotherName();
+              },
+              decoration: _requiredDecoration("13. Mother's Name — First"),
               validator: (v) => _submitted ? _charOnlyValidator(v) : null,
               inputFormatters: nameFormatter,
               style: TextStyle(color: c.textPrimary),
@@ -2356,10 +2696,12 @@ class _ScreeningFormState extends State<ScreeningForm>
           Expanded(
             child: TextFormField(
               controller: _motherSurnameCtrl,
-              decoration: _inputDecoration("14b. Mother's Surname (optional)"),
+              decoration: _inputDecoration("Surname"),
               validator: (v) {
                 if (v != null && v.trim().isNotEmpty &&
-                    !RegExp(r'^[A-Za-z ]+$').hasMatch(v.trim())) return "Letters only";
+                    !RegExp(r"^[\p{L} .'\-]+$", unicode: true).hasMatch(v.trim())) {
+                  return "Letters only";
+                }
                 return null;
               },
               inputFormatters: nameFormatter,
@@ -2373,7 +2715,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           Expanded(
             child: TextFormField(
               controller: _husbandFirstCtrl,
-              decoration: _requiredDecoration("15a. Husband's First Name"),
+              decoration: _requiredDecoration("14. Husband's Name — First"),
               validator: (v) => _submitted ? _charOnlyValidator(v) : null,
               inputFormatters: nameFormatter,
               style: TextStyle(color: c.textPrimary),
@@ -2383,10 +2725,12 @@ class _ScreeningFormState extends State<ScreeningForm>
           Expanded(
             child: TextFormField(
               controller: _husbandSurnameCtrl,
-              decoration: _inputDecoration("15b. Husband's Surname (optional)"),
+              decoration: _inputDecoration("Surname"),
               validator: (v) {
                 if (v != null && v.trim().isNotEmpty &&
-                    !RegExp(r'^[A-Za-z ]+$').hasMatch(v.trim())) return "Letters only";
+                    !RegExp(r"^[\p{L} .'\-]+$", unicode: true).hasMatch(v.trim())) {
+                  return "Letters only";
+                }
                 return null;
               },
               inputFormatters: nameFormatter,
@@ -2400,82 +2744,27 @@ class _ScreeningFormState extends State<ScreeningForm>
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               TextFormField(
-                controller: _motherPhoneCtrl,
-                focusNode: _motherPhoneFocus,
-                decoration: _requiredDecoration("18a. Mobile Number — Mother (10 digits)"),
-                keyboardType: TextInputType.number,
-                style: TextStyle(color: c.textPrimary),
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(10),
-                ],
-                validator: _phoneValidator,
-                onChanged: (value) => setState(() {
-                  _motherPhoneCount       = value.length;
-                  _motherMobileLimitReached = value.length >= 10;
-                }),
-              ),
-              if (_motherPhoneFocus.hasFocus)
-                Align(alignment: Alignment.centerRight,
-                    child: Padding(padding: const EdgeInsets.only(top: 3, right: 4),
-                        child: Text("${_motherPhoneCount}/10",
-                            style: TextStyle(
-                                color: _motherPhoneCount == 10 ? c.success : c.textTertiary,
-                                fontSize: 11, fontWeight: FontWeight.w600)))),
-            ]),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              TextFormField(
-                controller: _husbandPhoneCtrl,
-                focusNode: _husbandPhoneFocus,
-                keyboardType: TextInputType.number,
-                maxLength: 10,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(10),
-                ],
-                decoration: _requiredDecoration("18b. Mobile Number — Husband (10 digits)")
-                    .copyWith(counterText: ""),
-                validator: _phoneValidator,
-                style: TextStyle(color: c.textPrimary),
-                onChanged: (value) => setState(() {
-                  _husbandPhoneCount       = value.length;
-                  _husbandPhoneLimitReached = value.length == 10;
-                }),
-              ),
-              if (_husbandPhoneFocus.hasFocus)
-                Align(alignment: Alignment.centerRight,
-                    child: Padding(padding: const EdgeInsets.only(top: 3, right: 4),
-                        child: Text("${_husbandPhoneCount}/10",
-                            style: TextStyle(
-                                color: _husbandPhoneCount == 10 ? c.success : c.textTertiary,
-                                fontSize: 11, fontWeight: FontWeight.w600)))),
-            ]),
-          ),
-        ]),
-        const SizedBox(height: 12),
-
-        Row(children: [
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              TextFormField(
                 controller: _maternalUidCtrl,
                 focusNode: _maternalUidFocus,
-                keyboardType: TextInputType.number,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(12),
-                ],
-                decoration: _requiredDecoration("16. Maternal UID (CR number, max 12 digits)")
+                keyboardType: _selectedSite == "AMC"
+                    ? TextInputType.text
+                    : TextInputType.number,
+                inputFormatters: _maternalUidFormatters(),
+                decoration: _requiredDecoration(_maternalUidLabel())
                     .copyWith(counterText: ""),
-                onChanged: (v) => setState(() => _maternalUidLimitReached = v.length == 12),
+                validator: (v) => _submitted ? _maternalUidValidator(v) : null,
+                onChanged: (v) => setState(() {
+                  final max = _selectedSite == "AMC" ? 15 : 12;
+                  _maternalUidLimitReached = v.length >= max;
+                  _maternalUidCount = v.length;
+                }),
                 style: TextStyle(color: c.textPrimary),
               ),
               if (_maternalUidFocus.hasFocus && _maternalUidLimitReached)
                 Padding(padding: const EdgeInsets.only(top: 3),
-                    child: Text("Maximum 12 digits reached",
+                    child: Text(_selectedSite == "AMC"
+                            ? "Maximum length reached"
+                            : "Maximum 12 digits reached",
                         style: TextStyle(color: c.success,
                             fontSize: 11, fontWeight: FontWeight.w600))),
             ]),
@@ -2506,11 +2795,86 @@ class _ScreeningFormState extends State<ScreeningForm>
 
         TextFormField(
           controller: _hospitalNoCtrl,
-          keyboardType: TextInputType.number,
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-          decoration: _inputDecoration("17. Hospital Admission Number (optional)"),
+          keyboardType: _selectedSite == "AMC"
+              ? TextInputType.text
+              : TextInputType.number,
+          inputFormatters: _hospitalNoFormatters(),
+          decoration: (_selectedSite == "PGIMER"
+                  ? _requiredDecoration("16. Hospital Admission Number")
+                  : _inputDecoration(_hospitalNoLabel()))
+              .copyWith(
+            errorText: _hospitalNoLiveError,
+            hintText: _hospitalNoHint(),
+          ),
+          validator: (v) => _submitted ? _hospitalNoValidator(v) : null,
+          onChanged: (v) => setState(() {
+            _hospitalNoLiveError = _hospitalNoLiveMessage(v);
+          }),
           style: TextStyle(color: c.textPrimary),
         ),
+        const SizedBox(height: 12),
+
+        Row(children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              TextFormField(
+                controller: _motherPhoneCtrl,
+                focusNode: _motherPhoneFocus,
+                decoration: _requiredDecoration("17. Mobile Number — Mother"),
+                keyboardType: TextInputType.number,
+                style: TextStyle(color: c.textPrimary),
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(10),
+                ],
+                validator: (v) => _submitted ? _phoneValidator(v) : null,
+                onChanged: (value) => setState(() {
+                  _motherPhoneCount       = value.length;
+                  _motherMobileLimitReached = value.length >= 10;
+                }),
+              ),
+              if (_motherPhoneFocus.hasFocus)
+                Align(alignment: Alignment.centerRight,
+                    child: Padding(padding: const EdgeInsets.only(top: 3, right: 4),
+                        child: Text("${_motherPhoneCount}/10",
+                            style: TextStyle(
+                                color: _motherPhoneCount == 10 ? c.success : c.textTertiary,
+                                fontSize: 11, fontWeight: FontWeight.w600)))),
+            ]),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              TextFormField(
+                controller: _husbandPhoneCtrl,
+                focusNode: _husbandPhoneFocus,
+                keyboardType: TextInputType.number,
+                maxLength: 10,
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(10),
+                ],
+                decoration: _requiredDecoration("Husband")
+                    .copyWith(counterText: ""),
+                validator: (v) => _submitted ? _phoneValidator(v) : null,
+                style: TextStyle(color: c.textPrimary),
+                onChanged: (value) => setState(() {
+                  _husbandPhoneCount       = value.length;
+                  _husbandPhoneLimitReached = value.length == 10;
+                }),
+              ),
+              if (_husbandPhoneFocus.hasFocus)
+                Align(alignment: Alignment.centerRight,
+                    child: Padding(padding: const EdgeInsets.only(top: 3, right: 4),
+                        child: Text("${_husbandPhoneCount}/10",
+                            style: TextStyle(
+                                color: _husbandPhoneCount == 10 ? c.success : c.textTertiary,
+                                fontSize: 11, fontWeight: FontWeight.w600)))),
+            ]),
+          ),
+        ]),
+        const SizedBox(height: 12),
+
       ],
     );
   }
@@ -2519,24 +2883,16 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Widget _buildExclusionSection(AppColors c) {
     return _sectionCard(
-      title: "A4 · EXCLUSION CRITERIA",
+      title: "A4 · Exclusion Criteria",
       icon: Icons.block_rounded,
       accentColor: c.danger,
-      trailing: TextButton.icon(
-        onPressed: _exclusionAnswers.values.any((v) => v != null)
-            ? _resetExclusionSection : null,
-        icon: Icon(Icons.refresh_rounded, size: 16, color: c.danger),
-        label: Text("Reset", style: TextStyle(color: c.danger, fontSize: 12)),
-        style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6)),
-      ),
       children: [
         _exclusionYesNo("ANOMALY",
-            "19. Major structural anomalies or genetic abnormality (suspected/proven)"),
-        _exclusionYesNo("HYDROPS", "20. Fetal Hydrops"),
-        _exclusionYesNo("RESUSCITATION", "22. Decision to forego resuscitation"),
-        _exclusionYesNo("INSUFFICIENT", "24. Insufficient time for antenatal consent"),
-        _exclusionYesNo("IUFD", "26. Intrauterine Fetal Death (IUFD)"),
+            "18. Major structural anomalies or genetic abnormality (suspected/proven)"),
+        _exclusionYesNo("HYDROPS", "19. Fetal Hydrops"),
+        _exclusionYesNo("RESUSCITATION", "21. Decision to forego resuscitation"),
+        _exclusionYesNo("INSUFFICIENT", "23. Insufficient time for consent"),
+        _exclusionYesNo("IUFD", "25. IUFD"),
 
         if (_allExclusionsAnswered) ...[
           const SizedBox(height: 4),
@@ -2545,8 +2901,8 @@ class _ScreeningFormState extends State<ScreeningForm>
                 ? Icons.cancel_rounded
                 : Icons.check_circle_rounded,
             text: _exclusionPresent
-                ? "Patient is NOT eligible for the trial."
-                : "No exclusions — eligible to proceed.",
+                ? "Exclusion criteria present — participant is not fit for consent. End participation."
+                : "All options No — Proceed for consent",
             color:    _exclusionPresent ? c.danger   : c.success,
             softColor: _exclusionPresent ? c.dangerSoft : c.successSoft,
             c: c,
@@ -2560,13 +2916,13 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Widget _buildConsentSection(AppColors c) {
     return _sectionCard(
-      title: "A5 · CONSENT",
+      title: "A5 · Proceed for Consent",
       icon: Icons.verified_rounded,
       accentColor: c.success,
       children: [
         DropdownButtonFormField<String>(
           value: _consentStatus,
-          decoration: _requiredDecoration("27. Consent"),
+          decoration: _requiredDecoration("26. Consent"),
           dropdownColor: c.surface,
           items: [
             _ddItem("Select", c, hint: true),
@@ -2599,7 +2955,7 @@ class _ScreeningFormState extends State<ScreeningForm>
         if (_consentStatus == "Yes" || _consentStatus == "No" || _consentStatus == "Trial run") ...[
           DropdownButtonFormField<String>(
             value: _relationshipToParticipant,
-            decoration: _requiredDecoration("28. Consent obtained from"),
+            decoration: _requiredDecoration("27. Consent obtained from"),
             dropdownColor: c.surface,
             items: [
               _ddItem("Select", c, hint: true),
@@ -2618,7 +2974,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           if (_relationshipToParticipant == "Other") ...[
             const SizedBox(height: 10),
             TextFormField(
-              decoration: _requiredDecoration("Specify relationship"),
+              decoration: _requiredDecoration("Specify"),
               onChanged: (v) => _relationshipOtherText = v,
               style: TextStyle(color: c.textPrimary),
               validator: (v) {
@@ -2627,26 +2983,12 @@ class _ScreeningFormState extends State<ScreeningForm>
               },
             ),
           ],
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            value: _consentTakenBy,
-            decoration: _requiredDecoration("31. Consent obtained by (nurse)"),
-            dropdownColor: c.surface,
-            items: [
-              _ddItem("Select", c, hint: true),
-              ...(_nursesBySite[_selectedSite] ?? []).map((n) => _ddItem(n, c)),
-            ],
-            onChanged: (v) => setState(() => _consentTakenBy = v!),
-            validator: (v) =>
-                _submitted && (v == null || v == "Select") ? "Required" : null,
-            style: TextStyle(color: c.textPrimary),
-          ),
           const SizedBox(height: 14),
         ],
 
-        // 29. Reason for refusal (if No)
+        // 28. Reason for refusal (if No)
         if (_consentStatus == "No") ...[
-          Text("29. If no, reason for consent refusal (select all that apply) *",
+          Text("28. If no, reason for consent refusal (select all that apply) *",
               style: TextStyle(color: c.textSecondary, fontSize: 13)),
           const SizedBox(height: 8),
           ...[
@@ -2671,7 +3013,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
         // 30. Reason not approached (if Not approached) — multi-select, matches webform
         if (_consentStatus == "Not approached") ...[
-          Text("30. If not approached, reason (select all that apply) *",
+          Text("29. If not approached, reason (select all that apply) *",
               style: TextStyle(color: c.textSecondary, fontSize: 13)),
           const SizedBox(height: 8),
           ...[
@@ -2695,11 +3037,29 @@ class _ScreeningFormState extends State<ScreeningForm>
           const SizedBox(height: 14),
         ],
 
-        // 32. Video PIS shown — shown whenever consent_given has any value
+        // 30. Consent obtained by — Yes / No / Trial run (web order after 28/29)
+        if (_consentStatus == "Yes" || _consentStatus == "No" || _consentStatus == "Trial run") ...[
+          DropdownButtonFormField<String>(
+            value: _consentTakenBy,
+            decoration: _requiredDecoration("30. Consent obtained by (First name)"),
+            dropdownColor: c.surface,
+            items: [
+              _ddItem("Select", c, hint: true),
+              ...(_consentNurseOptions()).map((n) => _ddItem(n, c)),
+            ],
+            onChanged: (v) => setState(() => _consentTakenBy = v!),
+            validator: (v) =>
+                _submitted && (v == null || v == "Select") ? "Required" : null,
+            style: TextStyle(color: c.textPrimary),
+          ),
+          const SizedBox(height: 14),
+        ],
+
+        // 31. Video PIS shown — whenever any consent value is selected
         if (_consentStatus != "Select") ...[
           DropdownButtonFormField<String>(
             value: _videoPisShown,
-            decoration: _requiredDecoration("32. Video PIS shown?"),
+            decoration: _requiredDecoration("31. Video PIS shown"),
             dropdownColor: c.surface,
             items: [
               _ddItem("Select", c, hint: true),
@@ -2785,15 +3145,98 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   // ── VALIDATORS ────────────────────────────────────────────────────────────
 
+  List<String> _consentNurseOptions() {
+    if (_siteScreeners.isNotEmpty) return _siteScreeners;
+    return _nursesBySite[_selectedSite] ?? const ["Research Nurse"];
+  }
+
+  String? _maternalUidValidator(String? v) {
+    final val = (v ?? "").trim();
+    if (_selectedSite == "PGIMER") {
+      if (val.isEmpty) return "Required";
+      if (!RegExp(r'^\d{12}$').hasMatch(val)) return "Must be exactly 12 digits";
+      return null;
+    }
+    if (_selectedSite == "AMC") {
+      if (val.isEmpty) return "Required";
+      if (!RegExp(r'^\d+/\d{4}$').hasMatch(val)) {
+        return "Must be serial/year, e.g. 123/2026";
+      }
+      return null;
+    }
+    if (val.isEmpty) return "Required";
+    return null;
+  }
+
+  String? _hospitalNoValidator(String? v) {
+    final val = (v ?? "").trim();
+    if (_selectedSite == "PGIMER") {
+      if (val.isEmpty) return "Required";
+      if (!RegExp(r'^\d{10}$').hasMatch(val)) return "Must be exactly 10 digits";
+      return null;
+    }
+    if (_selectedSite == "GMCH-A" && val.isNotEmpty &&
+        !RegExp(r'^\d{11}$').hasMatch(val)) {
+      return "Must be exactly 11 digits";
+    }
+    if (_selectedSite == "GMCH" && val.isNotEmpty &&
+        !RegExp(r'^\d{9,11}$').hasMatch(val)) {
+      return "Must be 9–11 digits";
+    }
+    if (_selectedSite == "IOG" && val.isNotEmpty &&
+        !RegExp(r'^\d{4,6}$').hasMatch(val)) {
+      return "Must be 4–6 digits";
+    }
+    if (_selectedSite == "AMC" && val.isNotEmpty &&
+        !RegExp(r'^\d+/\d{4}$').hasMatch(val)) {
+      return "Must be serial/year, e.g. 123/2026";
+    }
+    return null;
+  }
+
+  /// Live hint while typing (web shows field-error as soon as value fails pattern).
+  String? _hospitalNoLiveMessage(String? v) {
+    final val = (v ?? "").trim();
+    if (val.isEmpty) {
+      return _selectedSite == "PGIMER" ? "Required" : null;
+    }
+    return _hospitalNoValidator(val);
+  }
+
+  String _hospitalNoHint() {
+    switch (_selectedSite) {
+      case "GMCH-A":
+        return "11-digit admission number";
+      case "AMC":
+        return "e.g. 123/2026";
+      case "GMCH":
+        return "9–11 digit number";
+      case "IOG":
+        return "4–6 digit MRD number";
+      case "PGIMER":
+        return "10-digit admission number";
+      default:
+        return "Admission / MRD number";
+    }
+  }
+
   String? _charOnlyValidator(String? v) {
     if (v == null || v.trim().isEmpty) return "Required";
-    if (!RegExp(r'^[A-Za-z ]+$').hasMatch(v.trim())) return "Letters only";
+    if (!RegExp(r"^[\p{L} .'\-]+$", unicode: true).hasMatch(v.trim())) {
+      return "Letters only";
+    }
     return null;
   }
 
   String? _phoneValidator(String? v) {
     if (v == null || v.trim().isEmpty) return "Required";
-    if (!RegExp(r'^\d{10}$').hasMatch(v.trim())) return "Enter 10 digits";
+    // Web save validate(): exactly 10 digits. Blur also checks 6–9 start.
+    if (!RegExp(r'^\d{10}$').hasMatch(v.trim())) {
+      return "Must be exactly 10 digits";
+    }
+    if (!RegExp(r'^[6-9]').hasMatch(v.trim())) {
+      return "Indian mobile must start with 6, 7, 8, or 9";
+    }
     return null;
   }
 }

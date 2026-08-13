@@ -4,7 +4,6 @@ import '../services/api_service.dart';
 import '../services/forms_api_service.dart';
 import '../models/form_c.dart';
 import '../models/birth_resuscitation.dart';
-import '../screens/helper_fio2_auc.dart';
 import '../models/form_b.dart';
 import '../theme/app_theme.dart';
 import '../widgets/theme_toggle_widget.dart';
@@ -19,6 +18,8 @@ class FormCResuscitationDetails extends StatefulWidget {
   // B1–B3 fields. Form C fills B4–B6 into the same object and re-saves so
   // the whole thing lands in ONE backend row (birth_resuscitation table).
   final BirthResuscitationData? shared;
+  /// When true, form is read-only (previously filled review).
+  final bool viewOnly;
 
   const FormCResuscitationDetails({
     super.key,
@@ -28,6 +29,7 @@ class FormCResuscitationDetails extends StatefulWidget {
     required this.babyUid,
     this.formB,
     this.shared,
+    this.viewOnly = false,
   });
 
   @override
@@ -72,7 +74,8 @@ class _FormCResuscitationDetailsState
   int?   _cordClampedAtTotalSeconds;
 
   // ── State ─────────────────────────────────────────────────────────────────
-  bool?   _ventilation;
+  // Form C is only reached when Form B Q23 = Required → PPV path.
+  bool?   _ventilation = true;
   String? _device;
   bool?   _sibPeep;
   String? _sibPeepWith;         // 29a. Yes / No dropdown (with PEEP valve?)
@@ -96,9 +99,9 @@ class _FormCResuscitationDetailsState
 
   // ── Timeline ──────────────────────────────────────────────────────────────
   final List<int>    _timelineMins = [1, 5, 10, 15, 20];
+  // Web B5 (48–50): Oxygen, CPAP, Apgar only.
   final List<String> _timelineRows = [
-    "Oxygen", "Ventilation", "Chest compression",
-    "Intubation", "Medication", "Fluid bolus", "CPAP",
+    "Oxygen", "CPAP",
   ];
   final Map<String, Map<int, String?>> _timeline = {};
 
@@ -116,6 +119,187 @@ class _FormCResuscitationDetailsState
     for (final row in _timelineRows) {
       _timeline[row] = {for (final m in _timelineMins) m: null};
     }
+    if (widget.shared != null) {
+      _applyBirthData(widget.shared!);
+    } else {
+      _hydrateFromSaved();
+    }
+  }
+
+  void _applyBirthData(BirthResuscitationData d) {
+    setState(() {
+      _device = d.devicePpv;
+      _sibPeepWith = d.sibPeepWith;
+      _sibPeep = d.sibPeepWith == "Yes"
+          ? true
+          : (d.sibPeepWith == "No" ? false : null);
+      if (d.sibPeepCmh2o != null) {
+        _sibPeepValueCtrl.text = d.sibPeepCmh2o.toString();
+      }
+      if (d.tpiecePip != null) _tpiecePipCtrl.text = d.tpiecePip.toString();
+      if (d.tpiecePeep != null) _tpiecePeepCtrl.text = d.tpiecePeep.toString();
+      if (d.tpieceFlow != null) _tpieceFlowCtrl.text = d.tpieceFlow.toString();
+      _interface = d.interfaceUsed;
+      if (d.ppvDuration != null) {
+        _ventDurationCtrl.text = d.ppvDuration.toString();
+      }
+      _intubation = d.intubation;
+      _chestCompression = d.chestCompression;
+      if (d.ccDuration != null) _ccDurationCtrl.text = d.ccDuration.toString();
+      _epinephrine = d.adrenaline;
+      _adrenalineDilution = d.adrenalineDilution;
+      _adrenalineRoute = d.adrenalineRoute;
+      _fluidBolus = d.fluidBolus;
+      if (d.fluidBolusDoses != null) {
+        _fluidBolusDosesCtrl.text = d.fluidBolusDoses.toString();
+      }
+      if (d.fluidBolusCumulative != null) {
+        _fluidBolusCumCtrl.text = d.fluidBolusCumulative.toString();
+      }
+      _placentalTransfusion = d.placentalTransfusion;
+      _placentalMethod = d.transfusionMethod;
+      _cordClampedAtDisplay = d.cordClampTimestamp ?? "";
+      if (d.cordClampTime != null) {
+        _cordClampTimeCtrl.text = "${d.cordClampTime} sec";
+      }
+      if (d.timeToRespiration != null) {
+        _timeToRespCtrl.text = _secondsToHms(d.timeToRespiration!);
+      }
+      if (d.spo25min != null) _spo2At5Ctrl.text = d.spo25min.toString();
+      if (d.timeToSpo280 != null) {
+        _timeToSpo2Ctrl.text = _secondsToHms(d.timeToSpo280!);
+      }
+      _cordBloodDone = d.cordBloodDone;
+      _cordBloodWithin1hr = d.cordBloodWithin1hr;
+      _cordBloodSource = d.cordBloodSource;
+      if (d.cordPh != null) _phCtrl.text = d.cordPh.toString();
+      if (d.cordSbe != null) _beCtrl.text = d.cordSbe.toString();
+      if (d.cordPco2 != null) _pco2Ctrl.text = d.cordPco2.toString();
+      _resusFailure = d.resusFailure;
+      if (d.spo2ExitTrialGas != null) {
+        _spo2ExitCtrl.text = d.spo2ExitTrialGas.toString();
+      }
+      if (d.totalResusTime != null) {
+        _totalTimeCtrl.text = d.totalResusTime.toString();
+      }
+      final exit = d.reasonExitTrialGas ?? "";
+      const exitOpts = [
+        "Responded to resuscitation",
+        "Required override to 100% O2 or CC",
+        "Other",
+      ];
+      if (exit.isEmpty) {
+        _exitReason = null;
+      } else if (exitOpts.contains(exit)) {
+        _exitReason = exit;
+      } else {
+        _exitReason = "Other";
+        _exitOtherCtrl.text = exit;
+      }
+      _blenderStopped = d.blenderStopped;
+      if (d.blenderStoppedDescription != null) {
+        _blenderStopDescCtrl.text = d.blenderStoppedDescription!;
+      }
+      const rowLabel = {"oxygen": "Oxygen", "cpap": "CPAP"};
+      const ynIn = {"Yes": "Y", "No": "N", "Y": "Y", "N": "N", "NR": "NR"};
+      d.interventions.forEach((key, minMap) {
+        if (key == "apgar") {
+          minMap.forEach((min, val) {
+            final m = int.tryParse(min);
+            if (m != null) _apgarCtrls[m]?.text = val;
+          });
+          return;
+        }
+        final row = rowLabel[key];
+        if (row == null || !_timeline.containsKey(row)) return;
+        minMap.forEach((min, val) {
+          final m = int.tryParse(min);
+          if (m == null) return;
+          _timeline[row]![m] = ynIn[val] ?? val;
+        });
+      });
+    });
+  }
+
+  String _secondsToHms(int total) {
+    final h = total ~/ 3600;
+    final m = (total % 3600) ~/ 60;
+    final s = total % 60;
+    return "${h.toString().padLeft(2, '0')}:"
+        "${m.toString().padLeft(2, '0')}:"
+        "${s.toString().padLeft(2, '0')}";
+  }
+
+  Future<void> _hydrateFromSaved() async {
+    final eid = widget.formB?.enrollmentId.trim() ?? '';
+    if (eid.isNotEmpty) {
+      try {
+        final remote =
+            await FormsApiService.instance.loadBirthResuscitation(eid);
+        if (remote != null && mounted) {
+          _applyBirthData(BirthResuscitationData.fromJson(remote));
+          return;
+        }
+      } catch (_) {}
+    }
+    final existing = await _api.loadFormC(widget.screeningId);
+    if (existing == null || !mounted) return;
+    setState(() {
+      _ventilation = existing.ventilation;
+      _device = existing.device.isEmpty ? null : existing.device;
+      _sibPeep = existing.sibPeep;
+      _sibPeepWith = existing.sibPeep ? "Yes" : "No";
+      _interface = existing.interface.isEmpty ? null : existing.interface;
+      _ventDurationCtrl.text = existing.ventilationDuration;
+      _intubation = existing.intubation;
+      _chestCompression = existing.chestCompression;
+      _ccDurationCtrl.text = existing.chestCompressionDuration;
+      _epinephrine = existing.epinephrine;
+      _epiDoseCtrl.text = existing.epinephrineDoses;
+      _fluidBolus = existing.fluidBolus;
+      _placentalTransfusion = existing.placentalTransfusion;
+      _placentalMethod =
+          existing.placentalMethod.isEmpty ? null : existing.placentalMethod;
+      _cordClampedAtDisplay = existing.cordClampedAt;
+      _cordClampTimeCtrl.text = existing.cordClampTime;
+      _timeToRespCtrl.text = existing.timeToRespiration;
+      _timeToSpo2Ctrl.text = existing.timeToSpo2Above80;
+      _spo2At5Ctrl.text = existing.spo2At5Min;
+      _totalTimeCtrl.text = existing.totalTime;
+      _fio2ExitCtrl.text = existing.fio2Exit;
+      _spo2ExitCtrl.text = existing.spo2Exit;
+      _phCtrl.text = existing.ph;
+      _beCtrl.text = existing.be;
+      _pco2Ctrl.text = existing.pco2;
+      _cordBloodDone = existing.cordBloodDone;
+      _resusFailure = existing.resusFailure;
+      final exit = existing.exitReason;
+      const exitOpts = [
+        "Responded to resuscitation",
+        "Required override to 100% O2 or CC",
+        "Other",
+      ];
+      if (exit.isEmpty) {
+        _exitReason = null;
+      } else if (exitOpts.contains(exit)) {
+        _exitReason = exit;
+      } else {
+        _exitReason = "Other";
+        _exitOtherCtrl.text = exit;
+      }
+      for (final row in _timelineRows) {
+        final saved = existing.timelineChecks[row];
+        if (saved == null) continue;
+        for (final m in _timelineMins) {
+          if (saved.containsKey(m)) {
+            _timeline[row]![m] = saved[m]! ? "Y" : "N";
+          }
+        }
+      }
+      for (final e in existing.apgarScores.entries) {
+        _apgarCtrls[e.key]?.text = e.value;
+      }
+    });
   }
 
   @override
@@ -302,54 +486,77 @@ class _FormCResuscitationDetailsState
     setState(() => _submitted = true);
     if (!_formKey.currentState!.validate()) return;
 
-    final needsSibPeepDetails = _ventilation == true &&
+    final needsSibPeepDetails =
         (_device == "Self-inflating bag" || _device == "Both");
-    final needsTpieceDetails = _ventilation == true &&
+    final needsTpieceDetails =
         (_device == "T-piece" || _device == "Both");
 
     final checks = <List<dynamic>>[
-      [_ventilation == null,                                    "Please select PPV / ventilation status (29.)"],
-      [_ventilation == true && _device == null,                "Please select device (29.)"],
+      [_device == null,                                        "Please select device (29.)"],
       [needsSibPeepDetails && _sibPeepWith == null,            "Please answer SIB — With PEEP valve? (29a.)"],
       [needsSibPeepDetails && _sibPeepWith == "Yes" && _sibPeepValueCtrl.text.trim().isEmpty,
                                                                 "Please enter SIB PEEP value (29a.)"],
       [needsTpieceDetails && _tpiecePipCtrl.text.trim().isEmpty,   "Please enter T-piece PIP (29b.)"],
       [needsTpieceDetails && _tpiecePeepCtrl.text.trim().isEmpty,  "Please enter T-piece PEEP (29b.)"],
       [needsTpieceDetails && _tpieceFlowCtrl.text.trim().isEmpty,  "Please enter T-piece Flow (29b.)"],
-      [_ventilation == true && _interface == null,             "Please select interface (30.)"],
+      [_interface == null,                                     "Please select interface (30.)"],
       [_intubation == null,                                     "Please select intubation (32.)"],
       [_chestCompression == null,                               "Please select chest compression (33.)"],
       [_epinephrine == null,                                    "Please select epinephrine (35.)"],
       [_epinephrine == true && _adrenalineDilution == null,     "Please select epinephrine dilution (36.)"],
       [_epinephrine == true && _adrenalineRoute == null,        "Please select epinephrine route (37.)"],
-      [_fluidBolus == null,                                     "Please select fluid bolus (41.)"],
-      [_placentalTransfusion == null,                           "Please select placental transfusion (44.)"],
-      [_placentalTransfusion == true && _placentalMethod == null, "Please select transfusion method (45.)"],
-      [_cordClampedAtTotalSeconds == null,                      "Please select cord clamped time (46.)"],
-      [_cordBloodDone == null,                                  "Please select cord blood status (56.)"],
-      [_cordBloodDone == true && _cordBloodWithin1hr == null,   "Please answer within 1hr of birth (57.)"],
-      [_cordBloodDone == true && _cordBloodSource == null,      "Please select cord blood source (58.)"],
-      [_resusFailure == null,                                   "Please select resuscitation failure (60.)"],
-      [_exitReason == null,                                     "Please select reason for exit (63.)"],
-      [_blenderStopped == null,                                 "Please answer PORTAL blender status (64.)"],
+      [_fluidBolus == null,                                     "Please select fluid bolus (38.)"],
+      [_placentalTransfusion == null,                           "Please select placental transfusion (41.)"],
+      [_placentalTransfusion == true && _placentalMethod == null, "Please select transfusion method (42.)"],
+      [_placentalTransfusion == true && _cordClampedAtTotalSeconds == null,
+                                                                "Please select cord clamped time (43.)"],
+      [_cordBloodDone == null,                                  "Please select cord blood status (51.)"],
+      [_cordBloodDone == false && _cordBloodWithin1hr == null,  "Please answer within 1hr of birth (52.)"],
+      [_cordBloodDone == false && _cordBloodWithin1hr == true && _cordBloodSource == null,
+                                                                "Please select cord blood source (53.)"],
+      [_resusFailure == null,                                   "Please select resuscitation failure (55.)"],
+      [_exitReason == null,                                     "Please select reason for exit (58.)"],
+      [_blenderStopped == null,                                 "Please answer PORTAL blender status (59.)"],
       [_blenderStopped == true && _blenderStopDescCtrl.text.trim().isEmpty,
-                                                                "Please describe blender stop (64.)"],
+                                                                "Please describe blender stop (59.)"],
     ];
 
     for (final check in checks) {
       if (check[0] as bool) { _showMsg(check[1] as String); return; }
     }
 
-    // Build the shared payload (or start fresh) and fill B4–B6 into it.
-    final data = widget.shared ?? BirthResuscitationData();
-    if (widget.shared == null) {
+    // Merge with existing backend / shared Form B record so B1–B3 is not wiped.
+    BirthResuscitationData data;
+    if (widget.shared != null) {
+      data = widget.shared!;
+    } else {
+      data = BirthResuscitationData();
+      final eid = widget.formB?.enrollmentId.trim() ?? '';
+      if (eid.isNotEmpty) {
+        try {
+          final remote =
+              await FormsApiService.instance.loadBirthResuscitation(eid);
+          if (remote != null) {
+            data = BirthResuscitationData.fromJson(remote);
+          }
+        } catch (_) {
+          // Fall through with empty base — still save B4–B6 keys.
+        }
+      }
       data
-        ..screeningId  = widget.screeningId
-        ..enrollmentId = widget.formB?.enrollmentId;
+        ..screeningId ??= widget.screeningId
+        ..enrollmentId ??= eid.isEmpty ? null : eid
+        ..babyUid ??= widget.babyUid;
+    }
+
+    if (data.enrollmentId == null || data.enrollmentId!.trim().isEmpty) {
+      _showMsg("Missing enrollment ID — complete Form B randomisation first.");
+      return;
     }
 
     data
-      ..ppvRequired         = _ventilation
+      ..ppvRequired         = true
+      ..requiredResuscitation = true
       ..devicePpv           = _device
       ..sibPeepWith         = needsSibPeepDetails ? _sibPeepWith : null
       ..sibPeepCmh2o        = needsSibPeepDetails
@@ -375,22 +582,24 @@ class _FormCResuscitationDetailsState
       ..fluidBolusCumulative= double.tryParse(_fluidBolusCumCtrl.text.trim())
       ..placentalTransfusion= _placentalTransfusion
       ..transfusionMethod   = _placentalTransfusion == true ? _placentalMethod : null
-      ..cordClampTimestamp  = _cordClampedAtDisplay.isEmpty ? null : _cordClampedAtDisplay
-      ..cordClampTime       = _cordClampedAtTotalSeconds
+      ..cordClampTimestamp  = _placentalTransfusion == true && _cordClampedAtDisplay.isNotEmpty
+          ? _cordClampedAtDisplay : null
+      ..cordClampTime       = _placentalTransfusion == true
+          ? _elapsedCordClampSeconds() : null
       ..timeToRespiration   = _hmsToSeconds(_timeToRespCtrl.text)
-      ..respirationDays     = int.tryParse(_respirationDaysCtrl.text.trim())
-      ..respirationHours    = int.tryParse(_respirationHoursCtrl.text.trim())
       ..spo25min            = int.tryParse(_spo2At5Ctrl.text.trim())
       ..timeToSpo280        = _hmsToSeconds(_timeToSpo2Ctrl.text)
       ..cordBloodDone       = _cordBloodDone
-      ..cordBloodWithin1hr  = _cordBloodDone == true ? _cordBloodWithin1hr : null
-      ..cordBloodSource     = _cordBloodDone == true ? _cordBloodSource : null
+      ..cordBloodWithin1hr  = _cordBloodDone == false ? _cordBloodWithin1hr : null
+      ..cordBloodSource     = (_cordBloodDone == false && _cordBloodWithin1hr == true)
+          ? _cordBloodSource : null
       ..cordPh              = double.tryParse(_phCtrl.text.trim())
       ..cordSbe             = double.tryParse(_beCtrl.text.trim())
       ..cordPco2            = double.tryParse(_pco2Ctrl.text.trim())
       ..resusFailure        = _resusFailure
       ..spo2ExitTrialGas    = double.tryParse(_spo2ExitCtrl.text.trim())
-      ..totalResusTime      = _hmsToSeconds(_totalTimeCtrl.text)
+      // Web stores total_resus_time in minutes (field 57).
+      ..totalResusTime      = _totalTimeMinutes()
       ..reasonExitTrialGas  = _exitReason
       ..reasonExitTrialGasOther = _exitReason == "Other"
           ? _exitOtherCtrl.text.trim() : null
@@ -399,26 +608,25 @@ class _FormCResuscitationDetailsState
           ? _blenderStopDescCtrl.text.trim() : null;
 
     // Fill the nested interventions map (B5 — minute-wise + Apgar).
+    // Values must be Yes/No/NR to match web IntvCell.
     final ynMap = <String, Map<String, String>>{};
     const rowKey = {
-      "Oxygen"          : "oxygen",
-      "Ventilation"     : "ventilation",
-      "Chest compression": "chest_compression",
-      "Intubation"      : "intubation",
-      "Medication"      : "medication",
-      "Fluid bolus"     : "fluid_bolus",
-      "CPAP"            : "cpap",
+      "Oxygen": "oxygen",
+      "CPAP": "cpap",
     };
+    const ynOut = {"Y": "Yes", "N": "No", "NR": "NR", "Yes": "Yes", "No": "No"};
     _timeline.forEach((row, minMap) {
       final key = rowKey[row] ?? row.toLowerCase();
       ynMap[key] = {
         for (final e in minMap.entries)
-          e.key.toString(): (e.value ?? "").toString(),
+          if ((e.value ?? "").toString().trim().isNotEmpty)
+            e.key.toString(): ynOut[e.value] ?? e.value.toString(),
       };
     });
     ynMap["apgar"] = {
       for (final e in _apgarCtrls.entries)
-        e.key.toString(): e.value.text.trim(),
+        if (e.value.text.trim().isNotEmpty)
+          e.key.toString(): e.value.text.trim(),
     };
     data.interventions = ynMap;
 
@@ -468,21 +676,17 @@ class _FormCResuscitationDetailsState
         await FormsApiService.instance
             .saveBirthResuscitation(data.toJson());
       } catch (e) {
-        debugPrint('Birth-resuscitation backend save failed: $e');
+        if (!mounted) return;
+        _showMsg("Save failed — check connection and try again. ($e)");
+        return;
       }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: const Text("Form C saved successfully"),
         backgroundColor: AppTheme.of(context).success,
       ));
-      Navigator.push(context, MaterialPageRoute(
-        builder: (_) => HelperFiO2AUC(
-          enrollmentId: widget.formB?.enrollmentId ?? "",
-          gestation   : widget.gestation,
-          motherName  : widget.motherName,
-          babyUid     : widget.babyUid,
-        ),
-      ));
+      // Return to dashboard (pop Form C; Form B also pops when result == true).
+      Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
       _showMsg("Failed to save: $e");
@@ -490,7 +694,7 @@ class _FormCResuscitationDetailsState
   }
 
   /// Parses "HH:MM:SS" back to total seconds (int) — used for the numeric
-  /// backend keys `time_to_respiration`, `time_to_spo2_80`, `total_resus_time`.
+  /// backend keys `time_to_respiration`, `time_to_spo2_80`.
   int? _hmsToSeconds(String s) {
     if (s.trim().isEmpty) return null;
     final p = s.split(":");
@@ -499,6 +703,32 @@ class _FormCResuscitationDetailsState
     final m = int.tryParse(p[1]) ?? 0;
     final sec = int.tryParse(p[2]) ?? 0;
     return h * 3600 + m * 60 + sec;
+  }
+
+  /// Elapsed cord-clamp seconds (0–300), matching web `cord_clamp_time`.
+  int? _elapsedCordClampSeconds() {
+    final t = _cordClampTimeCtrl.text.trim();
+    final m = RegExp(r'^(\d+)\s*sec', caseSensitive: false).firstMatch(t);
+    if (m != null) return int.tryParse(m.group(1)!);
+    if (_cordClampedAtTotalSeconds == null) return null;
+    final birthTimeStr = widget.formB?.timeOfBirth ?? "";
+    if (birthTimeStr.isEmpty) return null;
+    final parts = birthTimeStr.split(":");
+    if (parts.length < 2) return null;
+    final birthSec = (int.tryParse(parts[0]) ?? 0) * 3600
+        + (int.tryParse(parts[1]) ?? 0) * 60;
+    final diff = _cordClampedAtTotalSeconds! - birthSec;
+    return diff < 0 ? 0 : diff;
+  }
+
+  /// Web field 57 stores minutes (0–999), not HMS seconds.
+  int? _totalTimeMinutes() {
+    final raw = _totalTimeCtrl.text.trim();
+    if (raw.isEmpty) return null;
+    if (RegExp(r'^\d{1,3}$').hasMatch(raw)) return int.tryParse(raw);
+    final secs = _hmsToSeconds(raw);
+    if (secs == null) return null;
+    return (secs / 60).round();
   }
 
   void _showMsg(String msg) {
@@ -713,7 +943,7 @@ class _FormCResuscitationDetailsState
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                filled ? _cordClampedAtDisplay : "Tap to select (HH:MM:SS)",
+                filled ? _cordClampedAtDisplay : "43. Cord clamped at (HH:MM:SS)",
                 style: TextStyle(
                     color: filled ? c.textPrimary : c.textTertiary,
                     fontSize: 13,
@@ -1026,7 +1256,7 @@ class _FormCResuscitationDetailsState
     return Scaffold(
       backgroundColor    : c.bg,
       appBar             : _buildAppBar(c),
-      bottomNavigationBar: _buildBottomBar(c),
+      bottomNavigationBar: widget.viewOnly ? null : _buildBottomBar(c),
       body: Container(
         decoration: BoxDecoration(
           gradient: LinearGradient(
@@ -1034,16 +1264,42 @@ class _FormCResuscitationDetailsState
             colors: [c.bgGradTop, c.bg], stops: const [0.0, 0.35],
           ),
         ),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
-          child: Form(
-            key: _formKey,
-            child: Column(children: [
-              _buildResuscitationSection(c),
-              _buildTimelineSection(c),
-              _buildCordBloodSection(c),
-              const SizedBox(height: 20),
-            ]),
+        child: AbsorbPointer(
+          absorbing: widget.viewOnly,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+            child: Form(
+              key: _formKey,
+              child: Column(children: [
+                if (widget.viewOnly) ...[
+                  Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 14),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: c.primarySoft,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: c.primary.withOpacity(0.35)),
+                    ),
+                    child: Row(children: [
+                      Icon(Icons.visibility_rounded, color: c.primary, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text("View only — previously filled Form C",
+                            style: TextStyle(
+                                color: c.primary,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13)),
+                      ),
+                    ]),
+                  ),
+                ],
+                _buildResuscitationSection(c),
+                _buildTimelineSection(c),
+                _buildCordBloodSection(c),
+                const SizedBox(height: 20),
+              ]),
+            ),
           ),
         ),
       ),
@@ -1061,7 +1317,7 @@ class _FormCResuscitationDetailsState
         child: Container(height: 1, color: c.borderLight),
       ),
       title: Column(mainAxisSize: MainAxisSize.min, children: [
-        Text("Form B: Resuscitation Details",
+        Text("Form C: Resuscitation Details",
             style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800,
                 color: c.textPrimary, letterSpacing: .3)),
         const SizedBox(height: 2),
@@ -1113,18 +1369,8 @@ class _FormCResuscitationDetailsState
       Icons.monitor_heart_rounded,
       c.danger,
       [
-        _pillRadio(
-          "29. PPV / Ventilation Required",
-          ["Required", "Not Required"],
-          _ventilation == null
-              ? null
-              : (_ventilation! ? "Required" : "Not Required"),
-          (v) => setState(() => _ventilation = v == "Required"),
-          c, showError: _submitted && _ventilation == null,
-        ),
-
-        if (_ventilation == true) ...[
-          _pillRadio("29. Device used",
+        // Web B4 starts at 29. Device used (Q23 already answered on Form B).
+        _pillRadio("29. Device used",
               ["T-piece", "Self-inflating bag", "Both"],
               _device, (v) => setState(() => _device = v), c,
               showError: _submitted && _device == null),
@@ -1165,7 +1411,6 @@ class _FormCResuscitationDetailsState
               showError: _submitted && _interface == null),
           _textField("31. Duration of PPV (sec)",
               _ventDurationCtrl, c),
-        ],
 
         _yesNo("32. Endotracheal intubation",
             _intubation, (v) => _intubation = v, c),
@@ -1186,57 +1431,43 @@ class _FormCResuscitationDetailsState
               _adrenalineRoute,
               (v) => setState(() => _adrenalineRoute = v), c,
               showError: _submitted && _adrenalineRoute == null),
-          _textField("39. Number of Doses", _epiDoseCtrl, c),
-          _textField("40. Cumulative Dose (ml/mg)",
-              _adrenalineCumCtrl, c,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true)),
         ],
 
-        _yesNo("41. Fluid bolus", _fluidBolus, (v) => _fluidBolus = v, c),
+        _yesNo("38. Fluid bolus", _fluidBolus, (v) => _fluidBolus = v, c),
         if (_fluidBolus == true) ...[
-          _textField("42. Number of Doses", _fluidBolusDosesCtrl, c),
-          _textField("43. Cumulative Volume / Dose (ml/mg)",
+          _textField("39. Doses", _fluidBolusDosesCtrl, c),
+          _textField("40. Cumulative (ml/mg)",
               _fluidBolusCumCtrl, c,
               keyboardType: const TextInputType.numberWithOptions(decimal: true)),
         ],
 
-        _yesNo("44. Placental transfusion",
+        _yesNo("41. Placental transfusion",
             _placentalTransfusion, (v) => _placentalTransfusion = v, c),
-        if (_placentalTransfusion == true)
-          _pillRadio("45. Method",
+        if (_placentalTransfusion == true) ...[
+          _pillRadio("42. Method",
               ["Deferred clamping", "Intact cord milking"],
               _placentalMethod,
               (v) => setState(() => _placentalMethod = v), c,
               showError: _submitted && _placentalMethod == null),
-
-        // 46. Cord clamped at
-        _cordClampTile(c),
-
-        // 47. Cord clamping time from birth (sec)
-        _autoField("47. Cord clamping time from birth (sec)",
-            _cordClampTimeCtrl, c),
+          // 43–44 only when placental transfusion = Yes (matches web)
+          _cordClampTile(c),
+          _autoField("44. Cord clamping time from birth (sec)",
+              _cordClampTimeCtrl, c),
+        ],
 
         _durationTile(
-          label   : "48. Time to Spontaneous Respiratory Efforts (HH:MM:SS)",
+          label   : "45. Time to spontaneous respiratory efforts (HH:MM:SS)",
           ctrl    : _timeToRespCtrl,
           c       : c,
           onPick  : () => _pickDuration(context),
         ),
-        // 48. If longer — Days / Hours
-        Row(children: [
-          Expanded(child: _textField("48. If longer — Days",
-              _respirationDaysCtrl, c, required: false)),
-          const SizedBox(width: 12),
-          Expanded(child: _textField("48. If longer — Hours",
-              _respirationHoursCtrl, c, required: false)),
-        ]),
+        _textField("46. SpO₂ at 5 min (%)", _spo2At5Ctrl, c),
         _durationTile(
-          label   : "50. Time to SpO₂ >80% (HH:MM:SS)",
+          label   : "47. Time to SpO₂ > 80% (MM:SS)",
           ctrl    : _timeToSpo2Ctrl,
           c       : c,
           onPick  : () => _pickDuration(context),
         ),
-        _textField("49. SpO₂ at 5 min (%)", _spo2At5Ctrl, c),
       ],
       c,
     );
@@ -1245,7 +1476,7 @@ class _FormCResuscitationDetailsState
   // ── Section 2 ─────────────────────────────────────────────────────────────
   Widget _buildTimelineSection(AppColors c) {
     return _section(
-      "51.–55. INTERVENTION TIMELINE (1–20 MIN)",
+      "B5 · INTERVENTION (48–50)",
       Icons.timeline_rounded,
       c.warning,
       [_timelineTable(c)],
@@ -1260,55 +1491,58 @@ class _FormCResuscitationDetailsState
       Icons.science_rounded,
       c.success,
       [
-        _yesNo("56. Cord blood analysis done",
+        _yesNo("51. Cord blood analysis",
             _cordBloodDone, (v) {
               _cordBloodDone = v;
-              if (v == false) {
-                _cordBloodWithin1hr = null;
-                _cordBloodSource    = null;
-                _phCtrl.clear();
-                _beCtrl.clear();
-                _pco2Ctrl.clear();
-              }
+              _cordBloodWithin1hr = null;
+              _cordBloodSource = null;
+              _phCtrl.clear();
+              _beCtrl.clear();
+              _pco2Ctrl.clear();
             }, c),
-        if (_cordBloodDone == true) ...[
-          _pillRadio("57. Within 1 hour of birth — sample taken? *",
+        if (_cordBloodDone == false) ...[
+          _pillRadio("52. If no, within 1 hr of birth sample",
               ["Yes", "No"],
               _cordBloodWithin1hr == null
                   ? null
                   : (_cordBloodWithin1hr! ? "Yes" : "No"),
-              (v) => setState(() => _cordBloodWithin1hr = v == "Yes"), c,
+              (v) => setState(() {
+                _cordBloodWithin1hr = v == "Yes";
+                if (v != "Yes") {
+                  _cordBloodSource = null;
+                  _phCtrl.clear(); _beCtrl.clear(); _pco2Ctrl.clear();
+                }
+              }), c,
               showError: _submitted && _cordBloodWithin1hr == null),
-          _pillRadio("58. Source *",
-              ["Capillary", "Venous", "Arterial"],
+        ],
+        if (_cordBloodDone == false && _cordBloodWithin1hr == true)
+          _pillRadio("53. Source",
+              ["Capillary", "Venous"],
               _cordBloodSource,
               (v) => setState(() => _cordBloodSource = v), c,
               showError: _submitted && _cordBloodSource == null),
-          _textField("59. pH", _phCtrl, c,
+        if (_cordBloodDone == true ||
+            (_cordBloodDone == false && _cordBloodWithin1hr == true)) ...[
+          _textField("54. pH", _phCtrl, c,
               keyboardType: const TextInputType.numberWithOptions(
                   decimal: true)),
-          _textField("59. SBE", _beCtrl, c,
+          _textField("54. SBE", _beCtrl, c,
               keyboardType: const TextInputType.numberWithOptions(
                   decimal: true, signed: true)),
-          _textField("59. pCO₂ (mmHg)", _pco2Ctrl, c,
+          _textField("54. pCO₂", _pco2Ctrl, c,
               keyboardType: const TextInputType.numberWithOptions(
                   decimal: true)),
         ],
 
-        _yesNo("60. Resuscitation failure",
+        _yesNo("55. Resuscitation failure",
             _resusFailure, (v) => _resusFailure = v, c),
 
-        _textField("FiO₂ at exit from trial gas (%)", _fio2ExitCtrl, c),
-        _textField("61. SpO₂ at exit from trial gas (%)", _spo2ExitCtrl, c),
+        _textField("56. SpO₂ at exit from trial gas (%)", _spo2ExitCtrl, c),
 
-        _durationTile(
-          label : "62. Total resuscitation time (HH:MM:SS)",
-          ctrl  : _totalTimeCtrl,
-          c     : c,
-          onPick: () => _pickDuration(context),
-        ),
+        _textField("57. Total time (min)", _totalTimeCtrl, c,
+            keyboardType: TextInputType.number),
 
-        _pillRadio("63. Reason for Resuscitation Exit",
+        _pillRadio("58. Reason for resuscitation exit",
             [
               "Responded to resuscitation",
               "Required override to 100% O2 or CC",
@@ -1321,17 +1555,17 @@ class _FormCResuscitationDetailsState
             showError: _submitted && _exitReason == null),
 
         if (_exitReason == "Other")
-          _textField("63. Specify other reason", _exitOtherCtrl, c,
+          _textField("Specify", _exitOtherCtrl, c,
               keyboardType: TextInputType.text),
 
         // 64. PORTAL Blender Status
-        _yesNo("64. Did the PORTAL Blender Stop Suddenly During Use?",
+        _yesNo("59. Did the PORTAL blender stop suddenly during use?",
             _blenderStopped, (v) {
               _blenderStopped = v;
               if (v == false) _blenderStopDescCtrl.clear();
             }, c),
         if (_blenderStopped == true)
-          _textField("64. If Yes, Describe *", _blenderStopDescCtrl, c,
+          _textField("If yes, describe", _blenderStopDescCtrl, c,
               keyboardType: TextInputType.multiline),
       ],
       c,

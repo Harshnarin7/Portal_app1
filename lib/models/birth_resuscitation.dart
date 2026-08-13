@@ -92,11 +92,6 @@ class BirthResuscitationData {
   // `formData.interventions.apgar`.
   Map<String, Map<String, String>> interventions = {
     'oxygen': {},
-    'ventilation': {},
-    'chest_compression': {},
-    'intubation': {},
-    'medication': {},
-    'fluid_bolus': {},
     'cpap': {},
     'apgar': {},
   };
@@ -118,91 +113,130 @@ class BirthResuscitationData {
 
   BirthResuscitationData();
 
-  /// Builds the exact payload the backend's BirthResuscitationCreate schema
-  /// expects. Pass only the fields relevant to the screen calling this —
-  /// both FormB and FormC call this on the SAME shared instance, then PUT/POST
-  /// the merged result, so partial saves from either screen still line up
-  /// into one backend record.
-  Map<String, dynamic> toJson() => {
-        'screening_id': screeningId,
-        'enrollment_id': enrollmentId,
-        'baby_uid': babyUid,
-        'baby_admission_no': babyAdmissionNo,
-        'baby_annual_no': babyAnnualNo,
-        'date_of_birth': dateOfBirth?.toIso8601String().split('T').first,
-        'time_of_birth': timeOfBirth,
-        'gender': gender,
-        'gestation_weeks': gestationWeeks,
-        'gestation_days': gestationDays,
-        'gestation_rand_weeks': gestationRandWeeks,
-        'gestation_rand_days': gestationRandDays,
-        'birth_weight': birthWeight,
-        'intrauterine_centile': intrauterineCentile,
-        'delivery_mode': deliveryMode,
-        'vaginal_delivery_type': vaginalDeliveryType,
-        'lscs_type': lscsType,
-        // Web stores this as a single string (values joined) — keep identical
-        // join behaviour so both clients parse it the same way back out.
-        'indication_for_delivery': indicationForDelivery.join(', '),
-        'indication_edf_detail': indicationEdfDetail,
-        'fetal_indication_detail': fetalIndicationDetail,
-        'obstetric_indication_detail': obstetricIndicationDetail,
-        'indication_for_delivery_other': indicationForDeliveryOther,
-        'poor_resp_efforts': poorRespEfforts,
-        'poor_muscle_tone': poorMuscleTone,
-        'hr_above_100': hrAbove100,
-        'initial_steps': initialSteps,
-        'required_resuscitation': requiredResuscitation,
-        'randomised': randomised,
-        'randomisation_date': randomisationDate,
-        'strata': strata,
-        'enrollment_reason_not_randomized': enrollmentReasonNotRandomized,
-        'enrollment_reason_not_randomized_other':
-            enrollmentReasonNotRandomizedOther,
-        'ppv_required': ppvRequired,
-        'device_ppv': devicePpv,
-        'sib_peep_with': sibPeepWith,
-        'sib_peep_cmh2o': sibPeepCmh2o,
-        'tpiece_pip': tpiecePip,
-        'tpiece_peep': tpiecePeep,
-        'tpiece_flow': tpieceFlow,
-        'interface_used': interfaceUsed,
-        'ppv_duration': ppvDuration,
-        'intubation': intubation,
-        'chest_compression': chestCompression,
-        'cc_duration': ccDuration,
-        'adrenaline': adrenaline,
-        'adrenaline_dilution': adrenalineDilution,
-        'adrenaline_route': adrenalineRoute,
-        'med_doses': medDoses,
-        'adrenaline_cumulative': adrenalineCumulative,
-        'fluid_bolus': fluidBolus,
-        'fluid_bolus_doses': fluidBolusDoses,
-        'fluid_bolus_cumulative': fluidBolusCumulative,
-        'placental_transfusion': placentalTransfusion,
-        'transfusion_method': transfusionMethod,
-        'cord_clamp_timestamp': cordClampTimestamp,
-        'cord_clamp_time': cordClampTime,
-        'time_to_respiration': timeToRespiration,
-        'respiration_days': respirationDays,
-        'respiration_hours': respirationHours,
-        'spo2_5min': spo25min,
-        'time_to_spo2_80': timeToSpo280,
-        'interventions': interventions,
-        'resus_failure': resusFailure,
-        'cord_blood_done': cordBloodDone,
-        'cord_blood_within_1hr': cordBloodWithin1hr,
-        'cord_blood_source': cordBloodSource,
-        'cord_ph': cordPh,
-        'cord_sbe': cordSbe,
-        'cord_pco2': cordPco2,
-        'spo2_exit_trial_gas': spo2ExitTrialGas,
-        'total_resus_time': totalResusTime,
-        'reason_exit_trial_gas': reasonExitTrialGas,
-        'reason_exit_trial_gas_other': reasonExitTrialGasOther,
-        'blender_stopped': blenderStopped,
-        'blender_stopped_description': blenderStoppedDescription,
-      };
+  /// Builds the payload for `BirthResuscitationCreate`.
+  ///
+  /// [omitNulls] defaults to true so Form B and Form C can each POST only the
+  /// fields they own. The backend POST upsert does `setattr` for every key —
+  /// sending nulls would wipe the other screen's half of the record.
+  Map<String, dynamic> toJson({bool omitNulls = true}) {
+    final map = <String, dynamic>{
+      'screening_id': screeningId,
+      'enrollment_id': enrollmentId,
+      'baby_uid': babyUid,
+      'baby_admission_no': babyAdmissionNo,
+      'baby_annual_no': babyAnnualNo,
+      'date_of_birth': dateOfBirth?.toIso8601String().split('T').first,
+      'time_of_birth': timeOfBirth,
+      'gender': gender,
+      'gestation_weeks': gestationWeeks,
+      'gestation_days': gestationDays,
+      'gestation_rand_weeks': gestationRandWeeks,
+      'gestation_rand_days': gestationRandDays,
+      'birth_weight': birthWeight,
+      'intrauterine_centile': intrauterineCentile,
+      'delivery_mode': deliveryMode,
+      'vaginal_delivery_type': vaginalDeliveryType,
+      'lscs_type': lscsType,
+      // Web stores this as a single string (values joined) — keep identical
+      // join behaviour so both clients parse it the same way back out.
+      'indication_for_delivery': indicationForDelivery.isEmpty
+          ? null
+          : indicationForDelivery.join(', '),
+      'indication_edf_detail': indicationEdfDetail,
+      'fetal_indication_detail': fetalIndicationDetail,
+      'obstetric_indication_detail': obstetricIndicationDetail,
+      'indication_for_delivery_other': indicationForDeliveryOther,
+      'poor_resp_efforts': poorRespEfforts,
+      'poor_muscle_tone': poorMuscleTone,
+      'hr_above_100': hrAbove100,
+      'initial_steps': initialSteps,
+      'required_resuscitation': requiredResuscitation,
+      'randomised': randomised,
+      'randomisation_date': randomisationDate,
+      'strata': strata,
+      'enrollment_reason_not_randomized': enrollmentReasonNotRandomized,
+      'enrollment_reason_not_randomized_other':
+          enrollmentReasonNotRandomizedOther,
+      'ppv_required': ppvRequired,
+      'device_ppv': devicePpv,
+      'sib_peep_with': sibPeepWith,
+      'sib_peep_cmh2o': sibPeepCmh2o,
+      'tpiece_pip': tpiecePip,
+      'tpiece_peep': tpiecePeep,
+      'tpiece_flow': tpieceFlow,
+      'interface_used': interfaceUsed,
+      'ppv_duration': ppvDuration,
+      'intubation': intubation,
+      'chest_compression': chestCompression,
+      'cc_duration': ccDuration,
+      'adrenaline': adrenaline,
+      'adrenaline_dilution': adrenalineDilution,
+      'adrenaline_route': adrenalineRoute,
+      'med_doses': medDoses,
+      'adrenaline_cumulative': adrenalineCumulative,
+      'fluid_bolus': fluidBolus,
+      'fluid_bolus_doses': fluidBolusDoses,
+      'fluid_bolus_cumulative': fluidBolusCumulative,
+      'placental_transfusion': placentalTransfusion,
+      'transfusion_method': transfusionMethod,
+      'cord_clamp_timestamp': cordClampTimestamp,
+      'cord_clamp_time': cordClampTime,
+      'time_to_respiration': timeToRespiration,
+      'respiration_days': respirationDays,
+      'respiration_hours': respirationHours,
+      'spo2_5min': spo25min,
+      'time_to_spo2_80': timeToSpo280,
+      'interventions': _interventionsPayload(),
+      'resus_failure': resusFailure,
+      'cord_blood_done': cordBloodDone,
+      'cord_blood_within_1hr': cordBloodWithin1hr,
+      'cord_blood_source': cordBloodSource,
+      'cord_ph': cordPh,
+      'cord_sbe': cordSbe,
+      'cord_pco2': cordPco2,
+      'spo2_exit_trial_gas': spo2ExitTrialGas,
+      'total_resus_time': totalResusTime,
+      // Web folds "Other" free-text into reason_exit_trial_gas itself.
+      'reason_exit_trial_gas': reasonExitTrialGas == 'Other'
+          ? (reasonExitTrialGasOther?.trim().isNotEmpty == true
+              ? reasonExitTrialGasOther
+              : 'Other')
+          : reasonExitTrialGas,
+      'blender_stopped': blenderStopped,
+      'blender_stopped_description': blenderStoppedDescription,
+    };
+    if (omitNulls) {
+      map.removeWhere((_, v) => v == null);
+    }
+    return map;
+  }
+
+  /// Omit empty intervention maps so Form B saves don't wipe Form C B5 data.
+  Map<String, dynamic>? _interventionsPayload() {
+    final oxygen = _normalizeInterventionMap(interventions['oxygen']);
+    final cpap = _normalizeInterventionMap(interventions['cpap']);
+    final apgar = Map<String, String>.from(interventions['apgar'] ?? {})
+      ..removeWhere((_, v) => v.trim().isEmpty);
+    if (oxygen.isEmpty && cpap.isEmpty && apgar.isEmpty) return null;
+    return {
+      'oxygen': oxygen,
+      'cpap': cpap,
+      'apgar': apgar,
+    };
+  }
+
+  /// Web IntvCell stores "Yes"/"No"/"NR" (labels show Y/N). Map mobile Y/N.
+  Map<String, String> _normalizeInterventionMap(Map<String, String>? raw) {
+    if (raw == null || raw.isEmpty) return {};
+    const mapYn = {'Y': 'Yes', 'N': 'No', 'Yes': 'Yes', 'No': 'No', 'NR': 'NR'};
+    final out = <String, String>{};
+    raw.forEach((k, v) {
+      final t = v.trim();
+      if (t.isEmpty) return;
+      out[k] = mapYn[t] ?? t;
+    });
+    return out;
+  }
 
   factory BirthResuscitationData.fromJson(Map<String, dynamic> json) {
     final d = BirthResuscitationData();
@@ -276,16 +310,21 @@ class BirthResuscitationData {
     d.spo25min = json['spo2_5min'];
     d.timeToSpo280 = json['time_to_spo2_80'];
     if (json['interventions'] != null) {
-      d.interventions = Map<String, Map<String, String>>.from(
-        (json['interventions'] as Map).map(
-          (k, v) => MapEntry(
-            k.toString(),
-            Map<String, String>.from(
-              (v as Map).map((mk, mv) => MapEntry(mk.toString(), mv.toString())),
-            ),
-          ),
+      final raw = json['interventions'] as Map;
+      d.interventions = {
+        'oxygen': Map<String, String>.from(
+          ((raw['oxygen'] as Map?) ?? {}).map(
+              (mk, mv) => MapEntry(mk.toString(), mv.toString())),
         ),
-      );
+        'cpap': Map<String, String>.from(
+          ((raw['cpap'] as Map?) ?? {}).map(
+              (mk, mv) => MapEntry(mk.toString(), mv.toString())),
+        ),
+        'apgar': Map<String, String>.from(
+          ((raw['apgar'] as Map?) ?? {}).map(
+              (mk, mv) => MapEntry(mk.toString(), mv.toString())),
+        ),
+      };
     }
     d.resusFailure = json['resus_failure'];
     d.cordBloodDone = json['cord_blood_done'];
