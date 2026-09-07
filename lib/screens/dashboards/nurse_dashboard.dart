@@ -15,6 +15,7 @@ import '../../services/api_service.dart';
 import '../../services/pdf_service.dart';
 import '../../services/screening_api_service.dart';
 import '../../services/forms_api_service.dart';
+import '../../utils/screening_status.dart';
 import '../admin/user_management_screen.dart';
 import '../screening_form.dart';
 import '../form_b_birth_resuscitation.dart';
@@ -23,6 +24,7 @@ import '../helper_form2_resp_cv_neuro.dart';
 import '../helper_form3_infect_gi_hema.dart';
 import '../helper_form4_metab_renal_vasc_eye.dart';
 import '../helper_fio2_auc.dart';
+import '../helper_form5_minimal_monitoring.dart';
 import '_dashboard_shell.dart';
 import '../../navigation/route_observer.dart';
 
@@ -367,33 +369,50 @@ Future<List<CRF>> fetchPatientCrfs({int? piiLimit}) async {
 }
 
 // ── Shared patient status helpers ───────────────────────────────────────────
-// Mirrors backend/main.py's compute_screening_status() exactly:
-//   Screen Failure -> failed gestation/exclusion criteria (genuinely excluded)
-//   Eligible       -> passed criteria AND consent_given == "Yes" (enrolled)
-//   Not Eligible   -> passed criteria but consent isn't "Yes" YET (pending/
-//                     not-approached) — this is NOT the same as excluded!
-// FIX: previously any status other than "Eligible" (including "Not Eligible",
-// which really just means "not confirmed enrolled yet") was shown as red
-// "Excluded" — so a clinically-eligible patient whose consent was still
-// pending showed up as wrongly excluded. Now only a real Screen Failure or
-// an explicit consent refusal ("No") counts as Excluded; anything else that
-// isn't yet Enrolled shows as "Incomplete" (pending), matching what the
-// backend is actually telling us.
-bool _isEnrolled(CRF c) => c.eligibilityStatus == 'Eligible';
-bool _isExcluded(CRF c) =>
-    c.eligibilityStatus == 'Screen Failure' || c.consentStatus == 'No';
+// Same labels as web ViewEntries / backend compute_screening_status():
+//   Eligible / Not Eligible / Screen Failure / Pending
+bool _isEligible(CRF c) =>
+    normalizeScreeningStatus(c.eligibilityStatus) == 'Eligible';
+bool _isScreenFailure(CRF c) =>
+    normalizeScreeningStatus(c.eligibilityStatus) == 'Screen Failure';
+bool _isNotEligible(CRF c) =>
+    normalizeScreeningStatus(c.eligibilityStatus) == 'Not Eligible';
+bool _isPending(CRF c) =>
+    normalizeScreeningStatus(c.eligibilityStatus) == 'Pending';
+
+// Legacy aliases used by "continue forms" lists
+bool _isEnrolled(CRF c) => _isEligible(c);
+bool _isExcluded(CRF c) => _isScreenFailure(c) || _isNotEligible(c);
+
 Color patientStatusColor(CRF c) =>
-    _isEnrolled(c) ? _kSuccess : (_isExcluded(c) ? _kDanger : _kWarning);
+    screeningStatusColor(normalizeScreeningStatus(c.eligibilityStatus));
 String patientStatusLabel(CRF c) =>
-    _isEnrolled(c) ? 'Enrolled' : (_isExcluded(c) ? 'Excluded' : 'Incomplete');
+    normalizeScreeningStatus(c.eligibilityStatus);
+/// True when server still has the mobile draft placeholder name ("DRAFT").
+bool _isPlaceholderPatientName(String? first, [String? surname]) {
+  final f = (first ?? '').trim().toUpperCase();
+  final s = (surname ?? '').trim().toUpperCase();
+  if (f.isEmpty && s.isEmpty) return true;
+  if (f == 'DRAFT' || f == 'NAME PENDING') return true;
+  if (s == 'DRAFT') return true;
+  return false;
+}
+
+String patientDisplayName(CRF c) {
+  if (_isPlaceholderPatientName(c.motherFirstName, c.motherSurname)) {
+    return 'Name pending';
+  }
+  final first = c.motherFirstName.trim();
+  return first.isEmpty ? '${c.motherSurname}'.trim() : 'B/o $first';
+}
 
 // ── Shared patient card widget — used by both the Home tab preview and the
 // full Patients tab so a patient looks and behaves identically everywhere.
 Widget buildPatientCard(CRF c, VoidCallback onTap) {
   final col = patientStatusColor(c);
   final label = patientStatusLabel(c);
-  final fullName = '${c.motherFirstName} ${c.motherSurname}'.trim();
-  final hasName = fullName.isNotEmpty;
+  final fullName = patientDisplayName(c);
+  final hasName = !_isPlaceholderPatientName(c.motherFirstName, c.motherSurname);
   return Container(
     margin:const EdgeInsets.only(bottom:9),
     decoration:BoxDecoration(color:_kSurface,
@@ -452,9 +471,9 @@ Widget buildPatientCard(CRF c, VoidCallback onTap) {
 }
 
 // ── Shared patient actions menu.
-// Gate: until Form B is saved → only Form B open.
-// After Form B (PPV required + randomised) → only Form C open.
-// After Form C saved → helper forms unlock; Form B/C remain viewable.
+// Gate: until Form B1 is saved → only Form B1 open.
+// After Form B1 (PPV required + randomised) → only Form B2 open.
+// After Form B2 saved → helper forms unlock; Form B1/B2 remain viewable.
 Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
   final api = ApiService();
   final formB = await api.loadFormB(c.screeningId);
@@ -468,163 +487,216 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
   final hasEnrollment = c.enrollmentId.isNotEmpty ||
       (formB?.enrollmentId.isNotEmpty == true);
 
-  // Until Form C is the required next step, Form B stays available.
-  // While Form C is pending, only Form C is open.
+  // Until Form B2 is the required next step, Form B1 stays available.
+  // While Form B2 is pending, only Form B2 is open.
   final formBOpen = !(needsFormC && !formCDone);
   final formCOpen = needsFormC;
   final helpersEnabled = formCDone && hasEnrollment;
 
   if (!context.mounted) return;
+  final maxSheetH = MediaQuery.of(context).size.height * 0.85;
   showModalBottomSheet(
     context: context,
     backgroundColor: _kSurface,
+    isScrollControlled: true,
     shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
     builder: (ctx) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(children: [
-              Expanded(child: Text(
-                '${c.motherFirstName} ${c.motherSurname}'.trim().isEmpty
-                    ? c.screeningId : '${c.motherFirstName} ${c.motherSurname}',
-                style: const TextStyle(color: _kText1, fontWeight: FontWeight.w800, fontSize: 15))),
-              Text(c.screeningId, style: const TextStyle(color: _kText3, fontSize: 11)),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxSheetH),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(children: [
+                  Expanded(child: Text(
+                    patientDisplayName(c) == 'Name pending'
+                        ? c.screeningId : patientDisplayName(c),
+                    style: const TextStyle(color: _kText1, fontWeight: FontWeight.w800, fontSize: 15))),
+                  Text(c.screeningId, style: const TextStyle(color: _kText3, fontSize: 11)),
+                ]),
+              ),
+              const Divider(height: 20),
+              _buildActionTile(ctx, 'Export PDF', Icons.picture_as_pdf_rounded, true,
+                () => exportPatientPdf(context, c)),
+              _buildActionTile(
+                ctx,
+                'View filled forms',
+                Icons.visibility_rounded,
+                // Screening (Form A) counts — patients on this list already have it.
+                c.screeningId.trim().isNotEmpty,
+                () => showFilledFormsSheet(context, c, formB: formB, formC: formC),
+              ),
+              _buildActionTile(
+                ctx,
+                'Form B1 — Birth & Resuscitation',
+                Icons.child_care_rounded,
+                formBOpen,
+                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => FormBBirthResuscitation(
+                      screeningId: c.screeningId,
+                      maternalUid: c.maternalUid,
+                      motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                      motherPhone: c.motherPhone,
+                      husbandPhone: c.husbandPhone,
+                      gestWeeks: c.gestationWeeks,
+                      gestDays: c.gestationDays,
+                      // Prefer site name (PGIMER) — Form B1 rules key on name, not "01".
+                      siteId: c.site.isNotEmpty ? c.site : c.siteId,
+                      screeningDateTime: c.screeningDateTime,
+                    ))),
+                completed: formBDone,
+              ),
+              _buildActionTile(
+                ctx,
+                'Form B2 — Resuscitation Details',
+                Icons.monitor_heart_rounded,
+                formCOpen,
+                () async {
+                  BirthResuscitationData? shared;
+                  final eid = formB?.enrollmentId.trim() ?? '';
+                  if (eid.isNotEmpty) {
+                    try {
+                      final remote = await FormsApiService.instance
+                          .loadBirthResuscitation(eid);
+                      if (remote != null) {
+                        shared = BirthResuscitationData.fromJson(remote);
+                      }
+                    } catch (_) {}
+                  }
+                  if (!context.mounted) return;
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => FormCResuscitationDetails(
+                        screeningId: c.screeningId,
+                        gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
+                        motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                        babyUid: formB?.babyUid.isNotEmpty == true
+                            ? formB!.babyUid
+                            : c.maternalUid,
+                        formB: formB,
+                        shared: shared,
+                      )));
+                },
+                completed: formCDone,
+              ),
+              _buildActionTile(ctx, 'Helper Form 1 — FiO₂ AUC', Icons.air_rounded, helpersEnabled,
+                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperFiO2AUC(
+                      enrollmentId: c.enrollmentId.isNotEmpty
+                          ? c.enrollmentId
+                          : (formB?.enrollmentId ?? ''),
+                      gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
+                      motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                      babyUid: formB?.babyUid.isNotEmpty == true
+                          ? formB!.babyUid
+                          : c.maternalUid,
+                    )))),
+              _buildActionTile(ctx, 'Helper Form 2 — Resp/CV/Neuro', Icons.favorite_rounded, helpersEnabled,
+                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm2RespCvNeuro(
+                      enrollmentId: c.enrollmentId.isNotEmpty
+                          ? c.enrollmentId
+                          : (formB?.enrollmentId ?? ''),
+                      gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
+                      motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                      babyUid: formB?.babyUid.isNotEmpty == true
+                          ? formB!.babyUid
+                          : c.maternalUid,
+                      site: c.site.isNotEmpty ? c.site : 'PGIMER',
+                    )))),
+              _buildActionTile(ctx, 'Helper Form 3 — Infection/GI/Hema', Icons.bloodtype_rounded, helpersEnabled,
+                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm3InfectGIHema(
+                      enrollmentId: c.enrollmentId.isNotEmpty
+                          ? c.enrollmentId
+                          : (formB?.enrollmentId ?? ''),
+                      gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
+                      motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                      babyUid: formB?.babyUid.isNotEmpty == true
+                          ? formB!.babyUid
+                          : c.maternalUid,
+                    )))),
+              _buildActionTile(ctx, 'Helper Form 4 — Metab/Renal/Vasc/Eye', Icons.visibility_rounded, helpersEnabled,
+                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm4MetabRenalVascEye(
+                      enrollmentId: c.enrollmentId.isNotEmpty
+                          ? c.enrollmentId
+                          : (formB?.enrollmentId ?? ''),
+                      gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
+                      motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                      babyUid: formB?.babyUid.isNotEmpty == true
+                          ? formB!.babyUid
+                          : c.maternalUid,
+                    )))),
+              _buildActionTile(ctx, 'Helper Form 5 — Minimal Monitoring', Icons.monitor_heart_outlined, helpersEnabled,
+                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm5MinimalMonitoring(
+                      enrollmentId: c.enrollmentId.isNotEmpty
+                          ? c.enrollmentId
+                          : (formB?.enrollmentId ?? ''),
+                      gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
+                      motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                      babyUid: formB?.babyUid.isNotEmpty == true
+                          ? formB!.babyUid
+                          : c.maternalUid,
+                    )))),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                child: Text(
+                  !formBDone
+                      ? 'Complete Form B1 first — other forms stay locked.'
+                      : (needsFormC && !formCDone)
+                          ? 'Form B1 saved — open Form B2 next. Other forms stay locked until Form B2 is submitted.'
+                          : formCDone
+                              ? 'Form B2 submitted — helper forms 1–5 are unlocked.'
+                              : 'Form B1 complete — no Form B2 required for this case.',
+                  style: const TextStyle(color: _kText3, fontSize: 11),
+                ),
+              ),
+              const SizedBox(height: 8),
             ]),
           ),
-          const Divider(height: 20),
-          _buildActionTile(ctx, 'Export PDF', Icons.picture_as_pdf_rounded, true,
-            () => exportPatientPdf(context, c)),
-          _buildActionTile(
-            ctx,
-            'View filled forms',
-            Icons.visibility_rounded,
-            formBDone || formCDone,
-            () => showFilledFormsSheet(context, c, formB: formB, formC: formC),
-          ),
-          _buildActionTile(
-            ctx,
-            formBDone
-                ? 'Form B — Birth & Resuscitation ✓'
-                : 'Form B — Birth & Resuscitation',
-            Icons.child_care_rounded,
-            formBOpen,
-            () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => FormBBirthResuscitation(
-                  screeningId: c.screeningId,
-                  maternalUid: c.maternalUid,
-                  motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  motherPhone: c.motherPhone,
-                  husbandPhone: c.husbandPhone,
-                  gestWeeks: c.gestationWeeks,
-                  gestDays: c.gestationDays,
-                  siteId: c.siteId,
-                )))),
-          _buildActionTile(
-            ctx,
-            formCDone
-                ? 'Form C — Resuscitation Details ✓'
-                : 'Form C — Resuscitation Details',
-            Icons.monitor_heart_rounded,
-            formCOpen,
-            () async {
-              BirthResuscitationData? shared;
-              final eid = formB?.enrollmentId.trim() ?? '';
-              if (eid.isNotEmpty) {
-                try {
-                  final remote = await FormsApiService.instance
-                      .loadBirthResuscitation(eid);
-                  if (remote != null) {
-                    shared = BirthResuscitationData.fromJson(remote);
-                  }
-                } catch (_) {}
-              }
-              if (!context.mounted) return;
-              Navigator.push(context, MaterialPageRoute(builder: (_) => FormCResuscitationDetails(
-                    screeningId: c.screeningId,
-                    gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
-                    motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                    babyUid: formB?.babyUid.isNotEmpty == true
-                        ? formB!.babyUid
-                        : c.maternalUid,
-                    formB: formB,
-                    shared: shared,
-                  )));
-            }),
-          _buildActionTile(ctx, 'Helper Form 2 — Resp/CV/Neuro', Icons.favorite_rounded, helpersEnabled,
-            () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm2RespCvNeuro(
-                  enrollmentId: c.enrollmentId.isNotEmpty
-                      ? c.enrollmentId
-                      : (formB?.enrollmentId ?? ''),
-                  gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
-                  motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  babyUid: formB?.babyUid.isNotEmpty == true
-                      ? formB!.babyUid
-                      : c.maternalUid,
-                  site: c.site.isNotEmpty ? c.site : 'PGIMER',
-                )))),
-          _buildActionTile(ctx, 'Helper Form 3 — Infection/GI/Hema', Icons.bloodtype_rounded, helpersEnabled,
-            () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm3InfectGIHema(
-                  enrollmentId: c.enrollmentId.isNotEmpty
-                      ? c.enrollmentId
-                      : (formB?.enrollmentId ?? ''),
-                  gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
-                  motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  babyUid: formB?.babyUid.isNotEmpty == true
-                      ? formB!.babyUid
-                      : c.maternalUid,
-                )))),
-          _buildActionTile(ctx, 'Helper Form 4 — Metab/Renal/Vasc/Eye', Icons.visibility_rounded, helpersEnabled,
-            () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm4MetabRenalVascEye(
-                  enrollmentId: c.enrollmentId.isNotEmpty
-                      ? c.enrollmentId
-                      : (formB?.enrollmentId ?? ''),
-                  gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
-                  motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  babyUid: formB?.babyUid.isNotEmpty == true
-                      ? formB!.babyUid
-                      : c.maternalUid,
-                )))),
-          _buildActionTile(ctx, 'Helper Form — FiO2 / AUC', Icons.air_rounded, helpersEnabled,
-            () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperFiO2AUC(
-                  enrollmentId: c.enrollmentId.isNotEmpty
-                      ? c.enrollmentId
-                      : (formB?.enrollmentId ?? ''),
-                  gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
-                  motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                  babyUid: formB?.babyUid.isNotEmpty == true
-                      ? formB!.babyUid
-                      : c.maternalUid,
-                )))),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-            child: Text(
-              !formBDone
-                  ? 'Complete Form B first — other forms stay locked.'
-                  : (needsFormC && !formCDone)
-                      ? 'Form B saved — open Form C next. Other forms stay locked until Form C is submitted.'
-                      : formCDone
-                          ? 'Form C submitted — helper forms are unlocked.'
-                          : 'Form B complete — no Form C required for this case.',
-              style: const TextStyle(color: _kText3, fontSize: 11),
-            ),
-          ),
-          const SizedBox(height: 8),
-        ]),
+        ),
       ),
     ),
   );
 }
 
-Widget _buildActionTile(BuildContext ctx, String label, IconData icon, bool enabled, VoidCallback onTap) {
+Widget _buildActionTile(
+  BuildContext ctx,
+  String label,
+  IconData icon,
+  bool enabled,
+  VoidCallback onTap, {
+  bool completed = false,
+}) {
   return ListTile(
     enabled: enabled,
     leading: Icon(icon, color: enabled ? _kPrimary : _kText3),
-    title: Text(label, style: TextStyle(
-        color: enabled ? _kText1 : _kText3, fontWeight: FontWeight.w600, fontSize: 13)),
-    trailing: Icon(Icons.chevron_right_rounded, color: enabled ? _kText3 : _kText3.withOpacity(0.4)),
-    onTap: enabled ? () { Navigator.pop(ctx); onTap(); } : null,
+    title: Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: enabled ? _kText1 : _kText3,
+              fontWeight: FontWeight.w600,
+              fontSize: 13,
+            ),
+          ),
+        ),
+        if (completed)
+          const Padding(
+            padding: EdgeInsets.only(left: 6),
+            child: Icon(Icons.check_circle_rounded, color: _kSuccess, size: 20),
+          ),
+      ],
+    ),
+    trailing: Icon(
+      Icons.chevron_right_rounded,
+      color: enabled ? _kText3 : _kText3.withOpacity(0.4),
+    ),
+    onTap: enabled
+        ? () {
+            Navigator.pop(ctx);
+            onTap();
+          }
+        : null,
   );
 }
 
@@ -635,9 +707,10 @@ Future<void> showFilledFormsSheet(
   FormB? formB,
   FormC? formC,
 }) async {
+  final formADone = c.screeningId.trim().isNotEmpty;
   final formBDone = formB != null;
   final formCDone = formC != null;
-  if (!formBDone && !formCDone) {
+  if (!formADone && !formBDone && !formCDone) {
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('No filled forms yet for this patient.')),
@@ -664,10 +737,33 @@ Future<void> showFilledFormsSheet(
             ),
           ),
           const Divider(height: 20),
+          if (formADone)
+            ListTile(
+              leading: const Icon(Icons.assignment_rounded, color: _kPrimary),
+              title: const Text('Form A — Screening',
+                  style: TextStyle(
+                      color: _kText1, fontWeight: FontWeight.w600, fontSize: 13)),
+              trailing: TextButton.icon(
+                icon: const Icon(Icons.visibility_rounded, size: 16),
+                label: const Text('View'),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ScreeningForm(
+                        viewOnly: true,
+                        existingScreeningId: c.screeningId,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
           if (formBDone)
             ListTile(
               leading: const Icon(Icons.child_care_rounded, color: _kPrimary),
-              title: const Text('Form B — Birth & Resuscitation',
+              title: const Text('Form B1 — Birth & Resuscitation',
                   style: TextStyle(
                       color: _kText1, fontWeight: FontWeight.w600, fontSize: 13)),
               trailing: TextButton.icon(
@@ -687,7 +783,8 @@ Future<void> showFilledFormsSheet(
                         husbandPhone: c.husbandPhone,
                         gestWeeks: c.gestationWeeks,
                         gestDays: c.gestationDays,
-                        siteId: c.siteId,
+                        siteId: c.site.isNotEmpty ? c.site : c.siteId,
+                        screeningDateTime: c.screeningDateTime,
                         viewOnly: true,
                       ),
                     ),
@@ -698,7 +795,7 @@ Future<void> showFilledFormsSheet(
           if (formCDone)
             ListTile(
               leading: const Icon(Icons.monitor_heart_rounded, color: _kPrimary),
-              title: const Text('Form C — Resuscitation Details',
+              title: const Text('Form B2 — Resuscitation Details',
                   style: TextStyle(
                       color: _kText1, fontWeight: FontWeight.w600, fontSize: 13)),
               trailing: TextButton.icon(
@@ -742,9 +839,30 @@ Future<void> exportPatientPdf(BuildContext context, CRF c) async {
     final api = ApiService();
     final formB = await api.loadFormB(c.screeningId);
     final formC = await api.loadFormC(c.screeningId);
-    final File file = (formB != null && formC != null)
-        ? await PdfService.generateFullTrialPdf(crf: c, formB: formB, formC: formC)
-        : await PdfService.generateCrfPdf(c);
+
+    // Prefer server birth_resuscitation row when enrollment id is known
+    // so PDF fields match the web PrintSummaryB payload.
+    BirthResuscitationData? birth;
+    final eid = (formB?.enrollmentId.trim().isNotEmpty == true)
+        ? formB!.enrollmentId.trim()
+        : c.enrollmentId.trim();
+    if (eid.isNotEmpty) {
+      try {
+        final remote =
+            await FormsApiService.instance.loadBirthResuscitation(eid);
+        if (remote != null) {
+          birth = BirthResuscitationData.fromJson(remote);
+        }
+      } catch (_) {}
+    }
+
+    // Include only filled forms: A always; B if saved; C if saved.
+    final File file = await PdfService.generateFullTrialPdf(
+      crf: c,
+      formB: formB,
+      formC: formC,
+      birth: birth,
+    );
     if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
     await OpenFilex.open(file.path);
   } catch (e) {
@@ -771,16 +889,27 @@ class _NursePatientsPageState extends State<_NursePatientsPage> with RouteAware 
   List<CRF> _all = [];
   bool _loading = true;
   String _query = '';
-  String _filter = 'All'; // All / Enrolled / Excluded / Incomplete
+  String _filter = 'All'; // All / Eligible / Not Eligible / Screen Failure / Pending
 
   @override void initState() {
     super.initState();
-    _filter = widget.filterNotifier?.value ?? 'All';
+    _filter = _normalizeFilter(widget.filterNotifier?.value ?? 'All');
     widget.filterNotifier?.addListener(_onExternalFilter);
     _load();
   }
+  String _normalizeFilter(String raw) {
+    // Map legacy home-stat deep-links to Screening Form Banners
+    switch (raw) {
+      case 'Enrolled':
+        return 'Eligible';
+      case 'Incomplete':
+        return 'Pending';
+      default:
+        return raw;
+    }
+  }
   void _onExternalFilter() {
-    final next = widget.filterNotifier?.value ?? 'All';
+    final next = _normalizeFilter(widget.filterNotifier?.value ?? 'All');
     if (next != _filter && mounted) setState(() => _filter = next);
   }
   @override void didChangeDependencies() {
@@ -804,16 +933,23 @@ class _NursePatientsPageState extends State<_NursePatientsPage> with RouteAware 
   List<CRF> get _filtered {
     return _all.where((c) {
       final matchesFilter = switch (_filter) {
-        'Enrolled'   => _isEnrolled(c),
-        'Excluded'   => _isExcluded(c),
-        'Incomplete' => !_isEnrolled(c) && !_isExcluded(c),
-        _            => true,
+        'Eligible'       => _isEligible(c),
+        'Not Eligible'   => _isNotEligible(c),
+        'Screen Failure' => _isScreenFailure(c),
+        'Pending'        => _isPending(c),
+        // legacy home deep-links
+        'Enrolled'       => _isEligible(c),
+        'Excluded'       => _isExcluded(c),
+        'Incomplete'     => _isPending(c),
+        _                => true,
       };
       if (!matchesFilter) return false;
       if (_query.trim().isEmpty) return true;
       final q = _query.trim().toLowerCase();
-      final name = '${c.motherFirstName} ${c.motherSurname}'.toLowerCase();
-      return name.contains(q) || c.screeningId.toLowerCase().contains(q);
+      final name = patientDisplayName(c).toLowerCase();
+      return name.contains(q) ||
+          c.screeningId.toLowerCase().contains(q) ||
+          c.enrollmentId.toLowerCase().contains(q);
     }).toList();
   }
 
@@ -875,9 +1011,10 @@ class _NursePatientsPageState extends State<_NursePatientsPage> with RouteAware 
               scrollDirection: Axis.horizontal,
               child: Row(children: [
                 _chip('All', _kPrimary),
-                _chip('Enrolled', _kSuccess),
-                _chip('Excluded', _kDanger),
-                _chip('Incomplete', _kWarning),
+                _chip('Eligible', _kSuccess),
+                _chip('Not Eligible', const Color(0xFFB45309)),
+                _chip('Screen Failure', _kDanger),
+                _chip('Pending', _kWarning),
               ]),
             ),
             const SizedBox(height: 16),
@@ -950,24 +1087,38 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
       final raw = prefs.getString(k); if (raw==null) continue;
       final d = jsonDecode(raw) as Map<String,dynamic>;
       final sid = d['screeningId'] as String? ?? '';
+      final motherFirst = (d['motherFirstName'] ?? d['motherFirst'] ?? '').toString().trim();
+      final motherSurname = (d['motherSurname'] ?? '').toString().trim();
       final consent = (d['consentStatus'] ?? '').toString().trim();
       final consentDone = consent.isNotEmpty && consent != 'Select';
       final onServer = sid.isNotEmpty && serverIds.contains(sid);
-      // Same case already perfect on web → don't keep a ghost "Draft" card.
-      if (onServer && consentDone) {
+      final stillPlaceholder = _isPlaceholderPatientName(motherFirst, motherSurname);
+      // Drop local draft only when the same case is complete on server with a
+      // real mother name — never drop while server still shows "DRAFT".
+      if (onServer && consentDone && !stillPlaceholder) {
         await prefs.remove(k);
         continue;
       }
       vkeys.add(k);
-      drafts.add({'key':k,'screeningId':sid.isEmpty?'Draft':sid,
-          'motherName':'${d['motherFirstName']??d['motherFirst']??''} ${d['motherSurname']??''}'});
+      final displayName = stillPlaceholder
+          ? 'Draft in progress'
+          : '$motherFirst $motherSurname'.trim();
+      drafts.add({
+        'key': k,
+        'screeningId': sid.isEmpty ? 'Draft' : sid,
+        'motherName': displayName.isEmpty ? 'Draft in progress' : displayName,
+      });
     }
     await prefs.setStringList('screening_draft_keys', vkeys);
 
     // ── Load patients from BACKEND (site-isolated), PII merged in ──────
-    // Home only ever shows the 5 most recent patients — API is newest-first,
-    // so piiLimit: 5 loads names for the top of the list.
-    final crfs = await fetchPatientCrfs(piiLimit: 5);
+    // Home only ever shows the 5 most recent *real* patients — skip server
+    // rows that are still draft placeholders (mother name "DRAFT").
+    final allCrfs = await fetchPatientCrfs(piiLimit: 20);
+    final crfs = allCrfs
+        .where((c) => !_isPlaceholderPatientName(c.motherFirstName, c.motherSurname))
+        .take(5)
+        .toList();
 
     if (!mounted) return;
     setState(() { _crfs=crfs; _drafts=drafts; _loading=false; });
@@ -1043,10 +1194,10 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
             _st('Total',_total>0?_total:_crfs.length,_kPrimary,Icons.people_alt_rounded,
                 () => widget.onOpenPatients(filter: 'All')),
             const SizedBox(width:10),
-            _st('Enrolled',_enrolled2>0?_enrolled2:enrolled,_kSuccess,Icons.check_circle_rounded,
-                () => widget.onOpenPatients(filter: 'Enrolled')),
+            _st('Eligible',_enrolled2>0?_enrolled2:enrolled,_kSuccess,Icons.check_circle_rounded,
+                () => widget.onOpenPatients(filter: 'Eligible')),
             const SizedBox(width:10),
-            _st('Excluded',_excluded2>0?_excluded2:excluded,_kDanger,Icons.block_rounded,
+            _st('Failed',_excluded2>0?_excluded2:excluded,_kDanger,Icons.block_rounded,
                 () => widget.onOpenPatients(filter: 'Excluded')),
             const SizedBox(width:10),
             _st('Drafts',_drafts.length,_kWarning,Icons.pending_rounded, _showDraftsSheet),
@@ -1172,7 +1323,7 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
 
-    // Work queue: drafts + patients needing Form B + enrolled follow-ups.
+    // Work queue: drafts + patients needing Form B1 + enrolled follow-ups.
     final needFormB = all.where((c) {
       final consent = c.consentStatus.trim().toLowerCase();
       return !_isExcluded(c) &&
@@ -1238,16 +1389,16 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
                 const SizedBox(height: 10),
               ],
               if (needFormB.isNotEmpty) ...[
-                const Text('Ready for Form B',
+                const Text('Ready for Form B1',
                     style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: _kText1)),
                 const SizedBox(height: 8),
                 ...needFormB.map((c) => ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.child_care_rounded, color: _kPrimary),
                       title: Text(
-                        '${c.motherFirstName} ${c.motherSurname}'.trim().isEmpty
+                        patientDisplayName(c) == 'Name pending'
                             ? c.screeningId
-                            : '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                            : patientDisplayName(c),
                         style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
                       ),
                       subtitle: Text('${c.screeningId} · consent obtained',
@@ -1261,19 +1412,19 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
                 const SizedBox(height: 10),
               ],
               if (enrolled.isNotEmpty) ...[
-                const Text('Enrolled — continue forms',
+                const Text('Eligible — continue forms',
                     style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: _kText1)),
                 const SizedBox(height: 8),
                 ...enrolled.map((c) => ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.check_circle_rounded, color: _kSuccess),
                       title: Text(
-                        '${c.motherFirstName} ${c.motherSurname}'.trim().isEmpty
+                        patientDisplayName(c) == 'Name pending'
                             ? c.screeningId
-                            : '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                            : patientDisplayName(c),
                         style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
                       ),
-                      subtitle: Text('${c.screeningId} · enrolled',
+                      subtitle: Text('${c.screeningId} · eligible',
                           style: const TextStyle(fontSize: 11, color: _kText3)),
                       trailing: const Icon(Icons.chevron_right_rounded, color: _kText3),
                       onTap: () {
@@ -1353,7 +1504,7 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
                 separatorBuilder: (_, __) => const Divider(height: 1),
                 itemBuilder: (_, i) {
                   final c = all[i];
-                  final name = '${c.motherFirstName} ${c.motherSurname}'.trim();
+                  final name = patientDisplayName(c);
                   return ListTile(
                     leading: const Icon(Icons.picture_as_pdf_outlined, color: _kDanger),
                     title: Text(name.isEmpty ? c.screeningId : name,
@@ -1524,7 +1675,7 @@ class ScientistDashboard extends StatelessWidget {
       pages:[_SD(user:user,title:'Scientist Dashboard',
         subtitle:'Monitor data quality and generate reports',
         color:const Color(0xFF534AB7),
-        actions:['Review Form B','Missing Helper Form 3',
+        actions:['Review Form B1','Missing Helper Form 3',
                  'Download site report','Raise query']),
         _ph('Quality'), _ph('Reports')],
       navItems:const[
@@ -1549,7 +1700,7 @@ class DEODashboard extends StatelessWidget {
         subtitle:'Data entry queue for your site',
         color:_kWarning,
         actions:['Form A (Priority)','Helper Form 2',
-                 'Form B','Form C (Fix required)']),
+                 'Form B1','Form B2 (Fix required)']),
         _ph('Queue'), _ph('Done')],
       navItems:const[
         BottomNavigationBarItem(icon:Icon(Icons.home_outlined),

@@ -6,16 +6,21 @@ import 'dart:io';
 import '../providers/auth_provider.dart';
 
 import '../models/crf.dart';
+import '../models/birth_resuscitation.dart';
 import '../screens/screening_form.dart';
 import '../navigation/route_observer.dart';
 import '../services/api_service.dart';
+import '../services/forms_api_service.dart';
 import '../services/pdf_service.dart';
 import 'package:open_filex/open_filex.dart';
 import '../screens/form_b_birth_resuscitation.dart';
 import '../screens/helper_fio2_auc.dart';
+import '../screens/helper_form5_minimal_monitoring.dart';
 import '../screens/helper_form2_resp_cv_neuro.dart';
 import '../screens/helper_form3_infect_gi_hema.dart';
 import '../screens/helper_form4_metab_renal_vasc_eye.dart';
+import '../services/screening_api_service.dart';
+import '../utils/screening_status.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -99,6 +104,71 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
   }
 
   Future<void> _loadCrfs() async {
+    // Prefer shared site-scoped API list (same as web ViewEntries)
+    // so eligibility banners match screening_status from the backend.
+    try {
+      final patients = await ScreeningApiService.instance.getPatients(limit: 200);
+      final piiIds = patients
+          .map((p) => p['screening_id']?.toString() ?? '')
+          .where((sid) => sid.isNotEmpty)
+          .toList();
+      Map<String, Map<String, dynamic>> piiById = {};
+      if (piiIds.isNotEmpty) {
+        try {
+          piiById = await ScreeningApiService.instance.getPiiBatch(piiIds);
+        } catch (_) {}
+      }
+      final list = patients.map((p) {
+        final sid = p['screening_id']?.toString() ?? '';
+        final pii = piiById[sid] ?? const <String, dynamic>{};
+        final mapped = {
+          "identification": {
+            'screeningId': p['screening_id'] ?? '',
+            'site': p['site_name'] ?? '',
+            'siteId': p['site_id'] ?? '',
+            'screeningDateTime': p['screening_datetime'] ?? '',
+            'screenedBy': p['screened_by'] ?? '',
+          },
+          "maternal": {
+            'motherFirstName': pii['mother_first_name'] ?? p['mother_first_name'] ?? '',
+            'motherSurname': pii['mother_surname'] ?? p['mother_surname'] ?? '',
+            'husbandFirstName': pii['husband_first_name'] ?? p['husband_first_name'] ?? '',
+            'husbandSurname': pii['husband_surname'] ?? p['husband_surname'] ?? '',
+            'motherPhone': '',
+            'husbandPhone': '',
+            'maternalUid': pii['maternal_uid'] ?? '',
+            'hospitalNo': pii['hospital_admission_number'] ?? '',
+          },
+          "gestation": {
+            'weeks': p['gestation_weeks'] ?? 0,
+            'days': p['gestation_days'] ?? 0,
+            'method': p['gestation_method'] ?? '',
+            'expectedDeliveryDate': p['expected_delivery_date'] ?? '',
+            'gestationKnownInWeeks': p['gestation_weeks'] != null,
+            'eddKnown': p['expected_delivery_date'] != null,
+          },
+          "exclusion": {
+            'present': p['exclusion_present'] ?? false,
+            'reason': p['exclusion_reasons'] ?? '',
+            'anomalyDetails': p['major_structural_anomalies_if_yes'] ?? '',
+          },
+          "finalDecision": {
+            'eligibilityStatus': p['screening_status'] ?? '',
+            'consentStatus': p['consent_given'] ?? '',
+            'consentRefusalReason': p['reason_for_consent_refusal'] ?? '',
+            'relationshipToParticipant':
+                p['relationship_to_participant'] ?? '',
+            'relationshipOther': p['relationship_other'] ?? '',
+            'consentTakenBy': p['consent_taken_by'] ?? '',
+          },
+          'enrollmentId': p['enrollment_id'] ?? '',
+        };
+        return CRF.fromJson(mapped);
+      }).toList();
+      if (!mounted) return;
+      setState(() => _crfList = list);
+      return;
+    } catch (_) {}
     final list = await ApiService().loadAllCRFs();
     if (!mounted) return;
     setState(() => _crfList = list.reversed.toList());
@@ -139,14 +209,26 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
   // ================= HELPERS =================
 
   bool _isEligible(CRF c) =>
-      c.eligibilityStatus == "Eligible" && c.consentStatus == "Yes";
+      normalizeScreeningStatus(c.eligibilityStatus) == "Eligible";
 
-  bool _isExcluded(CRF c) {
-    final consent = c.consentStatus.toLowerCase();
-    final elig = c.eligibilityStatus.toLowerCase();
-    return elig == "not eligible" ||
-        consent == "no" ||
-        consent.contains("not approached");
+  bool _isNotEligible(CRF c) =>
+      normalizeScreeningStatus(c.eligibilityStatus) == "Not Eligible";
+
+  bool _isScreenFailure(CRF c) =>
+      normalizeScreeningStatus(c.eligibilityStatus) == "Screen Failure";
+
+  bool _isPending(CRF c) =>
+      normalizeScreeningStatus(c.eligibilityStatus) == "Pending";
+
+  bool _isExcluded(CRF c) => _isNotEligible(c) || _isScreenFailure(c);
+
+  String _babyOfLabel(CRF c) {
+    final first = c.motherFirstName.trim();
+    final upper = first.toUpperCase();
+    if (first.isEmpty || upper == 'DRAFT' || upper == 'NAME PENDING') {
+      return c.enrollmentId.isNotEmpty ? c.enrollmentId : c.screeningId;
+    }
+    return 'B/o $first';
   }
 
   List<CRF> get _filteredCrfs {
@@ -155,16 +237,23 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
       final q = _searchQuery.toLowerCase();
       return c.screeningId.toLowerCase().contains(q) ||
           c.motherFirstName.toLowerCase().contains(q) ||
+          c.enrollmentId.toLowerCase().contains(q) ||
           c.maternalUid.toLowerCase().contains(q);
     }).toList();
 
     switch (_filterStatus) {
       case "Eligible":
         return list.where(_isEligible).toList();
-      case "Excluded":
+      case "Not Eligible":
+        return list.where(_isNotEligible).toList();
+      case "Screen Failure":
+        return list.where(_isScreenFailure).toList();
+      case "Pending":
+        return list.where(_isPending).toList();
+      case "Excluded": // legacy
         return list.where(_isExcluded).toList();
-      case "Incomplete":
-        return list.where((c) => !_isEligible(c) && !_isExcluded(c)).toList();
+      case "Incomplete": // legacy
+        return list.where(_isPending).toList();
       default:
         return list;
     }
@@ -177,11 +266,11 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
     final total      = _crfList.length;
     final eligible   = _crfList.where(_isEligible).length;
     final excluded   = _crfList.where(_isExcluded).length;
-    final incomplete = total - eligible - excluded;
+    final incomplete = _crfList.where(_isPending).length;
 
     final Map<String, int> exclusionMap = {};
     for (final crf in _crfList) {
-      if (crf.eligibilityStatus == "Not Eligible") {
+      if (_isExcluded(crf)) {
         for (var r in (crf.exclusionReason ?? "").split(";")) {
           final clean = r.trim();
           if (clean.isNotEmpty) {
@@ -535,10 +624,11 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
 
   Widget _buildFilterChips() {
     final filters = [
-      ("All",        _primary, Icons.grid_view_rounded),
-      ("Eligible",   _success, Icons.check_circle_outline_rounded),
-      ("Excluded",   _danger,  Icons.block_outlined),
-      ("Incomplete", _warning, Icons.pending_outlined),
+      ("All",            _primary, Icons.grid_view_rounded),
+      ("Eligible",       _success, Icons.check_circle_outline_rounded),
+      ("Not Eligible",   _warning, Icons.warning_amber_rounded),
+      ("Screen Failure", _danger,  Icons.block_outlined),
+      ("Pending",        _warning, Icons.pending_outlined),
     ];
 
     return SingleChildScrollView(
@@ -861,7 +951,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
             // Info
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text("${crf.motherFirstName} ${crf.motherSurname}",
+                Text(_babyOfLabel(crf),
                     style: const TextStyle(
                         color: _textPrimary,
                         fontWeight: FontWeight.w700,
@@ -887,7 +977,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
               ]),
             ),
 
-            _statusChip(crf.eligibilityStatus, crf.consentStatus),
+            _statusChip(crf.eligibilityStatus),
           ]),
         ),
 
@@ -920,7 +1010,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
               const SizedBox(width: 7),
               _actionBtn(
                 icon: Icons.baby_changing_station_rounded,
-                label: "Form B",
+                label: "Form B1",
                 color: _success,
                 softColor: _successSoft,
                 onTap: () => Navigator.push(context,
@@ -933,7 +1023,8 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
                           husbandPhone: crf.husbandPhone,
                           gestWeeks: crf.gestationWeeks,
                           gestDays: crf.gestationDays,
-                          siteId: crf.siteId,
+                          siteId: crf.site.isNotEmpty ? crf.site : crf.siteId,
+                          screeningDateTime: crf.screeningDateTime,
                         ))),
               ),
             ],
@@ -1047,7 +1138,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
                       color: _textPrimary,
                       fontWeight: FontWeight.w800,
                       fontSize: 15)),
-              Text("${crf.motherFirstName} ${crf.motherSurname}",
+              Text(_babyOfLabel(crf),
                   style: const TextStyle(color: _textSecondary, fontSize: 12)),
             ]),
           ]),
@@ -1055,17 +1146,20 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
           const Divider(color: _borderLight),
           const SizedBox(height: 8),
           _helperTile("fio2", Icons.air_rounded,
-              "FiO₂ AUC Helper", "7-day oxygen exposure tracking",
+              "Helper Form 1 — FiO₂ AUC", "Supplemental O₂ days from Helper Form 2",
               const Color(0xFF0284C7), crf),
           _helperTile("resp", Icons.favorite_outline_rounded,
-              "Resp / CV / Neuro", "Respiratory, cardiac & neurological",
+              "Helper Form 2 — Resp / CV / Neuro", "Respiratory, cardiac & neurological",
               _success, crf),
           _helperTile("infect", Icons.biotech_outlined,
-              "Infect / GI / Hema", "Infection, feeds & haematology",
+              "Helper Form 3 — Infect / GI / Hema", "Infection, feeds & haematology",
               _danger, crf),
           _helperTile("metab", Icons.science_outlined,
-              "Metab / Renal / Vasc / Eye", "Metabolic, renal, lines & ROP",
+              "Helper Form 4 — Metab / Renal / Vasc / Eye", "Metabolic, renal, lines & ROP",
               _warning, crf),
+          _helperTile("minimal_monitoring", Icons.monitor_heart_outlined,
+              "Helper Form 5 — Minimal Monitoring", "Same-day CV/resp/metab/GI/neuro/hema scratchpad",
+              const Color(0xFF7C3AED), crf),
         ]),
       ),
     );
@@ -1115,7 +1209,15 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
   // ── HELPER NAVIGATION ────────────────────────────────────────────────────
 
   void _openHelper(String value, CRF crf) {
-    final enrollment = crf.screeningId;
+    // Helpers are keyed by enrollment_id on the backend/web — never screeningId.
+    final enrollment = crf.enrollmentId.trim();
+    if (enrollment.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text(
+            'Enrollment ID required for helper forms — complete Form B1 randomisation first.'),
+      ));
+      return;
+    }
     final gestation  = "${crf.gestationWeeks}w ${crf.gestationDays}d";
     final motherName = "${crf.motherFirstName} ${crf.motherSurname}";
     final babyUid    = crf.maternalUid;
@@ -1134,6 +1236,9 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
       case "metab":
         screen = HelperForm4MetabRenalVascEye(enrollmentId: enrollment, gestation: gestation,
             motherName: motherName, babyUid: babyUid); break;
+      case "minimal_monitoring":
+        screen = HelperForm5MinimalMonitoring(enrollmentId: enrollment, gestation: gestation,
+            motherName: motherName, babyUid: babyUid); break;
     }
     if (screen != null) {
       Navigator.push(context, MaterialPageRoute(builder: (_) => screen!));
@@ -1147,12 +1252,27 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
       final apiService = ApiService();
       final formB = await apiService.loadFormB(crf.screeningId);
       final formC = await apiService.loadFormC(crf.screeningId);
-      File file;
-      if (formB != null && formC != null) {
-        file = await PdfService.generateFullTrialPdf(crf: crf, formB: formB, formC: formC);
-      } else {
-        file = await PdfService.generateCrfPdf(crf);
+
+      BirthResuscitationData? birth;
+      final eid = (formB?.enrollmentId.trim().isNotEmpty == true)
+          ? formB!.enrollmentId.trim()
+          : crf.enrollmentId.trim();
+      if (eid.isNotEmpty) {
+        try {
+          final remote =
+              await FormsApiService.instance.loadBirthResuscitation(eid);
+          if (remote != null) {
+            birth = BirthResuscitationData.fromJson(remote);
+          }
+        } catch (_) {}
       }
+
+      final file = await PdfService.generateFullTrialPdf(
+        crf: crf,
+        formB: formB,
+        formC: formC,
+        birth: birth,
+      );
       await OpenFilex.open(file.path);
     } catch (e) {
       if (mounted) {
@@ -1166,23 +1286,16 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
 
   // ── STATUS CHIP ───────────────────────────────────────────────────────────
 
-  Widget _statusChip(String eligibilityRaw, String consentRaw) {
-    final eligibility = eligibilityRaw.trim().toLowerCase();
-    final consent = consentRaw.trim().toLowerCase();
-
-    Color color; Color soft; String label; IconData icon;
-
-    if (eligibility == "not eligible") {
-      color = _danger; soft = _dangerSoft; label = "Excluded"; icon = Icons.block_rounded;
-    } else if (consent == "no") {
-      color = _purple; soft = _purpleSoft; label = "Refused"; icon = Icons.do_not_disturb_rounded;
-    } else if (consent.contains("not approached")) {
-      color = _grey; soft = _greySoft; label = "Not Approached"; icon = Icons.person_off_rounded;
-    } else if (eligibility == "eligible" && consent == "yes") {
-      color = _success; soft = _successSoft; label = "Eligible"; icon = Icons.check_circle_rounded;
-    } else {
-      color = _warning; soft = _warningSoft; label = "Incomplete"; icon = Icons.pending_rounded;
-    }
+  Widget _statusChip(String eligibilityRaw) {
+    final label = normalizeScreeningStatus(eligibilityRaw);
+    final color = screeningStatusColor(label);
+    final soft = color.withOpacity(0.12);
+    final icon = switch (label) {
+      'Eligible' => Icons.check_circle_rounded,
+      'Screen Failure' => Icons.block_rounded,
+      'Not Eligible' => Icons.warning_amber_rounded,
+      _ => Icons.pending_rounded,
+    };
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),

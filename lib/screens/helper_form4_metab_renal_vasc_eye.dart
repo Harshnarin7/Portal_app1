@@ -1,227 +1,83 @@
+// lib/screens/helper_form4_metab_renal_vasc_eye.dart
+//
+// Helper Form 4 — Metab / Renal / Vasc / Eye Daily Log
+// Parity with web MetabRenalVascEyeLog.jsx + Form 2 day-shell UX.
+
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/metab_renal_vasc_eye_day.dart';
 import '../services/forms_api_service.dart';
+import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
+import '../widgets/modern_date_picker.dart';
 import '../widgets/theme_toggle_widget.dart';
 
-// ─── FIELD VALUE ──────────────────────────────────────────────────────────────
+const _glucoseLowMax = 45.0;
+const _glucoseHighMin = 180.0;
 
-class FieldValue {
-  final String   value;
-  final String   filledBy;
-  final DateTime filledAt;
-
-  const FieldValue({
-    required this.value,
-    required this.filledBy,
-    required this.filledAt,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'value'   : value,
-        'filledBy': filledBy,
-        'filledAt': filledAt.toIso8601String(),
-      };
-
-  factory FieldValue.fromJson(Map<String, dynamic> j) => FieldValue(
-        value   : j['value']    as String,
-        filledBy: j['filledBy'] as String,
-        filledAt: DateTime.parse(j['filledAt'] as String),
-      );
-}
-
-// ─── DAY RECORD ───────────────────────────────────────────────────────────────
-
-class DayRecord {
-  final DateTime date;
-  final Map<String, FieldValue> fields;
-
-  DayRecord({required this.date}) : fields = {};
-  DayRecord._withFields({required this.date, required this.fields});
-
-  bool    get isEmpty          => fields.isEmpty;
-  String? valueOf(String key)  => fields[key]?.value;
-  bool    isFilled(String key) => fields.containsKey(key);
-
-  Map<String, dynamic> toJson() => {
-        'date'  : date.toIso8601String(),
-        'fields': fields.map((k, v) => MapEntry(k, v.toJson())),
-      };
-
-  factory DayRecord.fromJson(Map<String, dynamic> j) {
-    final rawFields = (j['fields'] as Map<String, dynamic>).map(
-      (k, v) => MapEntry(k, FieldValue.fromJson(v as Map<String, dynamic>)),
-    );
-    return DayRecord._withFields(
-      date  : DateTime.parse(j['date'] as String),
-      fields: rawFields,
-    );
-  }
-}
-
-// ─── FIELD TYPES ──────────────────────────────────────────────────────────────
-
-enum FieldType { yesNo, chips, number, text }
-
-class FieldDef {
-  final String        key;
-  final FieldType     type;
-  final List<String>? options;
-  final double?       maxValue;
-  final String?       unit;
-  final bool          isDecimal;
-  final String?       enabledWhen;
-  final String?       enabledWhenValue;
-
-  const FieldDef(
-    this.key,
-    this.type, {
-    this.options,
-    this.maxValue,
-    this.unit,
-    this.isDecimal       = false,
-    this.enabledWhen,
-    this.enabledWhenValue,
-  });
-}
-
-// ─── SCHEMA ───────────────────────────────────────────────────────────────────
-
-const Map<String, List<FieldDef>> kMrveSections = {
-  "METABOLIC": [
-    FieldDef("Lowest glucose reading",    FieldType.number, maxValue: 999, unit: "mg/dL"),
-    FieldDef("Hypoglycemia (<45 mg/dL)",  FieldType.yesNo),
-    FieldDef("Hypoglycemia Rx",           FieldType.yesNo,
-        enabledWhen: "Hypoglycemia (<45 mg/dL)", enabledWhenValue: "Yes"),
-    FieldDef("Highest glucose reading",   FieldType.number, maxValue: 999, unit: "mg/dL"),
-    FieldDef("Hyperglycemia (>180)",      FieldType.yesNo),
-    FieldDef("Hyperglycemia Rx (Insulin)", FieldType.yesNo,
-        enabledWhen: "Hyperglycemia (>180)", enabledWhenValue: "Yes"),
-    FieldDef("Metabolic acidosis (pH<7.2)", FieldType.yesNo),
-    FieldDef("Sodium value",    FieldType.number, maxValue: 200,  unit: "mEq/L"),
-    FieldDef("Potassium value", FieldType.number, maxValue: 10,   unit: "mEq/L", isDecimal: true),
-    FieldDef("Dyselectrolytemia", FieldType.yesNo),
-    FieldDef(
-      "Dyselectrolytemia type",
-      FieldType.chips,
-      options          : ["Na", "K", "Ca"],
-      enabledWhen      : "Dyselectrolytemia",
-      enabledWhenValue : "Yes",
-    ),
-    FieldDef("Calcium value",         FieldType.number, maxValue: 20, unit: "mg/dL", isDecimal: true),
-    FieldDef("Osteopenia suspected",  FieldType.yesNo),
-  ],
-  "RENAL": [
-    FieldDef("AKI suspected", FieldType.yesNo),
-    FieldDef(
-      "AKI (KDIGO stage)",
-      FieldType.chips,
-      options          : ["1", "2", "3"],
-      enabledWhen      : "AKI suspected",
-      enabledWhenValue : "Yes",
-    ),
-    FieldDef("Creatinine (mg/dL)",     FieldType.number, maxValue: 20, unit: "mg/dL", isDecimal: true),
-    FieldDef("Urine output <1ml/kg/h", FieldType.yesNo),
-    FieldDef("Dialysis/CRRT",          FieldType.yesNo),
-  ],
-  "THERMOREGULATION": [
-    FieldDef("Hypothermia (<36°C)",   FieldType.yesNo),
-    FieldDef("Hyperthermia (>37.5°C)", FieldType.yesNo),
-  ],
-  "VASCULAR ACCESS": [
-    FieldDef("PICC in situ",          FieldType.yesNo),
-    FieldDef("UVC in situ",           FieldType.yesNo),
-    FieldDef("UAC in situ",           FieldType.yesNo),
-    FieldDef("Peripheral IV",         FieldType.yesNo),
-    FieldDef("Peripheral arterial",   FieldType.yesNo),
-    FieldDef("Extravasation injury",  FieldType.yesNo),
-    FieldDef("Line complication",     FieldType.yesNo),
-  ],
-  "OPHTHALMOLOGY": [
-    FieldDef("ROP screening due", FieldType.yesNo),
-    FieldDef("ROP screened",      FieldType.yesNo),
-    FieldDef("ROP detected",      FieldType.yesNo),
-    FieldDef(
-      "ROP stage (1-5)",
-      FieldType.chips,
-      options          : ["1", "2", "3", "4", "5"],
-      enabledWhen      : "ROP detected",
-      enabledWhenValue : "Yes",
-    ),
-    FieldDef("Plus disease",    FieldType.yesNo,
-        enabledWhen: "ROP detected", enabledWhenValue: "Yes"),
-    FieldDef("ROP treatment",   FieldType.yesNo,
-        enabledWhen: "ROP detected", enabledWhenValue: "Yes"),
-  ],
-};
-
-final List<String> kMrveAllFields =
-    kMrveSections.values.expand((f) => f.map((d) => d.key)).toList();
-
-// ─── SITE-WISE NURSE ROSTER (same map as Forms A, 2 & 3) ─────────────────────
-
-const Map<String, List<String>> kMrveNursesBySite = {
-  "PGIMER": [
-    "Mannat Guliani", "Shalini Dhiman", "Navkiran Kaur",
-    "Geetika", "Priyanka Thakur", "Seemran Kaur",
-    "Tanvi Saini", "Yashvi Jolly",
-  ],
-  "GMCH"  : ["Nurse GMCH-1",   "Nurse GMCH-2"],
-  "IOG"   : ["Nurse IOG-1",    "Nurse IOG-2"],
-  "AFMC"  : ["Nurse AFMC-1",   "Nurse AFMC-2"],
-  "GMCH-A": ["Nurse GMCH-A-1"],
-  "AMC"   : ["Nurse AMC-1"],
-};
-
-// ─── STORAGE HELPER ───────────────────────────────────────────────────────────
-
-class _MrveStorage {
-  static String _prefsKey(String babyUid) =>
-      'nicu_metab_renal_vasc_eye_$babyUid';
-  static const _lastNurseKey = 'nicu_last_nurse';
-
-  static Future<Map<String, DayRecord>> load(String babyUid) async {
+/// Helper 5 `met_a[].glucose` → readings (web `parseMetAGlucoseReadings`).
+/// Flat `glucose` is only used when `entries_json` is missing (legacy).
+List<double> _parseHelper5Glucose(Map<String, dynamic> data) {
+  dynamic entries = data['entries_json'];
+  if (entries is String) {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw   = prefs.getString(_prefsKey(babyUid));
-      if (raw == null || raw.isEmpty) return {};
-      final decoded = jsonDecode(raw) as Map<String, dynamic>;
-      return decoded.map(
-        (k, v) => MapEntry(k, DayRecord.fromJson(v as Map<String, dynamic>)),
-      );
-    } catch (_) { return {}; }
+      entries = jsonDecode(entries);
+    } catch (_) {
+      entries = null;
+    }
   }
-
-  static Future<void> save(
-      String babyUid, Map<String, DayRecord> records) async {
-    try {
-      final prefs   = await SharedPreferences.getInstance();
-      final encoded = jsonEncode(records.map((k, v) => MapEntry(k, v.toJson())));
-      await prefs.setString(_prefsKey(babyUid), encoded);
-    } catch (_) {}
+  if (entries is Map && entries['met_a'] is List) {
+    final out = <double>[];
+    for (final row in entries['met_a'] as List) {
+      if (row is! Map) continue;
+      final raw = row['glucose'];
+      if (raw == null || raw.toString().trim().isEmpty) continue;
+      final n = double.tryParse(raw.toString());
+      if (n != null) out.add(n);
+    }
+    // Empty met_a is valid — do not fall back to a stale flat column.
+    return out;
   }
-
-  static Future<String> loadLastNurse() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_lastNurseKey) ?? '';
+  final flat = data['glucose'];
+  if (flat != null && flat.toString().trim().isNotEmpty) {
+    final n = double.tryParse(flat.toString());
+    if (n != null) return [n];
   }
-
-  static Future<void> saveLastNurse(String name) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_lastNurseKey, name);
-  }
+  return [];
 }
 
-// ─── MAIN WIDGET ──────────────────────────────────────────────────────────────
+/// Same rules as web: &lt;45 low, 45–180 normal, &gt;180 high.
+Map<String, String> _computeGlucoseAutofill(List<double> readings) {
+  if (readings.isEmpty) {
+    return {
+      'lowest_glucose': 'Not Tested',
+      'hypoglycemia_episodes': '0',
+      'highest_glucose': 'Not Tested',
+    };
+  }
+  final lows = readings.where((v) => v < _glucoseLowMax).toList();
+  final highs = readings.where((v) => v > _glucoseHighMin).toList();
+  String fmt(double v) =>
+      v == v.roundToDouble() ? '${v.round()}' : '$v';
+  return {
+    'lowest_glucose':
+        lows.isEmpty ? 'Not Low' : fmt(lows.reduce((a, b) => a < b ? a : b)),
+    'hypoglycemia_episodes': '${lows.length}',
+    'highest_glucose':
+        highs.isEmpty ? 'Not High' : fmt(highs.reduce((a, b) => a > b ? a : b)),
+  };
+}
+
+bool _isEmptyGlucoseField(String? v) =>
+    v == null || v.trim().isEmpty;
 
 class HelperForm4MetabRenalVascEye extends StatefulWidget {
   final String enrollmentId;
   final String gestation;
   final String motherName;
   final String babyUid;
-  /// Site string (e.g. "PGIMER") drives the nurse dropdown list.
-  /// Defaults to 'PGIMER' so existing call sites without this param compile.
   final String site;
 
   const HelperForm4MetabRenalVascEye({
@@ -239,1352 +95,1908 @@ class HelperForm4MetabRenalVascEye extends StatefulWidget {
 }
 
 class _HelperForm4MetabRenalVascEyeState
-    extends State<HelperForm4MetabRenalVascEye>
-    with SingleTickerProviderStateMixin {
+    extends State<HelperForm4MetabRenalVascEye> {
+  static const _lateGraceHour = 11;
 
-  late TabController         _tabController;
-  Map<String, String>        _draft         = {};
-  bool                       _isSaving      = false;
-  bool                       _isLoading     = true;
-  Map<String, DayRecord>     _records       = {};
-  String                     _selectedNurse = 'Select';
-  late List<String>          _siteNurses;
+  final _api = FormsApiService.instance;
 
-  // ── Init / Dispose ─────────────────────────────────────────────────────────
+  bool _loading = true;
+  bool _saving = false;
+  bool _submitting = false;
+  bool _dayLoading = false;
+  bool _glucoseRefreshing = false;
+  String? _banner;
+  bool _bannerError = false;
+
+  DateTime? _day1Date;
+  bool _day1Locked = false;
+  int _totalDays = 14;
+  int _activeDay = 1;
+  int _todayNicuDay = 1;
+
+  final Map<int, String> _dayStatus = {};
+  final Map<int, int> _dayPct = {};
+
+  bool _recordExists = false;
+  bool _isEditing = true;
+  bool _isSubmitted = false;
+  bool _dayLoadFailed = false;
+  int _loadGen = 0;
+
+  MetabRenalVascEyeDay _model = MetabRenalVascEyeDay(
+    enrollmentId: '',
+    nicuDay: 1,
+  );
+
+  final Map<String, bool> _glucoseAutofilled = {
+    'lowest_glucose': false,
+    'hypoglycemia_episodes': false,
+    'highest_glucose': false,
+  };
+
+  int? _glucoseAutoDoneDay;
+
+  final _lowGlucoseCtrl = TextEditingController();
+  final _hypoEpisodesCtrl = TextEditingController();
+  final _highGlucoseCtrl = TextEditingController();
+  final _creatinineCtrl = TextEditingController();
+  final _axillaryCtrl = TextEditingController();
+  final _urine8am2pmCtrl = TextEditingController();
+  final _urine2pm8pmCtrl = TextEditingController();
+  final _urine8pm8amCtrl = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    _siteNurses    = kMrveNursesBySite[widget.site] ?? [];
-    _loadData();
+    for (final c in [
+      _lowGlucoseCtrl,
+      _hypoEpisodesCtrl,
+      _highGlucoseCtrl,
+      _creatinineCtrl,
+      _axillaryCtrl,
+      _urine8am2pmCtrl,
+      _urine2pm8pmCtrl,
+      _urine8pm8amCtrl,
+    ]) {
+      c.addListener(() => setState(() {}));
+    }
+    _bootstrap();
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
+    for (final c in [
+      _lowGlucoseCtrl,
+      _hypoEpisodesCtrl,
+      _highGlucoseCtrl,
+      _creatinineCtrl,
+      _axillaryCtrl,
+      _urine8am2pmCtrl,
+      _urine2pm8pmCtrl,
+      _urine8pm8amCtrl,
+    ]) {
+      c.dispose();
+    }
     super.dispose();
   }
 
-  Future<void> _loadData() async {
-    Map<String, DayRecord> records;
+  Future<String> _nurseName() async {
+    final p = await TokenStorage.getProfile();
+    final name = (p?['full_name'] ?? p?['username'] ?? 'Nurse').toString();
+    return name.trim().isEmpty ? 'Nurse' : name.trim();
+  }
+
+  String? get _activeDayYmd {
+    final cal = _calendarForDay(_activeDay);
+    if (cal == null) return null;
+    return '${cal.year.toString().padLeft(4, '0')}-'
+        '${cal.month.toString().padLeft(2, '0')}-'
+        '${cal.day.toString().padLeft(2, '0')}';
+  }
+
+  String get _todayYmd {
+    final n = DateTime.now();
+    return '${n.year.toString().padLeft(4, '0')}-'
+        '${n.month.toString().padLeft(2, '0')}-'
+        '${n.day.toString().padLeft(2, '0')}';
+  }
+
+  bool get _isActiveDayToday =>
+      _activeDayYmd != null && _activeDayYmd == _todayYmd;
+
+  Future<void> _bootstrap() async {
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) {
+      setState(() {
+        _loading = false;
+        _banner = 'No enrollment ID — open from a randomised patient.';
+        _bannerError = true;
+      });
+      return;
+    }
     try {
-      final remote = await FormsApiService.instance.loadHelperForm(
-        babyUid: widget.babyUid, formType: 'metab_renal_vasc_eye');
-      final raw = remote['records'] as Map<String, dynamic>? ?? {};
-      records = raw.isNotEmpty
-          ? raw.map((k,v) => MapEntry(k, DayRecord.fromJson(v as Map<String,dynamic>)))
-          : await _MrveStorage.load(widget.babyUid);
-    } catch (_) { records = await _MrveStorage.load(widget.babyUid); }
-    final lastNurse = await _MrveStorage.loadLastNurse();
-    if (!mounted) return;
-    setState(() {
-      _records       = records;
-      _isLoading     = false;
-      _selectedNurse = (_siteNurses.contains(lastNurse) && lastNurse.isNotEmpty)
-          ? lastNurse : 'Select';
-    });
+      try {
+        final d1 = await _api.loadDay1Date(eid);
+        final raw = d1['day1_date']?.toString();
+        if (raw != null && raw.isNotEmpty) {
+          _day1Date = DateTime.tryParse(raw.substring(0, 10));
+        }
+        _day1Locked = d1['locked'] == true;
+      } catch (e) {
+        _banner =
+            'Could not load Day 1 Date from server — set it before saving: $e';
+        _bannerError = true;
+      }
+
+      final summary = await _api.loadMetabRenalVascEyeSummary(eid);
+      var maxDay = 14;
+      for (final row in summary) {
+        final n = row['nicu_day'];
+        final day = n is int ? n : int.tryParse('$n') ?? 0;
+        if (day < 1) continue;
+        if (day > maxDay) maxDay = day;
+        final st = (row['submission_status'] ?? 'empty').toString();
+        final pct = row['completion_pct'];
+        _dayStatus[day] = st;
+        _dayPct[day] = pct is int ? pct : int.tryParse('$pct') ?? 0;
+        if (st != 'empty' && st.isNotEmpty) _day1Locked = true;
+      }
+      _totalDays = maxDay < 14 ? 14 : maxDay;
+      _recomputeTodayNicuDay();
+      _activeDay = _defaultActiveDay();
+    } catch (e) {
+      _banner = 'Could not load day summary: $e';
+      _bannerError = true;
+    }
+    if (mounted) {
+      setState(() => _loading = false);
+      await _loadActiveDay();
+    }
   }
 
-  Future<void> _persistRecords() async =>
-      _MrveStorage.save(widget.babyUid, _records);
-
-  // ── Date helpers ───────────────────────────────────────────────────────────
-
-  DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
-
-  String _dateKey(DateTime d) =>
-      "${d.year}-${d.month.toString().padLeft(2, '0')}-"
-      "${d.day.toString().padLeft(2, '0')}";
-
-  DayRecord get _todayRecord {
-    final key = _dateKey(DateTime.now());
-    _records.putIfAbsent(key, () => DayRecord(date: _dateOnly(DateTime.now())));
-    return _records[key]!;
+  void _recomputeTodayNicuDay() {
+    if (_day1Date == null) {
+      _todayNicuDay = 1;
+      return;
+    }
+    final now = DateTime.now();
+    final d1 = DateTime(_day1Date!.year, _day1Date!.month, _day1Date!.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final diff = today.difference(d1).inDays + 1;
+    _todayNicuDay = diff < 1 ? 1 : diff;
   }
 
-  // ── Field logic ────────────────────────────────────────────────────────────
-
-  bool    _isLocked(String key)     => _todayRecord.isFilled(key);
-  String  _displayValue(String key) {
-    if (_isLocked(key)) return _todayRecord.valueOf(key) ?? '';
-    return _draft[key] ?? '';
+  int _defaultActiveDay() {
+    if (_day1Date == null) return 1;
+    final hour = DateTime.now().hour;
+    if (hour < _lateGraceHour && _todayNicuDay > 1) {
+      return _todayNicuDay - 1;
+    }
+    return _todayNicuDay;
   }
 
-  bool _isFieldEnabled(FieldDef fd) {
-    if (fd.enabledWhen == null) return true;
-    return _displayValue(fd.enabledWhen!) == fd.enabledWhenValue;
+  DateTime? _calendarForDay(int day) {
+    if (_day1Date == null) return null;
+    return DateTime(_day1Date!.year, _day1Date!.month, _day1Date!.day)
+        .add(Duration(days: day - 1));
   }
 
-  void _setDraft(String key, String val) {
-    if (_isLocked(key)) return;
-    setState(() {
-      _draft[key] = val;
-      for (final section in kMrveSections.values) {
-        for (final fd in section) {
-          if (fd.enabledWhen == key && val != fd.enabledWhenValue) {
-            if (!_isLocked(fd.key)) _draft[fd.key] = '';
-          }
+  bool get _isFutureDay =>
+      _day1Date != null && _activeDay > _todayNicuDay;
+
+  bool get _isPastLocked {
+    if (_day1Date == null) return false;
+    if (_activeDay >= _todayNicuDay) return false;
+    if (_activeDay == _todayNicuDay - 1 &&
+        DateTime.now().hour < _lateGraceHour) {
+      return false;
+    }
+    return true;
+  }
+
+  bool get _isFieldEditable {
+    if (_isSubmitted) return false;
+    if (_isFutureDay) return false;
+    if (_isPastLocked) return false;
+    if (_recordExists && !_isEditing) return false;
+    return true;
+  }
+
+  MetabRenalVascEyeDay _buildModel() {
+    final m = MetabRenalVascEyeDay(
+      enrollmentId: widget.enrollmentId.trim(),
+      nicuDay: _activeDay,
+    );
+    m.lowestGlucose =
+        _lowGlucoseCtrl.text.trim().isEmpty ? null : _lowGlucoseCtrl.text.trim();
+    m.hypoglycemiaEpisodes = _hypoEpisodesCtrl.text.trim().isEmpty
+        ? null
+        : _hypoEpisodesCtrl.text.trim();
+    m.hypoglycemiaRx = _model.hypoglycemiaRx;
+    m.highestGlucose = _highGlucoseCtrl.text.trim().isEmpty
+        ? null
+        : _highGlucoseCtrl.text.trim();
+    m.insulin = _model.insulin;
+    m.osteopeniaSuspected = _model.osteopeniaSuspected;
+    m.phReadings = _model.phReadings
+        .map((r) => MrveReading(
+            id: r.id, date: r.date, time: r.time, value: r.value))
+        .toList();
+    m.sodiumReadings = _model.sodiumReadings
+        .map((r) => MrveReading(
+            id: r.id, date: r.date, time: r.time, value: r.value))
+        .toList();
+    m.potassiumReadings = _model.potassiumReadings
+        .map((r) => MrveReading(
+            id: r.id, date: r.date, time: r.time, value: r.value))
+        .toList();
+    m.calciumReadings = _model.calciumReadings
+        .map((r) => MrveReading(
+            id: r.id, date: r.date, time: r.time, value: r.value))
+        .toList();
+    m.akiSuspected = _model.akiSuspected;
+    m.akiStage = _model.akiStage;
+    m.creatinineValue = _creatinineCtrl.text.trim().isEmpty
+        ? null
+        : _creatinineCtrl.text.trim();
+    m.urineOutput8am2pm = double.tryParse(_urine8am2pmCtrl.text.trim());
+    m.urineOutput2pm8pm = double.tryParse(_urine2pm8pmCtrl.text.trim());
+    m.urineOutput8pm8am = double.tryParse(_urine8pm8amCtrl.text.trim());
+    m.dialysisCrrt = _model.dialysisCrrt;
+    m.axillaryTemperature =
+        _axillaryCtrl.text.trim().isEmpty ? null : _axillaryCtrl.text.trim();
+    m.piccInSitu = _model.piccInSitu;
+    m.uvcInSitu = _model.uvcInSitu;
+    m.uacInSitu = _model.uacInSitu;
+    m.peripheralIv = _model.peripheralIv;
+    m.peripheralArterial = _model.peripheralArterial;
+    m.extravasationInjury = _model.extravasationInjury;
+    m.lineComplication = _model.lineComplication;
+    m.ropScreeningDue = _model.ropScreeningDue;
+    m.ropScreened = _model.ropScreened;
+    m.ropDetected = _model.ropDetected;
+    m.ropStage = _model.ropStage;
+    m.plusDisease = _model.plusDisease;
+    m.ropTreatment = _model.ropTreatment;
+    m.location = _model.location;
+    m.survivedTheDay = _model.survivedTheDay;
+    m.recomputeDerived();
+    return m;
+  }
+
+  MetabRenalVascEyeCompletion get _completion =>
+      MetabRenalVascEyeCompletion.compute(_buildModel());
+
+  bool get _canSubmit =>
+      _completion.percent == 100 &&
+      !_isSubmitted &&
+      !_isFutureDay &&
+      !_isPastLocked;
+
+  double get _hypoEpisodes =>
+      double.tryParse(_hypoEpisodesCtrl.text.trim()) ?? 0;
+
+  bool get _hypoRxRequired => _hypoEpisodes > 0;
+
+  bool get _hyperRxRequired =>
+      MetabRenalVascEyeDay.isNumericHighGlucose(_highGlucoseCtrl.text);
+
+  bool get _extravasationRequired =>
+      _model.peripheralIv == true || _model.peripheralArterial == true;
+
+  bool get _ropDue => _model.ropScreeningDue == true;
+  bool get _ropScreenedYes => _model.ropScreened == true;
+  bool get _ropYes => _model.ropDetected == true;
+  bool get _akiSuspectedYes => _model.akiSuspected == true;
+
+  MrveReading _blankReading({String value = ''}) {
+    final now = DateTime.now();
+    return MrveReading(
+      date: '${now.year.toString().padLeft(4, '0')}-'
+          '${now.month.toString().padLeft(2, '0')}-'
+          '${now.day.toString().padLeft(2, '0')}',
+      time: '${now.hour.toString().padLeft(2, '0')}:'
+          '${now.minute.toString().padLeft(2, '0')}',
+      value: value,
+    );
+  }
+
+  List<MrveReading> _ensureReadings(List<MrveReading> list) =>
+      list.isEmpty ? [_blankReading()] : list;
+
+  Future<void> _loadActiveDay() async {
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) return;
+    final day = _activeDay;
+    final gen = ++_loadGen;
+    setState(() => _dayLoading = true);
+    _glucoseAutofilled.updateAll((_, __) => false);
+    try {
+      final raw = await _api.loadMetabRenalVascEyeDay(eid, day);
+      if (!mounted || gen != _loadGen || day != _activeDay) return;
+      if (raw == null) {
+        _clearForm();
+        _recordExists = false;
+        _isEditing = true;
+        _isSubmitted = false;
+        _dayLoadFailed = false;
+        if (_isActiveDayToday && _glucoseAutoDoneDay != day) {
+          _glucoseAutoDoneDay = day;
+          await _applyGlucoseAutofill(force: false);
+        }
+      } else {
+        _applyDay(MetabRenalVascEyeDay.fromJson(raw));
+        _recordExists = true;
+        _isSubmitted = raw['submission_status']?.toString() == 'submitted';
+        _isEditing = false;
+        _dayLoadFailed = false;
+        if (_isActiveDayToday && _glucoseAutoDoneDay != day) {
+          _glucoseAutoDoneDay = day;
+          await _applyGlucoseAutofill(force: false);
         }
       }
-    });
+    } catch (e) {
+      if (!mounted || gen != _loadGen || day != _activeDay) return;
+      _clearForm();
+      _recordExists = false;
+      _isEditing = false;
+      _isSubmitted = false;
+      _dayLoadFailed = true;
+      _banner =
+          'Could not load Day $day — save disabled until reload succeeds: $e';
+      _bannerError = true;
+    } finally {
+      if (mounted && gen == _loadGen) setState(() => _dayLoading = false);
+    }
   }
 
-  /// Only includes non-locked, currently-enabled, non-empty fields.
-  /// Disabled children never appear as "missing" — same fix as Forms 2 & 3.
-  Map<String, String> get _filledDraft {
-    final out = <String, String>{};
-    for (final section in kMrveSections.values) {
-      for (final fd in section) {
-        if (_isLocked(fd.key)) continue;
-        if (!_isFieldEnabled(fd)) continue;   // skip disabled children
-        final v = _draft[fd.key] ?? '';
-        if (v.isNotEmpty) out[fd.key] = v;
-      }
-    }
-    return out;
+  void _clearForm() {
+    _lowGlucoseCtrl.clear();
+    _hypoEpisodesCtrl.clear();
+    _highGlucoseCtrl.clear();
+    _creatinineCtrl.clear();
+    _axillaryCtrl.clear();
+    _urine8am2pmCtrl.clear();
+    _urine2pm8pmCtrl.clear();
+    _urine8pm8amCtrl.clear();
+    _model = MetabRenalVascEyeDay(
+      enrollmentId: widget.enrollmentId.trim(),
+      nicuDay: _activeDay,
+    );
+    _model.phReadings = [_blankReading()];
+    _model.sodiumReadings = [_blankReading()];
+    _model.potassiumReadings = [_blankReading()];
+    _model.calciumReadings = [_blankReading()];
+    _glucoseAutofilled.updateAll((_, __) => false);
   }
 
-  int get _totalFilled => _todayRecord.fields.length;
-
-  /// Progress only counts currently-enabled fields.
-  double _dayProgress() {
-    final lockable = <String>[];
-    for (final section in kMrveSections.values) {
-      for (final fd in section) {
-        if (_isFieldEnabled(fd)) lockable.add(fd.key);
-      }
-    }
-    if (lockable.isEmpty) return 0;
-    return lockable.where((k) => _isLocked(k)).length / lockable.length;
+  void _applyDay(MetabRenalVascEyeDay d) {
+    // Do NOT recomputeDerived on load — that wiped stored metabolic_acidosis
+    // when ph_readings_json was empty (legacy / summary-only rows).
+    _model = d;
+    _model.nicuDay = _activeDay;
+    _model.phReadings = _ensureReadings(d.phReadings);
+    _model.sodiumReadings = _ensureReadings(d.sodiumReadings);
+    _model.potassiumReadings = _ensureReadings(d.potassiumReadings);
+    _model.calciumReadings = _ensureReadings(d.calciumReadings);
+    _lowGlucoseCtrl.text = d.lowestGlucose ?? '';
+    _hypoEpisodesCtrl.text = d.hypoglycemiaEpisodes ?? '';
+    _highGlucoseCtrl.text = d.highestGlucose ?? '';
+    _creatinineCtrl.text = d.creatinineValue ?? '';
+    _axillaryCtrl.text = d.axillaryTemperature ?? '';
+    _urine8am2pmCtrl.text = d.urineOutput8am2pm?.toString() ?? '';
+    _urine2pm8pmCtrl.text = d.urineOutput2pm8pm?.toString() ?? '';
+    _urine8pm8amCtrl.text = d.urineOutput8pm8am?.toString() ?? '';
   }
 
-  // ── Save ───────────────────────────────────────────────────────────────────
-
-  Future<void> _save(AppColors c) async {
-    if (_selectedNurse == 'Select' || _selectedNurse.isEmpty) {
-      _showSimpleDialog(
-        title    : "Select your name",
-        body     : "Please choose your name from the dropdown before saving.",
-        icon     : Icons.badge_outlined,
-        iconColor: c.warning,
-        c        : c,
-      );
-      return;
-    }
-
-    final toSave = _filledDraft;
-    if (toSave.isEmpty) {
-      _showSimpleDialog(
-        title    : "Nothing to save",
-        body     : "Please fill in at least one field before saving.",
-        icon     : Icons.info_outline,
-        iconColor: c.primary,
-        c        : c,
-      );
-      return;
-    }
-
-    setState(() => _isSaving = true);
-
-    final now    = DateTime.now();
-    final record = _todayRecord;
-    toSave.forEach((key, val) {
-      record.fields[key] = FieldValue(
-        value   : val,
-        filledBy: _selectedNurse,
-        filledAt: now,
-      );
-    });
-
-    await _persistRecords();
-    await _MrveStorage.saveLastNurse(_selectedNurse);
+  Future<bool> _applyGlucoseAutofill({required bool force}) async {
+    // Web: only when this NICU day is calendar-today, and Helper 5
+    // record_date matches that same calendar date (boundary_hour=8 on API).
+    if (!_isActiveDayToday || _activeDayYmd == null) return false;
     try {
-      final recordsMap = _records.map((k, v) => MapEntry(k, v.toJson()));
-      await FormsApiService.instance.saveHelperForm(
-        babyUid  : widget.babyUid,
-        formType : 'metab_renal_vasc_eye',
-        records  : recordsMap,
-        updatedBy: _selectedNurse,
-      );
-    } catch (e) { debugPrint('Helper form backend sync failed: $e'); }
+      final data =
+          await _api.loadMinimalMonitoringToday(widget.enrollmentId.trim());
+      final recordDate = data['record_date']?.toString();
+      if (recordDate != null &&
+          recordDate.isNotEmpty &&
+          recordDate.substring(0, 10) != _activeDayYmd) {
+        return false;
+      }
 
-    if (!mounted) return;
-    setState(() { _draft = {}; _isSaving = false; });
+      final computed = _computeGlucoseAutofill(_parseHelper5Glucose(data));
+      final flags = <String, bool>{
+        'lowest_glucose': false,
+        'hypoglycemia_episodes': false,
+        'highest_glucose': false,
+      };
 
-    _toast("${toSave.length} field(s) saved by $_selectedNurse",
-        ok: true, c: c);
-    _tabController.animateTo(1);
+      if (force || _isEmptyGlucoseField(_lowGlucoseCtrl.text)) {
+        _lowGlucoseCtrl.text = computed['lowest_glucose']!;
+        flags['lowest_glucose'] = true;
+      }
+      if (force || _isEmptyGlucoseField(_hypoEpisodesCtrl.text)) {
+        _hypoEpisodesCtrl.text = computed['hypoglycemia_episodes']!;
+        flags['hypoglycemia_episodes'] = true;
+      }
+      if (force || _isEmptyGlucoseField(_highGlucoseCtrl.text)) {
+        _highGlucoseCtrl.text = computed['highest_glucose']!;
+        flags['highest_glucose'] = true;
+      }
+
+      final changed = flags.values.any((v) => v);
+      if (!changed) return false;
+
+      final ep = double.tryParse(_hypoEpisodesCtrl.text.trim()) ?? 0;
+      if (ep <= 0) _model.hypoglycemiaRx = null;
+      if (!MetabRenalVascEyeDay.isNumericHighGlucose(_highGlucoseCtrl.text)) {
+        _model.insulin = null;
+      }
+      _model.lowestGlucose = _lowGlucoseCtrl.text.trim();
+      _model.hypoglycemiaEpisodes = _hypoEpisodesCtrl.text.trim();
+      _model.highestGlucose = _highGlucoseCtrl.text.trim();
+
+      if (mounted) {
+        setState(() {
+          for (final e in flags.entries) {
+            if (e.value) {
+              _glucoseAutofilled[e.key] = true;
+            } else if (force) {
+              _glucoseAutofilled[e.key] = false;
+            }
+          }
+          _isEditing = true;
+        });
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  // ── BUILD ──────────────────────────────────────────────────────────────────
+  Future<void> _refreshGlucoseFromHelper5() async {
+    if (!_isFieldEditable || !_isActiveDayToday) return;
+    setState(() => _glucoseRefreshing = true);
+    try {
+      final ok = await _applyGlucoseAutofill(force: true);
+      _toast(ok
+          ? 'Glucose fields refreshed from Helper 5'
+          : 'No matching Helper 5 glucose sheet for today',
+          error: !ok);
+    } finally {
+      if (mounted) setState(() => _glucoseRefreshing = false);
+    }
+  }
+
+  void _applyClearGating(MetabRenalVascEyeDay m) {
+    final ep = double.tryParse(m.hypoglycemiaEpisodes?.trim() ?? '') ?? 0;
+    if (ep <= 0) m.hypoglycemiaRx = null;
+    if (!MetabRenalVascEyeDay.isNumericHighGlucose(m.highestGlucose)) {
+      m.insulin = null;
+    }
+    if (m.akiSuspected != true) m.akiStage = null;
+    if (m.peripheralIv != true && m.peripheralArterial != true) {
+      m.extravasationInjury = null;
+    }
+    if (m.ropScreeningDue != true) {
+      m.ropScreened = null;
+      m.ropDetected = null;
+      m.ropStage = null;
+      m.plusDisease = null;
+      m.ropTreatment = null;
+    } else if (m.ropScreened != true) {
+      m.ropDetected = null;
+      m.ropStage = null;
+      m.plusDisease = null;
+      m.ropTreatment = null;
+    } else if (m.ropDetected != true) {
+      m.ropStage = null;
+      m.plusDisease = null;
+      m.ropTreatment = null;
+    }
+  }
+
+  Future<void> _selectDay1Date() async {
+    if (_day1Locked) {
+      _toast('Day 1 Date is locked once daily logs exist', error: true);
+      return;
+    }
+    final picked = await showModernDatePicker(
+      context: context,
+      initialDate: _day1Date ?? DateTime.now(),
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now().add(const Duration(days: 1)),
+    );
+    if (picked == null) return;
+    final ymd =
+        '${picked.year.toString().padLeft(4, '0')}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}';
+    try {
+      await _api.saveDay1Date(widget.enrollmentId.trim(), ymd);
+      setState(() {
+        _day1Date = DateTime(picked.year, picked.month, picked.day);
+        _recomputeTodayNicuDay();
+        _activeDay = _defaultActiveDay();
+      });
+      await _loadActiveDay();
+    } catch (e) {
+      _toast('Could not save Day 1 Date: $e', error: true);
+    }
+  }
+
+  Future<void> _switchDay(int day) async {
+    if (day == _activeDay) return;
+    if (_day1Date != null && day > _todayNicuDay) {
+      _toast('Day $day is not available yet');
+      return;
+    }
+    setState(() => _activeDay = day);
+    await _loadActiveDay();
+  }
+
+  Future<void> _addDay() async {
+    setState(() => _totalDays += 1);
+  }
+
+  Future<void> _copyPrevious() async {
+    if (!_isFieldEditable || _activeDay <= 1) return;
+    try {
+      final raw = await _api.loadMetabRenalVascEyeDay(
+          widget.enrollmentId.trim(), _activeDay - 1);
+      if (raw == null) {
+        _toast('No data on Day ${_activeDay - 1} to copy', error: true);
+        return;
+      }
+      final src = MetabRenalVascEyeDay.fromJson(raw);
+      final cur = _buildModel()..copyClinicalFrom(src);
+      setState(() {
+        _applyDay(cur);
+        _recordExists = false;
+        _isEditing = true;
+        _glucoseAutofilled.updateAll((_, __) => false);
+      });
+      _toast('Copied clinical fields from Day ${_activeDay - 1}');
+    } catch (e) {
+      _toast('Copy failed: $e', error: true);
+    }
+  }
+
+  Future<bool> _save({bool forLater = false, bool force = false}) async {
+    if (_dayLoadFailed) {
+      _toast('Day failed to load — switch day or reopen form before saving',
+          error: true);
+      return false;
+    }
+    if (!force && !_isFieldEditable && !_isEditing) return false;
+    if (_isFutureDay || _isSubmitted) return false;
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) return false;
+    if (_day1Date == null) {
+      _toast('Set Day 1 Date first', error: true);
+      return false;
+    }
+
+    setState(() => _saving = true);
+    try {
+      final name = await _nurseName();
+      final now = DateTime.now().toUtc().toIso8601String();
+      final model = _buildModel();
+      _applyClearGating(model);
+      model.recomputeDerived();
+
+      final body = model.toJson(
+        submissionStatus: 'draft',
+        savedAt: now,
+        savedBy: name,
+      );
+      await _api.saveMetabRenalVascEyeDay(body, alreadyExists: _recordExists);
+      final pct = _completion.percent;
+      setState(() {
+        _recordExists = true;
+        _isEditing = false;
+        _dayStatus[_activeDay] = pct == 100 ? 'complete' : 'draft';
+        _dayPct[_activeDay] = pct;
+        _day1Locked = true;
+        _banner = forLater
+            ? 'Day $_activeDay saved for later'
+            : 'Day $_activeDay saved successfully';
+        _bannerError = false;
+      });
+      return true;
+    } catch (e) {
+      setState(() {
+        _banner = 'Save failed: $e';
+        _bannerError = true;
+      });
+      return false;
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _submit() async {
+    if (!_canSubmit) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Submit Day $_activeDay Data'),
+        content: Text(
+          'This will lock the record for Day $_activeDay.\n\n'
+          'Completion: ${_completion.percent}%\n'
+          'After submission, nurses cannot edit this day.',
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Submit & Lock')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    setState(() => _submitting = true);
+    try {
+      final saved = await _save(force: true);
+      if (!saved) {
+        setState(() {
+          _banner = 'Submit cancelled — save current day data first';
+          _bannerError = true;
+        });
+        return;
+      }
+      final name = await _nurseName();
+      await _api.submitMetabRenalVascEyeDay(
+        enrollmentId: widget.enrollmentId.trim(),
+        nicuDay: _activeDay,
+        submittedBy: name,
+      );
+      setState(() {
+        _isSubmitted = true;
+        _isEditing = false;
+        _dayStatus[_activeDay] = 'submitted';
+        _banner = 'Day $_activeDay submitted and locked';
+        _bannerError = false;
+      });
+    } catch (e) {
+      setState(() {
+        _banner = 'Submit failed: $e';
+        _bannerError = true;
+      });
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  void _toast(String msg, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      backgroundColor: error ? AppTheme.of(context).danger : null,
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  void _updateReading(List<MrveReading> list, int i, String field, String v) {
+    if (!_isFieldEditable) return;
+    setState(() {
+      if (field == 'date') list[i].date = v;
+      if (field == 'time') list[i].time = v;
+      if (field == 'value') list[i].value = v;
+      final m = _buildModel();
+      _model.metabolicAcidosis = m.metabolicAcidosis;
+      _model.sodiumValue = m.sodiumValue;
+      _model.potassiumValue = m.potassiumValue;
+      _model.ionizedCalciumValue = m.ionizedCalciumValue;
+    });
+  }
+
+  void _addReading(List<MrveReading> list) {
+    if (!_isFieldEditable) return;
+    setState(() => list.add(_blankReading()));
+  }
+
+  void _removeReading(List<MrveReading> list, int i) {
+    if (!_isFieldEditable || list.length <= 1) return;
+    setState(() {
+      list.removeAt(i);
+      final m = _buildModel();
+      _model.metabolicAcidosis = m.metabolicAcidosis;
+      _model.sodiumValue = m.sodiumValue;
+      _model.potassiumValue = m.potassiumValue;
+      _model.ionizedCalciumValue = m.ionizedCalciumValue;
+    });
+  }
+
+  String get _urineTotalDisplay {
+    final m = _buildModel();
+    return m.urineOutputTotal ?? '—';
+  }
+
+  String get _acidosisDisplay {
+    final v = _buildModel().metabolicAcidosis;
+    if (v == true) return 'Yes';
+    if (v == false) return 'No';
+    return '—';
+  }
 
   @override
   Widget build(BuildContext context) {
     final c = AppTheme.of(context);
-
-    if (_isLoading) {
+    if (_loading) {
       return Scaffold(
         backgroundColor: c.bg,
-        body: Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            CircularProgressIndicator(color: c.primary, strokeWidth: 2),
-            const SizedBox(height: 16),
-            Text("Loading records...",
-                style: TextStyle(color: c.textTertiary, fontSize: 13)),
-          ]),
-        ),
+        appBar: _appBar(c),
+        body: const Center(child: CircularProgressIndicator()),
       );
     }
 
+    final editable = _isFieldEditable;
+
     return Scaffold(
       backgroundColor: c.bg,
-      appBar: _buildAppBar(c),
-      body: TabBarView(
-        controller: _tabController,
-        children: [_buildFillTab(c), _buildHistoryTab(c)],
+      appBar: _appBar(c),
+      body: Column(
+        children: [
+          _day1Bar(c),
+          _dayChips(c),
+          _statusBanner(c),
+          if (_banner != null) _messageBanner(c),
+          Expanded(
+            child: _dayLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _isFutureDay
+                    ? _lockedPanel(c, 'Not Available Yet',
+                        'Day $_activeDay is in the future.')
+                    : ListView(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                        children: [
+                          _progressHeader(c),
+                          if (_isPastLocked && !_isSubmitted)
+                            _infoChip(c, 'Locked (Past Day)', c.warning),
+                          if (_isSubmitted)
+                            _infoChip(c, 'Submitted — locked', c.success),
+                          if (_recordExists &&
+                              !_isEditing &&
+                              !_isSubmitted &&
+                              !_isPastLocked)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: OutlinedButton.icon(
+                                onPressed: () =>
+                                    setState(() => _isEditing = true),
+                                icon: const Icon(Icons.edit_outlined, size: 18),
+                                label: Text('Edit Day $_activeDay'),
+                              ),
+                            ),
+                          if (editable && _activeDay > 1)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: TextButton.icon(
+                                onPressed: _copyPrevious,
+                                icon: const Icon(Icons.copy_all_outlined,
+                                    size: 18),
+                                label: const Text('Copy from previous day'),
+                              ),
+                            ),
+                          _section(
+                            c,
+                            title: '4.1 Metabolic',
+                            icon: Icons.bolt_rounded,
+                            color: c.warning,
+                            headerAction: _isActiveDayToday
+                                ? TextButton.icon(
+                                    onPressed: (!_glucoseRefreshing && editable)
+                                        ? _refreshGlucoseFromHelper5
+                                        : null,
+                                    icon: _glucoseRefreshing
+                                        ? SizedBox(
+                                            width: 14,
+                                            height: 14,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: c.primary,
+                                            ),
+                                          )
+                                        : const Icon(Icons.refresh, size: 16),
+                                    label: Text(_glucoseRefreshing
+                                        ? 'Refreshing…'
+                                        : 'Refresh from Helper 5'),
+                                  )
+                                : null,
+                            children: _metabolicFields(c, editable),
+                          ),
+                          _section(
+                            c,
+                            title: '4.2 Renal',
+                            icon: Icons.water_drop_outlined,
+                            color: c.primary,
+                            children: _renalFields(c, editable),
+                          ),
+                          _section(
+                            c,
+                            title: '4.3 Thermoregulation',
+                            icon: Icons.thermostat_outlined,
+                            color: c.danger,
+                            children: _thermoFields(c, editable),
+                          ),
+                          _section(
+                            c,
+                            title: '4.4 Vascular Access',
+                            icon: Icons.medical_services_outlined,
+                            color: c.purple,
+                            children: _vascularFields(c, editable),
+                          ),
+                          _section(
+                            c,
+                            title: '4.5 Ophthalmology (ROP)',
+                            icon: Icons.visibility_outlined,
+                            color: c.success,
+                            children: _eyeFields(c, editable),
+                          ),
+                          _section(
+                            c,
+                            title: '4.6 Location',
+                            icon: Icons.place_outlined,
+                            color: c.primary,
+                            children: [
+                              _fieldCard(
+                                c,
+                                number: '',
+                                label: 'Location',
+                                child: _singlePills(
+                                  MetabRenalVascEyeDay.locationOptions,
+                                  _model.location,
+                                  editable,
+                                  (v) => setState(() => _model.location = v),
+                                  c,
+                                ),
+                              ),
+                            ],
+                          ),
+                          _section(
+                            c,
+                            title: '4.7 Survived the Day',
+                            icon: Icons.check_circle_outline,
+                            color: c.success,
+                            children: [
+                              _yn('Survived the day', _model.survivedTheDay,
+                                  editable, (v) {
+                                setState(() => _model.survivedTheDay = v);
+                              }, c),
+                            ],
+                          ),
+                        ],
+                      ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: _bottomBar(c),
+    );
+  }
+
+  List<Widget> _metabolicFields(AppColors c, bool editable) {
+    return [
+      _glucoseField(c, '1', 'Lowest glucose reading (if <45 mg/dL)',
+          _lowGlucoseCtrl, editable, 'mg/dL', _glucoseAutofilled['lowest_glucose']!),
+      _glucoseField(c, '2', 'No of episodes of hypoglycemia', _hypoEpisodesCtrl,
+          editable, null, _glucoseAutofilled['hypoglycemia_episodes']!),
+      if (_hypoRxRequired)
+        _yn('3. Hypoglycemia Rx', _model.hypoglycemiaRx, editable, (v) {
+          setState(() => _model.hypoglycemiaRx = v);
+        }, c),
+      _glucoseField(c, '4', 'Highest glucose reading (if >180 mg/dL)',
+          _highGlucoseCtrl, editable, 'mg/dL', _glucoseAutofilled['highest_glucose']!),
+      if (_hyperRxRequired)
+        _yn('5. Hyperglycemia Rx (Insulin)', _model.insulin, editable, (v) {
+          setState(() => _model.insulin = v);
+        }, c),
+      _readingsBlock(
+        c,
+        title: '6. Metabolic acidosis (pH<7.2) — enter readings',
+        code: 'pH',
+        readings: _model.phReadings,
+        editable: editable,
+        unit: '',
+      ),
+      _fieldCard(
+        c,
+        number: '',
+        label: 'Metabolic acidosis (auto)',
+        child: Text(_acidosisDisplay,
+            style: TextStyle(
+                fontWeight: FontWeight.w700, color: c.textPrimary)),
+      ),
+      _readingsBlock(
+        c,
+        title: '7. Sodium value (<135 or >142)',
+        code: 'Na',
+        readings: _model.sodiumReadings,
+        editable: editable,
+        unit: 'mmol/L',
+      ),
+      if (_model.sodiumValue?.trim().isNotEmpty ?? false)
+        _summaryChip(c, 'Latest Na: ${_model.sodiumValue} mmol/L'),
+      _readingsBlock(
+        c,
+        title: '8. Potassium value (<3.5 or >6)',
+        code: 'K',
+        readings: _model.potassiumReadings,
+        editable: editable,
+        unit: 'mmol/L',
+      ),
+      if (_model.potassiumValue?.trim().isNotEmpty ?? false)
+        _summaryChip(c, 'Latest K: ${_model.potassiumValue} mmol/L'),
+      _readingsBlock(
+        c,
+        title: '9. Ionized Calcium value (<0.9 or >1.2)',
+        code: 'iCa',
+        readings: _model.calciumReadings,
+        editable: editable,
+        unit: 'mmol/L',
+      ),
+      if (_model.ionizedCalciumValue?.trim().isNotEmpty ?? false)
+        _summaryChip(c, 'Latest iCa: ${_model.ionizedCalciumValue} mmol/L'),
+      _yn('10. Osteopenia suspected', _model.osteopeniaSuspected, editable,
+          (v) => setState(() => _model.osteopeniaSuspected = v), c),
+    ];
+  }
+
+  List<Widget> _renalFields(AppColors c, bool editable) {
+    return [
+      _yn('11. AKI suspected', _model.akiSuspected, editable, (v) {
+        setState(() {
+          _model.akiSuspected = v;
+          if (v != true) _model.akiStage = null;
+        });
+      }, c),
+      if (_akiSuspectedYes) ...[
+        _fieldCard(
+          c,
+          number: '',
+          label: 'KDIGO stage',
+          child: _singlePills(
+            MetabRenalVascEyeDay.akiStageOptions,
+            _model.akiStage,
+            editable,
+            (v) => setState(() => _model.akiStage = v),
+            c,
+          ),
+        ),
+      ],
+      _fieldCard(
+        c,
+        number: '12',
+        label: 'Serum Creatinine',
+        hint: 'value / Not Tested / Awaited',
+        child: _textField(_creatinineCtrl, c,
+            enabled: editable, hint: 'mg/dL'),
+      ),
+      _fieldCard(
+        c,
+        number: '13a',
+        label: 'Urine output 8am → 2pm',
+        child: _textField(_urine8am2pmCtrl, c,
+            enabled: editable,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+            hint: 'ml/kg/hr'),
+      ),
+      _fieldCard(
+        c,
+        number: '13b',
+        label: 'Urine output 2pm → 8pm',
+        child: _textField(_urine2pm8pmCtrl, c,
+            enabled: editable,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+            hint: 'ml/kg/hr'),
+      ),
+      _fieldCard(
+        c,
+        number: '13c',
+        label: 'Urine output 8pm → 8am',
+        child: _textField(_urine8pm8amCtrl, c,
+            enabled: editable,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+            hint: 'ml/kg/hr'),
+      ),
+      _fieldCard(
+        c,
+        number: '13',
+        label: 'Urine output total (sum)',
+        child: Text('$_urineTotalDisplay ml/kg/hr',
+            style: TextStyle(
+                fontWeight: FontWeight.w700, color: c.textSecondary)),
+      ),
+      _yn('14. Dialysis/CRRT', _model.dialysisCrrt, editable,
+          (v) => setState(() => _model.dialysisCrrt = v), c),
+    ];
+  }
+
+  List<Widget> _thermoFields(AppColors c, bool editable) {
+    return [
+      _fieldCard(
+        c,
+        number: '15',
+        label: 'Axillary Temperature (<36.5 or >37.5)',
+        child: _textField(_axillaryCtrl, c,
+            enabled: editable,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+            hint: '°C'),
+      ),
+    ];
+  }
+
+  List<Widget> _vascularFields(AppColors c, bool editable) {
+    return [
+      _yn('16. PICC in situ', _model.piccInSitu, editable,
+          (v) => setState(() => _model.piccInSitu = v), c),
+      _yn('17. UVC in situ', _model.uvcInSitu, editable,
+          (v) => setState(() => _model.uvcInSitu = v), c),
+      _yn('18. UAC in situ', _model.uacInSitu, editable,
+          (v) => setState(() => _model.uacInSitu = v), c),
+      _yn('19. Peripheral IV', _model.peripheralIv, editable, (v) {
+        setState(() {
+          _model.peripheralIv = v;
+          if (v != true && _model.peripheralArterial != true) {
+            _model.extravasationInjury = null;
+          }
+        });
+      }, c),
+      _yn('20. Peripheral arterial', _model.peripheralArterial, editable, (v) {
+        setState(() {
+          _model.peripheralArterial = v;
+          if (v != true && _model.peripheralIv != true) {
+            _model.extravasationInjury = null;
+          }
+        });
+      }, c),
+      if (_extravasationRequired)
+        _yn('21. Extravasation injury', _model.extravasationInjury, editable,
+            (v) => setState(() => _model.extravasationInjury = v), c),
+      _yn('22. Line complication', _model.lineComplication, editable,
+          (v) => setState(() => _model.lineComplication = v), c),
+    ];
+  }
+
+  List<Widget> _eyeFields(AppColors c, bool editable) {
+    return [
+      _yn('23. ROP screening due', _model.ropScreeningDue, editable, (v) {
+        setState(() {
+          _model.ropScreeningDue = v;
+          if (v != true) {
+            _model.ropScreened = null;
+            _model.ropDetected = null;
+            _model.ropStage = null;
+            _model.plusDisease = null;
+            _model.ropTreatment = null;
+          }
+        });
+      }, c),
+      if (_ropDue)
+        _yn('24. ROP screened', _model.ropScreened, editable, (v) {
+          setState(() {
+            _model.ropScreened = v;
+            if (v != true) {
+              _model.ropDetected = null;
+              _model.ropStage = null;
+              _model.plusDisease = null;
+              _model.ropTreatment = null;
+            }
+          });
+        }, c),
+      if (_ropDue && _ropScreenedYes)
+        _yn('25. ROP detected', _model.ropDetected, editable, (v) {
+          setState(() {
+            _model.ropDetected = v;
+            if (v != true) {
+              _model.ropStage = null;
+              _model.plusDisease = null;
+              _model.ropTreatment = null;
+            }
+          });
+        }, c),
+      if (_ropYes) ...[
+        _yn('Plus Disease', _model.plusDisease, editable,
+            (v) => setState(() => _model.plusDisease = v), c),
+        _yn('ROP Treatment', _model.ropTreatment, editable,
+            (v) => setState(() => _model.ropTreatment = v), c),
+      ],
+    ];
+  }
+
+  Widget _glucoseField(
+    AppColors c,
+    String number,
+    String label,
+    TextEditingController ctrl,
+    bool editable,
+    String? unit,
+    bool autofilled,
+  ) {
+    return _fieldCard(
+      c,
+      number: number,
+      label: label,
+      hint: autofilled ? 'Auto-filled from Helper 5' : null,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (autofilled)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                'Auto-filled from Helper 5',
+                style: TextStyle(
+                  color: c.primary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          Row(
+            children: [
+              Expanded(
+                child: _textField(ctrl, c,
+                    enabled: editable,
+                    hint: 'Not Low / Not High / Not Tested / number'),
+              ),
+              if (unit != null) ...[
+                const SizedBox(width: 8),
+                Text(unit,
+                    style: TextStyle(color: c.textTertiary, fontSize: 12)),
+              ],
+            ],
+          ),
+        ],
       ),
     );
   }
 
-  // ── APP BAR ────────────────────────────────────────────────────────────────
+  Widget _readingsBlock(
+    AppColors c, {
+    required String title,
+    required String code,
+    required List<MrveReading> readings,
+    required bool editable,
+    required String unit,
+  }) {
+    return _fieldCard(
+      c,
+      number: '',
+      label: title,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var i = 0; i < readings.length; i++)
+            _ReadingEntryRow(
+              key: ValueKey(readings[i].id),
+              code: code,
+              index: i,
+              reading: readings[i],
+              unit: unit,
+              editable: editable,
+              canDelete: readings.length > 1,
+              colors: c,
+              onChanged: (field, v) => _updateReading(readings, i, field, v),
+              onDelete: () => _removeReading(readings, i),
+            ),
+          if (editable)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () => _addReading(readings),
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add reading'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
-  AppBar _buildAppBar(AppColors c) {
-    final progress = _dayProgress();
+  Widget _summaryChip(AppColors c, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Text(text,
+          style: TextStyle(
+              fontSize: 12, color: c.textSecondary, fontStyle: FontStyle.italic)),
+    );
+  }
+
+  AppBar _appBar(AppColors c) {
     return AppBar(
-      backgroundColor : c.surface,
-      elevation       : 0,
+      backgroundColor: c.surface,
+      elevation: 0,
       surfaceTintColor: Colors.transparent,
-      titleSpacing    : 16,
-      title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(widget.babyUid,
-            style: TextStyle(color: c.primary, fontSize: 13,
-                fontWeight: FontWeight.w800, letterSpacing: 1.1)),
-        Text(
-          "${widget.motherName}  |  ${widget.enrollmentId}  |  ${widget.gestation}",
-          style: TextStyle(color: c.textTertiary, fontSize: 11),
-        ),
-      ]),
-      actions: [
-        const Padding(
+      toolbarHeight: 66,
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(1),
+        child: Container(height: 1, color: c.borderLight),
+      ),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            widget.babyUid.isEmpty ? 'HELPER FORM 4' : widget.babyUid,
+            style: TextStyle(
+              color: c.primary,
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1.1,
+            ),
+          ),
+          Text(
+            'Metab / Renal / Vasc / Eye · ${widget.motherName.isEmpty ? widget.enrollmentId : widget.motherName}',
+            style: TextStyle(color: c.textTertiary, fontSize: 11),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+      actions: const [
+        Padding(
           padding: EdgeInsets.only(right: 8),
           child: Center(child: ThemeToggle()),
         ),
       ],
-      bottom: PreferredSize(
-        preferredSize: const Size.fromHeight(80),
-        child: Column(children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Row(children: [
+    );
+  }
+
+  Widget _day1Bar(AppColors c) {
+    final label = _day1Date == null
+        ? 'Not set'
+        : '${_day1Date!.day.toString().padLeft(2, '0')} '
+            '${_month(_day1Date!.month)} ${_day1Date!.year}';
+    return Container(
+      color: c.surface,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: Row(
+        children: [
+          Text('Day 1 Date',
+              style: TextStyle(
+                  color: c.textSecondary,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton(
+              onPressed: _day1Locked ? null : _selectDay1Date,
+              child: Text(label),
+            ),
+          ),
+          if (_day1Locked)
+            Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: Icon(Icons.lock_outline, size: 18, color: c.textTertiary),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _dayChips(AppColors c) {
+    return Container(
+      color: c.surface,
+      height: 72,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        itemCount: _totalDays + 1,
+        itemBuilder: (_, i) {
+          if (i == _totalDays) {
+            return Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: ActionChip(
+                label: const Text('+ Day'),
+                onPressed: _addDay,
+              ),
+            );
+          }
+          final day = i + 1;
+          final selected = day == _activeDay;
+          final future = _day1Date != null && day > _todayNicuDay;
+          final st = _dayStatus[day] ?? 'empty';
+          final cal = _calendarForDay(day);
+          final dateLabel = cal == null
+              ? ''
+              : '${cal.day} ${_month(cal.month)}';
+          Color dot;
+          switch (st) {
+            case 'submitted':
+              dot = c.success;
+              break;
+            case 'complete':
+              dot = c.primary;
+              break;
+            case 'draft':
+            case 'late':
+              dot = c.warning;
+              break;
+            default:
+              dot = c.border;
+          }
+          return Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: ChoiceChip(
+              selected: selected,
+              label: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                            color: dot, shape: BoxShape.circle),
+                      ),
+                      const SizedBox(width: 4),
+                      Text('D$day',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w800, fontSize: 12)),
+                      if (future) ...[
+                        const SizedBox(width: 2),
+                        const Icon(Icons.lock, size: 12),
+                      ],
+                    ],
+                  ),
+                  if (dateLabel.isNotEmpty)
+                    Text(dateLabel,
+                        style: TextStyle(
+                            fontSize: 9, color: c.textTertiary)),
+                ],
+              ),
+              onSelected: future ? null : (_) => _switchDay(day),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _statusBanner(AppColors c) {
+    if (_day1Date == null) {
+      return Container(
+        width: double.infinity,
+        color: c.warningSoft,
+        padding: const EdgeInsets.all(10),
+        child: Text('Set Day 1 Date to enable NICU day logging.',
+            style: TextStyle(color: c.warning, fontSize: 12)),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  Widget _messageBanner(AppColors c) {
+    return Container(
+      width: double.infinity,
+      color: _bannerError ? c.dangerSoft : c.successSoft,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      child: Text(_banner!,
+          style: TextStyle(
+              color: _bannerError ? c.danger : c.success, fontSize: 12)),
+    );
+  }
+
+  Widget _progressHeader(AppColors c) {
+    final pct = _completion.percent;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 52,
+            height: 52,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                CircularProgressIndicator(
+                  value: pct / 100,
+                  strokeWidth: 5,
+                  backgroundColor: c.borderLight,
+                  color: pct == 100 ? c.success : c.primary,
+                ),
+                Text('$pct%',
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        color: c.textPrimary)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Day $_activeDay',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 16,
+                        color: c.textPrimary)),
+                Text(
+                  '${_completion.answered}/${_completion.total} fields · Gestation ${widget.gestation}',
+                  style: TextStyle(color: c.textTertiary, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoChip(AppColors c, String text, Color color) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.lock_outline, size: 16, color: color),
+          const SizedBox(width: 8),
+          Text(text,
+              style: TextStyle(
+                  color: color, fontWeight: FontWeight.w700, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  Widget _lockedPanel(AppColors c, String title, String body) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.lock_clock_outlined, size: 48, color: c.textTertiary),
+            const SizedBox(height: 12),
+            Text(title,
+                style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 18,
+                    color: c.textPrimary)),
+            const SizedBox(height: 6),
+            Text(body,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: c.textSecondary)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _bottomBar(AppColors c) {
+    final canEdit = _isFieldEditable ||
+        (_recordExists && !_isSubmitted && !_isPastLocked && !_isFutureDay);
+    return SafeArea(
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border(top: BorderSide(color: c.borderLight)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 10,
+              offset: const Offset(0, -3),
+            )
+          ],
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: (_saving || !canEdit || _isSubmitted)
+                    ? null
+                    : () {
+                        setState(() => _isEditing = true);
+                        _save(forLater: true);
+                      },
+                child: const Text('Save for Later'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: (_saving || !canEdit || _isSubmitted)
+                    ? null
+                    : () {
+                        setState(() => _isEditing = true);
+                        _save();
+                      },
+                style: ElevatedButton.styleFrom(backgroundColor: c.primary),
+                child: Text(
+                  _saving ? 'Saving…' : 'Save',
+                  style: const TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+            if (_canSubmit) ...[
+              const SizedBox(width: 8),
               Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value          : progress,
-                    minHeight      : 5,
-                    backgroundColor: c.border,
-                    valueColor     : AlwaysStoppedAnimation(
-                        progress == 1.0 ? c.success : c.primary),
+                child: ElevatedButton(
+                  onPressed: _submitting ? null : _submit,
+                  style: ElevatedButton.styleFrom(backgroundColor: c.success),
+                  child: Text(
+                    _submitting ? '…' : 'Submit',
+                    style: const TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.w700),
                   ),
                 ),
               ),
-              const SizedBox(width: 10),
-              Text("$_totalFilled filled today",
-                  style: TextStyle(
-                      color: progress == 1.0 ? c.success : c.textTertiary,
-                      fontSize: 11, fontWeight: FontWeight.w600)),
-            ]),
-          ),
-          Container(
-            decoration: BoxDecoration(
-                border: Border(bottom: BorderSide(color: c.borderLight))),
-            child: TabBar(
-              controller          : _tabController,
-              indicatorColor      : c.primary,
-              indicatorWeight     : 2,
-              labelColor          : c.primary,
-              unselectedLabelColor: c.textTertiary,
-              labelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-              tabs: [
-                Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  const Icon(Icons.edit_note_rounded, size: 17),
-                  const SizedBox(width: 6),
-                  const Text("Fill Form"),
-                  if (_filledDraft.isNotEmpty) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: c.warning.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text("${_filledDraft.length}",
-                          style: TextStyle(color: c.warning,
-                              fontSize: 10, fontWeight: FontWeight.bold)),
-                    ),
-                  ],
-                ])),
-                Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  const Icon(Icons.history_edu_rounded, size: 17),
-                  const SizedBox(width: 6),
-                  const Text("History"),
-                  if (_records.isNotEmpty) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: c.primary.withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text("${_records.length}",
-                          style: TextStyle(color: c.primary,
-                              fontSize: 10, fontWeight: FontWeight.bold)),
-                    ),
-                  ],
-                ])),
-              ],
-            ),
-          ),
-        ]),
-      ),
-    );
-  }
-
-  // ── FILL TAB ───────────────────────────────────────────────────────────────
-
-  Widget _buildFillTab(AppColors c) {
-    return Column(children: [
-      Expanded(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(14, 18, 14, 100),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildStatusBanner(c),
-              _buildNurseCard(c),
-              const SizedBox(height: 6),
-              ...kMrveSections.entries.map((e) => _buildSection(e.key, e.value, c)),
             ],
-          ),
-        ),
-      ),
-      _buildSaveBar(c),
-    ]);
-  }
-
-  // ── Status banner ──────────────────────────────────────────────────────────
-
-  Widget _buildStatusBanner(AppColors c) {
-    final filled = _todayRecord.fields.length;
-    final total  = kMrveAllFields.length;
-
-    if (filled == 0) {
-      return _infoBanner(Icons.wb_sunny_outlined, c.primary,
-          "No fields filled yet today. Be the first to add data.", c);
-    }
-
-    final contributors = _todayRecord.fields.values
-        .map((v) => v.filledBy).toSet().toList();
-
-    if (filled >= total) {
-      return _infoBanner(Icons.check_circle_outline, c.success,
-          "All fields complete for today. Filled by: ${contributors.join(', ')}", c);
-    }
-
-    return _infoBanner(Icons.pending_outlined, c.warning,
-        "$filled / $total fields filled today by ${contributors.join(', ')}. "
-        "${total - filled} remaining.", c);
-  }
-
-  // ── Nurse dropdown card ────────────────────────────────────────────────────
-
-  Widget _buildNurseCard(AppColors c) {
-    final nurseSelected = _selectedNurse != 'Select' && _selectedNurse.isNotEmpty;
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: c.border),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04),
-            blurRadius: 8, offset: const Offset(0, 2))],
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-
-        // Label + site chip
-        Row(children: [
-          Icon(Icons.badge_outlined, color: c.primary, size: 16),
-          const SizedBox(width: 8),
-          Text("Your name (required before saving)",
-              style: TextStyle(color: c.textSecondary,
-                  fontSize: 12, fontWeight: FontWeight.w600)),
-          const Spacer(),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: c.primarySoft,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: c.primary.withOpacity(0.3)),
-            ),
-            child: Text(widget.site,
-                style: TextStyle(color: c.primary,
-                    fontSize: 11, fontWeight: FontWeight.w700)),
-          ),
-        ]),
-        const SizedBox(height: 10),
-
-        // Dropdown
-        Container(
-          height: 48,
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          decoration: BoxDecoration(
-            color: c.surfaceAlt,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: nurseSelected ? c.primary.withOpacity(0.5) : c.border,
-              width: nurseSelected ? 1.5 : 1,
-            ),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              value        : _selectedNurse,
-              dropdownColor: c.surface,
-              style        : TextStyle(color: c.textPrimary,
-                  fontSize: 13, fontWeight: FontWeight.w600),
-              icon: Icon(Icons.keyboard_arrow_down_rounded,
-                  color: nurseSelected ? c.primary : c.textTertiary, size: 20),
-              isExpanded: true,
-              items: [
-                DropdownMenuItem(
-                  value: 'Select',
-                  child: Text("Select your name",
-                      style: TextStyle(color: c.textTertiary, fontSize: 13)),
-                ),
-                ..._siteNurses.map((name) {
-                  final isSel = name == _selectedNurse;
-                  return DropdownMenuItem(
-                    value: name,
-                    child: Row(children: [
-                      if (isSel)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 8),
-                          child: Icon(Icons.check_circle_rounded,
-                              color: c.primary, size: 16),
-                        ),
-                      Text(name,
-                          style: TextStyle(
-                            color: isSel ? c.primary : c.textPrimary,
-                            fontWeight: isSel ? FontWeight.bold : FontWeight.normal,
-                          )),
-                    ]),
-                  );
-                }),
-              ],
-              onChanged: (val) async {
-                if (val == null || val == 'Select') return;
-                setState(() => _selectedNurse = val);
-                await _MrveStorage.saveLastNurse(val);
-              },
-            ),
-          ),
-        ),
-
-        // Empty roster warning
-        if (_siteNurses.isEmpty) ...[
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: c.warningSoft,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: c.warning.withOpacity(0.3)),
-            ),
-            child: Row(children: [
-              Icon(Icons.info_outline, color: c.warning, size: 14),
-              const SizedBox(width: 8),
-              Expanded(child: Text(
-                "No nurses configured for site \"${widget.site}\". "
-                "Update kMrveNursesBySite in the source file.",
-                style: TextStyle(color: c.textSecondary, fontSize: 11),
-              )),
-            ]),
-          ),
-        ],
-
-        // Unsaved counter
-        if (_filledDraft.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: c.warning.withOpacity(0.07),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: c.warning.withOpacity(0.2)),
-            ),
-            child: Row(children: [
-              Icon(Icons.edit_note_rounded, color: c.warning, size: 16),
-              const SizedBox(width: 8),
-              Text("${_filledDraft.length} field(s) ready to save",
-                  style: TextStyle(color: c.warning,
-                      fontWeight: FontWeight.bold, fontSize: 13)),
-            ]),
-          ),
-        ],
-      ]),
-    );
-  }
-
-  // ── Section card ───────────────────────────────────────────────────────────
-
-  Widget _buildSection(String title, List<FieldDef> fields, AppColors c) {
-    final sectionColor  = _sectionColor(title, c);
-    final enabledFields = fields.where(_isFieldEnabled).toList();
-    final locked        = enabledFields.where((fd) => _isLocked(fd.key)).length;
-    final total         = enabledFields.length;
-    final allDone       = total > 0 && locked >= total;
-    final draftedHere   = fields
-        .where((fd) =>
-            !_isLocked(fd.key) &&
-            _isFieldEnabled(fd) &&
-            (_draft[fd.key] ?? '').isNotEmpty)
-        .length;
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: sectionColor.withOpacity(0.15)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04),
-            blurRadius: 8, offset: const Offset(0, 2))],
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-
-        // Header
-        Container(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-          decoration: BoxDecoration(
-            color: sectionColor.withOpacity(0.07),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-            border: Border(bottom: BorderSide(color: sectionColor.withOpacity(0.12))),
-          ),
-          child: Row(children: [
-            Container(width: 3, height: 18,
-                decoration: BoxDecoration(color: sectionColor,
-                    borderRadius: BorderRadius.circular(2))),
-            const SizedBox(width: 10),
-            Text(title,
-                style: TextStyle(color: sectionColor,
-                    fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 0.8)),
-            const Spacer(),
-            if (draftedHere > 0) ...[
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                    color: c.warning.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(20)),
-                child: Text("$draftedHere unsaved",
-                    style: TextStyle(color: c.warning,
-                        fontSize: 10, fontWeight: FontWeight.bold)),
-              ),
-              const SizedBox(width: 8),
-            ],
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-              decoration: BoxDecoration(
-                  color: allDone ? c.successSoft : sectionColor.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(20)),
-              child: Text("$locked / $total",
-                  style: TextStyle(
-                      color: allDone ? c.success : sectionColor,
-                      fontSize: 11, fontWeight: FontWeight.bold)),
-            ),
-          ]),
-        ),
-
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
-          child: Column(
-              children: fields
-                  .map((fd) => _buildFieldRow(fd, sectionColor, c))
-                  .toList()),
-        ),
-      ]),
-    );
-  }
-
-  // ── Field row ──────────────────────────────────────────────────────────────
-
-  Widget _buildFieldRow(FieldDef fd, Color sectionColor, AppColors c) {
-    final locked   = _isLocked(fd.key);
-    final enabled  = _isFieldEnabled(fd);
-    final hasDraft = !locked && (_draft[fd.key] ?? '').isNotEmpty;
-    final lockedBy = locked ? _todayRecord.fields[fd.key]!.filledBy : null;
-    final lockedAt = locked ? _todayRecord.fields[fd.key]!.filledAt : null;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Container(
-            width: 6, height: 6,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: locked ? c.success : hasDraft ? c.warning : c.border,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(fd.key,
-                style: TextStyle(
-                    color: locked
-                        ? c.textPrimary
-                        : enabled
-                            ? c.textSecondary
-                            : c.textTertiary.withOpacity(0.5),
-                    fontWeight: FontWeight.w500, fontSize: 13)),
-          ),
-          if (locked && lockedBy != null)
-            _lockedBadge(lockedBy, lockedAt!, c),
-        ]),
-        const SizedBox(height: 8),
-        if (!enabled && !locked)
-          _disabledPlaceholder(fd.enabledWhen ?? '', c)
-        else
-          _buildInputWidget(fd, sectionColor, locked, c),
-      ]),
-    );
-  }
-
-  Widget _lockedBadge(String nurse, DateTime at, AppColors c) {
-    final h = at.hour.toString().padLeft(2, '0');
-    final m = at.minute.toString().padLeft(2, '0');
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: c.successSoft,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: c.success.withOpacity(0.2)),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.lock_outline_rounded,
-            size: 10, color: c.success.withOpacity(0.7)),
-        const SizedBox(width: 4),
-        Text("$nurse  $h:$m",
-            style: TextStyle(color: c.success.withOpacity(0.8),
-                fontSize: 10, fontWeight: FontWeight.w600)),
-      ]),
-    );
-  }
-
-  Widget _disabledPlaceholder(String parentKey, AppColors c) {
-    return Container(
-      height: 42,
-      decoration: BoxDecoration(
-        color: c.surfaceAlt.withOpacity(0.5),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: c.borderLight),
-      ),
-      child: Center(
-        child: Text("Fill '$parentKey' first",
-            style: TextStyle(
-                color: c.textTertiary.withOpacity(0.5), fontSize: 11)),
-      ),
-    );
-  }
-
-  Widget _buildInputWidget(
-      FieldDef fd, Color sectionColor, bool locked, AppColors c) {
-    switch (fd.type) {
-      case FieldType.yesNo:
-        return _buildYesNo(fd.key, locked, c);
-      case FieldType.chips:
-        return _buildChips(fd.key, fd.options!, sectionColor, locked, c);
-      case FieldType.number:
-        return _buildNumberField(fd, locked, c);
-      case FieldType.text:
-        return TextFormField(
-          initialValue: _displayValue(fd.key),
-          enabled: !locked,
-          style: TextStyle(color: locked ? c.textTertiary : c.textPrimary),
-          decoration: _inputDec(fd.key, c),
-          onChanged: (v) => _setDraft(fd.key, v),
-        );
-    }
-  }
-
-  Widget _buildYesNo(String key, bool locked, AppColors c) {
-    final val = _displayValue(key);
-    return Row(children: [
-      Expanded(child: _toggleButton("Yes", Icons.check_rounded,
-          val == "Yes", c.success, locked, c, () => _setDraft(key, "Yes"))),
-      const SizedBox(width: 8),
-      Expanded(child: _toggleButton("No", Icons.close_rounded,
-          val == "No", c.danger, locked, c, () => _setDraft(key, "No"))),
-    ]);
-  }
-
-  Widget _toggleButton(String label, IconData icon, bool selected,
-      Color selColor, bool locked, AppColors c, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: locked ? null : onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        decoration: BoxDecoration(
-          color: selected
-              ? selColor.withOpacity(locked ? 0.06 : 0.12) : c.surfaceAlt,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: selected
-                ? selColor.withOpacity(locked ? 0.35 : 0.8) : c.border,
-            width: selected ? 1.5 : 1,
-          ),
-        ),
-        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(icon, size: 14,
-              color: selected
-                  ? selColor.withOpacity(locked ? 0.5 : 1.0) : c.textTertiary),
-          const SizedBox(width: 5),
-          Text(label,
-              style: TextStyle(
-                  color: selected
-                      ? selColor.withOpacity(locked ? 0.5 : 1.0) : c.textTertiary,
-                  fontWeight: FontWeight.bold, fontSize: 13)),
-          if (locked && selected) ...[
-            const SizedBox(width: 6),
-            Icon(Icons.lock_outline_rounded,
-                size: 10, color: selColor.withOpacity(0.4)),
           ],
-        ]),
+        ),
       ),
     );
   }
 
-  Widget _buildChips(String key, List<String> options,
-      Color sectionColor, bool locked, AppColors c) {
-    final cur = _displayValue(key);
-    return Wrap(
-      spacing: 8, runSpacing: 8,
-      children: options.map((opt) {
-        final sel = cur == opt;
-        return GestureDetector(
-          onTap: locked ? null : () => _setDraft(key, opt),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-            decoration: BoxDecoration(
-              color: sel
-                  ? sectionColor.withOpacity(locked ? 0.06 : 0.12) : c.surfaceAlt,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: sel
-                    ? sectionColor.withOpacity(locked ? 0.35 : 0.8) : c.border,
-                width: sel ? 1.5 : 1,
-              ),
-            ),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Text(opt,
-                  style: TextStyle(
-                      color: sel
-                          ? sectionColor.withOpacity(locked ? 0.5 : 1.0)
-                          : c.textTertiary,
-                      fontWeight: FontWeight.bold, fontSize: 13)),
-              if (locked && sel) ...[
-                const SizedBox(width: 5),
-                Icon(Icons.lock_outline_rounded,
-                    size: 10, color: sectionColor.withOpacity(0.4)),
-              ],
-            ]),
-          ),
-        );
-      }).toList(),
-    );
-  }
-
-  Widget _buildNumberField(FieldDef fd, bool locked, AppColors c) {
-    final ctrl = TextEditingController(text: _displayValue(fd.key));
-    ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
-    return TextFormField(
-      controller  : ctrl,
-      enabled     : !locked,
-      keyboardType: TextInputType.numberWithOptions(decimal: fd.isDecimal),
-      style       : TextStyle(color: locked ? c.textTertiary : c.textPrimary),
-      decoration  : _inputDec("Enter value", c).copyWith(
-        suffixText : fd.unit,
-        suffixStyle: TextStyle(color: c.primary),
-        suffixIcon : locked
-            ? Icon(Icons.lock_outline_rounded,
-                size: 16, color: c.success.withOpacity(0.4))
-            : null,
-      ),
-      onChanged: (v) {
-        if (fd.maxValue != null) {
-          final n = double.tryParse(v) ?? 0;
-          if (n > fd.maxValue!) {
-            ctrl.text = fd.maxValue!.toStringAsFixed(fd.isDecimal ? 1 : 0);
-            ctrl.selection =
-                TextSelection.collapsed(offset: ctrl.text.length);
-            _setDraft(fd.key, ctrl.text);
-            return;
-          }
-        }
-        _setDraft(fd.key, v);
-      },
-    );
-  }
-
-  // ── Save bar ───────────────────────────────────────────────────────────────
-
-  Widget _buildSaveBar(AppColors c) {
-    final count = _filledDraft.length;
-    final ready = count > 0 &&
-        _selectedNurse != 'Select' && _selectedNurse.isNotEmpty;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 28),
-      decoration: BoxDecoration(
-        color: c.surface,
-        border: Border(top: BorderSide(color: c.borderLight)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05),
-            blurRadius: 10, offset: const Offset(0, -3))],
-      ),
-      child: Row(children: [
-        GestureDetector(
-          onTap: () => setState(() => _draft = {}),
-          child: Container(
-            width: 50, height: 50,
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: c.border),
-            ),
-            child: Icon(Icons.refresh_rounded, color: c.textTertiary),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: GestureDetector(
-            onTap: _isSaving ? null : () => _save(c),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              height: 50,
-              decoration: BoxDecoration(
-                color: ready ? c.success : c.primary.withOpacity(0.4),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Center(
-                child: _isSaving
-                    ? const SizedBox(
-                        width: 20, height: 20,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
-                    : Row(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(count > 0
-                            ? Icons.save_outlined : Icons.edit_outlined,
-                            color: Colors.white, size: 18),
-                        const SizedBox(width: 8),
-                        Text(
-                          count > 0
-                              ? "Save $count field(s)" : "Fill fields above",
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold, fontSize: 14),
-                        ),
-                      ]),
-              ),
-            ),
-          ),
-        ),
-      ]),
-    );
-  }
-
-  // ── HISTORY TAB ────────────────────────────────────────────────────────────
-
-  Widget _buildHistoryTab(AppColors c) {
-    final sortedKeys = _records.keys.toList()
-      ..sort((a, b) => b.compareTo(a));
-
-    if (sortedKeys.isEmpty) {
-      return Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.history_edu_rounded, color: c.border, size: 56),
-          const SizedBox(height: 14),
-          Text("No entries yet",
-              style: TextStyle(color: c.textSecondary,
-                  fontSize: 15, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 6),
-          Text("Fill fields and save to see history here",
-              style: TextStyle(color: c.textTertiary, fontSize: 12)),
-        ]),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
-      itemCount: sortedKeys.length,
-      itemBuilder: (_, i) {
-        final record = _records[sortedKeys[i]]!;
-        return _MrveHistoryDayCard(
-          record : record,
-          isToday: i == 0 &&
-              _dateOnly(record.date) == _dateOnly(DateTime.now()),
-          c      : c,
-        );
-      },
-    );
-  }
-
-  // ── Shared helpers ─────────────────────────────────────────────────────────
-
-  Color _sectionColor(String title, AppColors c) {
-    switch (title) {
-      case "METABOLIC":        return c.warning;
-      case "RENAL":            return c.primary;
-      case "THERMOREGULATION": return c.danger;
-      case "VASCULAR ACCESS":  return c.purple;
-      case "OPHTHALMOLOGY":    return c.success;
-      default:                 return c.primary;
-    }
-  }
-
-  InputDecoration _inputDec(String hint, AppColors c) => InputDecoration(
-    hintText      : hint,
-    hintStyle     : TextStyle(color: c.textTertiary, fontSize: 13),
-    filled        : true,
-    fillColor     : c.surfaceAlt,
-    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: c.border)),
-    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: c.border)),
-    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: c.primary, width: 1.5)),
-    disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: c.borderLight)),
-  );
-
-  Widget _infoBanner(IconData icon, Color color, String msg, AppColors c) =>
-      Container(
-        margin: const EdgeInsets.only(bottom: 14),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.07),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withOpacity(0.25)),
-        ),
-        child: Row(children: [
-          Icon(icon, color: color, size: 18),
-          const SizedBox(width: 10),
-          Expanded(child: Text(msg,
-              style: TextStyle(color: color.withOpacity(0.9), fontSize: 12))),
-        ]),
-      );
-
-  void _toast(String msg, {required bool ok, required AppColors c}) {
-    ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      behavior       : SnackBarBehavior.floating,
-      backgroundColor: c.surface,
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: BorderSide(
-              color: (ok ? c.success : c.danger).withOpacity(0.4))),
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      content: Row(children: [
-        Icon(ok ? Icons.check_circle_outline : Icons.error_outline,
-            color: ok ? c.success : c.danger),
-        const SizedBox(width: 10),
-        Expanded(child: Text(msg,
-            style: TextStyle(color: c.textPrimary))),
-      ]),
-      duration: const Duration(seconds: 3),
-    ));
-  }
-
-  void _showSimpleDialog({
+  Widget _section(
+    AppColors c, {
     required String title,
-    required String body,
     required IconData icon,
-    required Color iconColor,
-    required AppColors c,
+    required Color color,
+    required List<Widget> children,
+    Widget? headerAction,
   }) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: c.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Row(children: [
-          Icon(icon, color: iconColor),
-          const SizedBox(width: 10),
-          Expanded(child: Text(title,
-              style: TextStyle(color: c.textPrimary,
-                  fontWeight: FontWeight.bold))),
-        ]),
-        content: Text(body, style: TextStyle(color: c.textSecondary)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text("OK", style: TextStyle(color: c.primary)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── HISTORY DAY CARD ─────────────────────────────────────────────────────────
-
-class _MrveHistoryDayCard extends StatefulWidget {
-  final DayRecord record;
-  final bool      isToday;
-  final AppColors c;
-
-  const _MrveHistoryDayCard({
-    required this.record,
-    required this.isToday,
-    required this.c,
-  });
-
-  @override
-  State<_MrveHistoryDayCard> createState() => _MrveHistoryDayCardState();
-}
-
-class _MrveHistoryDayCardState extends State<_MrveHistoryDayCard> {
-  bool _open = false;
-
-  static const _months = [
-    '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
-
-  String _dateLabel(DateTime d) {
-    final now  = DateTime.now();
-    final diff = DateTime(now.year, now.month, now.day)
-        .difference(DateTime(d.year, d.month, d.day))
-        .inDays;
-    if (diff == 0) return "Today";
-    if (diff == 1) return "Yesterday";
-    return "${d.day} ${_months[d.month]}";
-  }
-
-  String _time(DateTime d) =>
-      "${d.hour.toString().padLeft(2, '0')}:"
-      "${d.minute.toString().padLeft(2, '0')}";
-
-  Map<String, int> _contributors() {
-    final map = <String, int>{};
-    for (final fv in widget.record.fields.values) {
-      map[fv.filledBy] = (map[fv.filledBy] ?? 0) + 1;
-    }
-    return map;
-  }
-
-  Color _sectionColor(String title, AppColors c) {
-    switch (title) {
-      case "METABOLIC":        return c.warning;
-      case "RENAL":            return c.primary;
-      case "THERMOREGULATION": return c.danger;
-      case "VASCULAR ACCESS":  return c.purple;
-      case "OPHTHALMOLOGY":    return c.success;
-      default:                 return c.primary;
-    }
-  }
-
-  List<_MrveFlag> _flags(AppColors c) {
-    final get = (String k) => widget.record.fields[k]?.value ?? '';
-    final flags = <_MrveFlag>[];
-
-    // Metabolic
-    if (get("Hypoglycemia (<45 mg/dL)") == "Yes")
-      flags.add(_MrveFlag("HYPOGLY",   c.warning));
-    if (get("Hyperglycemia (>180)") == "Yes")
-      flags.add(_MrveFlag("HYPERGLY",  c.warning));
-    if (get("Metabolic acidosis (pH<7.2)") == "Yes")
-      flags.add(_MrveFlag("MET ACID",  c.danger));
-    if (get("Dyselectrolytemia") == "Yes") {
-      final type = get("Dyselectrolytemia type");
-      flags.add(_MrveFlag(
-          "DYSELECTRO${type.isEmpty ? '' : ' ($type)'}", c.warning));
-    }
-    if (get("Osteopenia suspected") == "Yes")
-      flags.add(_MrveFlag("OSTEOPENIA", c.warning));
-
-    // Renal
-    if (get("AKI suspected") == "Yes") {
-      final stage = get("AKI (KDIGO stage)");
-      flags.add(_MrveFlag(
-          "AKI${stage.isEmpty ? '' : ' St$stage'}", c.primary));
-    }
-    if (get("Dialysis/CRRT") == "Yes")
-      flags.add(_MrveFlag("CRRT",       c.danger));
-
-    // Thermoregulation
-    if (get("Hypothermia (<36°C)") == "Yes")
-      flags.add(_MrveFlag("HYPOTHERM",  c.primary));
-    if (get("Hyperthermia (>37.5°C)") == "Yes")
-      flags.add(_MrveFlag("HYPERTHERM", c.danger));
-
-    // Vascular
-    if (get("Extravasation injury") == "Yes")
-      flags.add(_MrveFlag("EXTRAV INJ", c.warning));
-    if (get("Line complication") == "Yes")
-      flags.add(_MrveFlag("LINE COMPL", c.warning));
-
-    // Ophthalmology
-    if (get("ROP detected") == "Yes") {
-      final stage = get("ROP stage (1-5)");
-      final plus  = get("Plus disease") == "Yes" ? "+" : "";
-      flags.add(_MrveFlag(
-          "ROP${stage.isEmpty ? '' : ' St$stage'}$plus", c.purple));
-    }
-    if (get("ROP treatment") == "Yes")
-      flags.add(_MrveFlag("ROP Tx", c.purple));
-
-    if (flags.isEmpty) flags.add(_MrveFlag("Stable", c.success));
-    return flags;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c            = widget.c;
-    final r            = widget.record;
-    final label        = _dateLabel(r.date);
-    final isToday      = label == "Today";
-    final filled       = r.fields.length;
-    final total        = kMrveAllFields.length;
-    final pct          = filled / total;
-    final contributors = _contributors();
-
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
       decoration: BoxDecoration(
         color: c.surface,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: isToday ? c.primary.withOpacity(0.3) : c.border,
-          width: isToday ? 1.5 : 1,
-        ),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04),
-            blurRadius: 8, offset: const Offset(0, 2))],
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: c.borderLight),
       ),
-      child: Column(children: [
-
-        GestureDetector(
-          onTap: () => setState(() => _open = !_open),
-          behavior: HitTestBehavior.opaque,
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Row(children: [
-
-              // Date badge
-              Container(
-                width: 52, height: 52,
-                decoration: BoxDecoration(
-                  color: isToday ? c.primary.withOpacity(0.1) : c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: isToday ? c.primary.withOpacity(0.3) : c.border),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+            child: Row(
+              children: [
+                Icon(icon, color: color, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(title,
+                      style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14,
+                          color: c.textPrimary)),
                 ),
-                child: Center(
-                  child: Text(
-                    label == "Today"     ? "TODAY"
-                    : label == "Yesterday" ? "YEST."
-                    : "${r.date.day}\n${_months[r.date.month]}",
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: isToday ? c.primary : c.textSecondary,
-                      fontWeight: FontWeight.bold,
-                      fontSize: isToday ? 8 : 11,
-                      height: 1.3,
-                    ),
-                  ),
-                ),
-              ),
-
-              const SizedBox(width: 12),
-
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(children: [
-                      Expanded(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(3),
-                          child: LinearProgressIndicator(
-                            value          : pct,
-                            minHeight      : 4,
-                            backgroundColor: c.border,
-                            valueColor     : AlwaysStoppedAnimation(
-                                pct == 1.0 ? c.success : c.primary),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text("$filled/$total",
-                          style: TextStyle(
-                              color: pct == 1.0 ? c.success : c.textTertiary,
-                              fontSize: 11, fontWeight: FontWeight.bold)),
-                    ]),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 6, runSpacing: 4,
-                      children: contributors.entries.map((e) =>
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                              color: c.surfaceAlt,
-                              borderRadius: BorderRadius.circular(8)),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            Icon(Icons.person_outline_rounded,
-                                size: 11, color: c.textTertiary),
-                            const SizedBox(width: 4),
-                            Text("${e.key} (${e.value})",
-                                style: TextStyle(
-                                    color: c.textSecondary, fontSize: 10)),
-                          ]),
-                        ),
-                      ).toList(),
-                    ),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 6, runSpacing: 4,
-                      children: _flags(c)
-                          .map((f) => _flagChip(f.label, f.color))
-                          .toList(),
-                    ),
-                  ],
-                ),
-              ),
-
-              AnimatedRotation(
-                turns: _open ? 0.5 : 0,
-                duration: const Duration(milliseconds: 200),
-                child: Icon(Icons.keyboard_arrow_down,
-                    color: c.textTertiary, size: 20),
-              ),
-            ]),
+                if (headerAction != null) headerAction,
+              ],
+            ),
           ),
-        ),
-
-        if (_open) ...[
           Divider(height: 1, color: c.borderLight),
           Padding(
-            padding: const EdgeInsets.all(14),
-            child: _buildFullDetail(c),
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            child: Column(children: children),
           ),
         ],
-      ]),
+      ),
     );
   }
 
-  Widget _buildFullDetail(AppColors c) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: kMrveSections.entries.map((sec) {
-        final secColor = _sectionColor(sec.key, c);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Container(width: 3, height: 14,
-                  decoration: BoxDecoration(color: secColor,
-                      borderRadius: BorderRadius.circular(2))),
-              const SizedBox(width: 8),
-              Text(sec.key,
-                  style: TextStyle(color: secColor,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 11, letterSpacing: 0.8)),
-            ]),
-            const SizedBox(height: 10),
-            ...sec.value.map((fd) {
-              final fv  = widget.record.fields[fd.key];
-              final val = fv?.value ?? '';
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(flex: 4,
-                        child: Text(fd.key,
-                            style: TextStyle(
-                                color: fv != null
-                                    ? c.textSecondary : c.textTertiary,
-                                fontSize: 12))),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      flex: 3,
-                      child: Text(
-                        val.isEmpty ? "-" : val,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: val.isEmpty
-                              ? c.textTertiary.withOpacity(0.4)
-                              : fd.type == FieldType.yesNo
-                                  ? (val == "Yes" ? c.success : c.textSecondary)
-                                  : c.textPrimary,
-                          fontWeight: FontWeight.w600, fontSize: 12,
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      flex: 4,
-                      child: fv != null
-                          ? Column(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Text(fv.filledBy,
-                                    textAlign: TextAlign.right,
-                                    style: TextStyle(
-                                        color: c.success.withOpacity(0.8),
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w600)),
-                                Text(_time(fv.filledAt),
-                                    textAlign: TextAlign.right,
-                                    style: TextStyle(
-                                        color: c.textTertiary, fontSize: 10)),
-                              ],
-                            )
-                          : Align(
-                              alignment: Alignment.centerRight,
-                              child: Text("not filled",
-                                  style: TextStyle(
-                                      color: c.textTertiary.withOpacity(0.4),
-                                      fontSize: 10)),
-                            ),
-                    ),
-                  ],
-                ),
-              );
-            }),
-            const SizedBox(height: 6),
+  Widget _fieldCard(
+    AppColors c, {
+    required String number,
+    required String label,
+    String? hint,
+    required Widget child,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            number.isEmpty ? label : '$number. $label',
+            style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 13,
+                color: c.textPrimary),
+          ),
+          if (hint != null) ...[
+            const SizedBox(height: 2),
+            Text(hint,
+                style: TextStyle(fontSize: 11, color: c.textTertiary)),
           ],
+          const SizedBox(height: 6),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _yn(
+    String label,
+    bool? value,
+    bool enabled,
+    ValueChanged<bool?> onChanged,
+    AppColors c, {
+    String? hint,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label,
+                    style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                        color: c.textPrimary)),
+                if (hint != null)
+                  Text(hint,
+                      style:
+                          TextStyle(fontSize: 11, color: c.textTertiary)),
+              ],
+            ),
+          ),
+          _ynToggle(value, enabled, onChanged, c),
+        ],
+      ),
+    );
+  }
+
+  Widget _ynToggle(
+    bool? value,
+    bool enabled,
+    ValueChanged<bool?> onChanged,
+    AppColors c,
+  ) {
+    Widget btn(String text, bool? target, Color activeColor) {
+      final active = value == target;
+      return InkWell(
+        onTap: !enabled
+            ? null
+            : () => onChanged(active ? null : target),
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? activeColor : c.surfaceAlt,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: active ? activeColor : c.border),
+          ),
+          child: Text(
+            text,
+            style: TextStyle(
+              color: active ? Colors.white : c.textSecondary,
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        btn('Yes', true, c.success),
+        const SizedBox(width: 6),
+        btn('No', false, c.danger),
+      ],
+    );
+  }
+
+  Widget _singlePills(
+    List<String> options,
+    String? selected,
+    bool enabled,
+    ValueChanged<String?> onChanged,
+    AppColors c,
+  ) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: options.map((o) {
+        final sel = selected == o;
+        return FilterChip(
+          label: Text(o),
+          selected: sel,
+          onSelected: !enabled
+              ? null
+              : (_) => onChanged(sel ? null : o),
         );
       }).toList(),
     );
   }
 
-  Widget _flagChip(String label, Color color) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: color.withOpacity(0.25)),
+  Widget _textField(
+    TextEditingController ctrl,
+    AppColors c, {
+    bool enabled = true,
+    String? hint,
+    TextInputType? keyboard,
+  }) {
+    return TextField(
+      controller: ctrl,
+      enabled: enabled,
+      keyboardType: keyboard,
+      decoration: InputDecoration(
+        hintText: hint,
+        isDense: true,
+        filled: true,
+        fillColor: enabled ? c.surfaceAlt : c.bg,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide(color: c.border),
         ),
-        child: Text(label,
-            style: TextStyle(color: color,
-                fontSize: 10, fontWeight: FontWeight.bold)),
-      );
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide(color: c.border),
+        ),
+      ),
+    );
+  }
+
+  static String _month(int m) {
+    const names = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
+    ];
+    return names[m - 1];
+  }
 }
 
-class _MrveFlag {
-  final String label;
-  final Color  color;
-  const _MrveFlag(this.label, this.color);
+class _ReadingEntryRow extends StatefulWidget {
+  final String code;
+  final int index;
+  final MrveReading reading;
+  final String unit;
+  final bool editable;
+  final bool canDelete;
+  final AppColors colors;
+  final void Function(String field, String value) onChanged;
+  final VoidCallback onDelete;
+
+  const _ReadingEntryRow({
+    super.key,
+    required this.code,
+    required this.index,
+    required this.reading,
+    required this.unit,
+    required this.editable,
+    required this.canDelete,
+    required this.colors,
+    required this.onChanged,
+    required this.onDelete,
+  });
+
+  @override
+  State<_ReadingEntryRow> createState() => _ReadingEntryRowState();
+}
+
+class _ReadingEntryRowState extends State<_ReadingEntryRow> {
+  late final TextEditingController _dateCtrl;
+  late final TextEditingController _timeCtrl;
+  late final TextEditingController _valueCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _dateCtrl = TextEditingController(text: widget.reading.date);
+    _timeCtrl = TextEditingController(text: widget.reading.time);
+    _valueCtrl = TextEditingController(text: widget.reading.value);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ReadingEntryRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final r = widget.reading;
+    final o = oldWidget.reading;
+    if (o.id != r.id ||
+        o.date != r.date ||
+        o.time != r.time ||
+        o.value != r.value) {
+      _dateCtrl.text = r.date;
+      _timeCtrl.text = r.time;
+      _valueCtrl.text = r.value;
+    }
+  }
+
+  @override
+  void dispose() {
+    _dateCtrl.dispose();
+    _timeCtrl.dispose();
+    _valueCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.colors;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (widget.index > 0 || widget.canDelete)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              children: [
+                Text('${widget.code} #${widget.index + 1}',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12,
+                        color: c.textTertiary)),
+                const Spacer(),
+                if (widget.canDelete && widget.editable)
+                  IconButton(
+                    icon: Icon(Icons.delete_outline, size: 18, color: c.danger),
+                    onPressed: widget.onDelete,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+              ],
+            ),
+          ),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _dateCtrl,
+                enabled: widget.editable,
+                decoration: const InputDecoration(
+                  labelText: 'Date',
+                  isDense: true,
+                ),
+                onChanged: (v) => widget.onChanged('date', v),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _timeCtrl,
+                enabled: widget.editable,
+                decoration: const InputDecoration(
+                  labelText: 'Time',
+                  isDense: true,
+                ),
+                onChanged: (v) => widget.onChanged('time', v),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _valueCtrl,
+                enabled: widget.editable,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration: InputDecoration(
+                  labelText: widget.code,
+                  isDense: true,
+                  suffixText: widget.unit.isEmpty ? null : widget.unit,
+                ),
+                onChanged: (v) => widget.onChanged('value', v),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+      ],
+    );
+  }
 }

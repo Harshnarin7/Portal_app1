@@ -1,219 +1,22 @@
-import 'dart:convert';
+// lib/screens/helper_form2_resp_cv_neuro.dart
+//
+// Helper Form 2 — Resp / CV / Neuro Daily Log
+// Parity with web RespCVNeuroLog.jsx: fields 2.1 + 1–37, same sequence,
+// same validations, same /resp-cv-neuro/ API (NICU day, not calendar blob).
+
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import '../models/resp_cv_neuro_day.dart';
 import '../services/forms_api_service.dart';
+import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
+import '../widgets/modern_date_picker.dart';
 import '../widgets/theme_toggle_widget.dart';
-
-// ─── FIELD VALUE ──────────────────────────────────────────────────────────────
-
-class FieldValue {
-  final String value;
-  final String filledBy;
-  final DateTime filledAt;
-
-  const FieldValue({
-    required this.value,
-    required this.filledBy,
-    required this.filledAt,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'value'   : value,
-        'filledBy': filledBy,
-        'filledAt': filledAt.toIso8601String(),
-      };
-
-  factory FieldValue.fromJson(Map<String, dynamic> j) => FieldValue(
-        value   : j['value']    as String,
-        filledBy: j['filledBy'] as String,
-        filledAt: DateTime.parse(j['filledAt'] as String),
-      );
-}
-
-// ─── DAY RECORD ───────────────────────────────────────────────────────────────
-
-class DayRecord {
-  final DateTime date;
-  final Map<String, FieldValue> fields;
-
-  DayRecord({required this.date}) : fields = {};
-  DayRecord._withFields({required this.date, required this.fields});
-
-  bool get isEmpty  => fields.isEmpty;
-  String? valueOf(String key) => fields[key]?.value;
-  bool isFilled(String key)   => fields.containsKey(key);
-
-  Map<String, dynamic> toJson() => {
-        'date'  : date.toIso8601String(),
-        'fields': fields.map((k, v) => MapEntry(k, v.toJson())),
-      };
-
-  factory DayRecord.fromJson(Map<String, dynamic> j) {
-    final rawFields = (j['fields'] as Map<String, dynamic>).map(
-      (k, v) => MapEntry(k, FieldValue.fromJson(v as Map<String, dynamic>)),
-    );
-    return DayRecord._withFields(
-      date  : DateTime.parse(j['date'] as String),
-      fields: rawFields,
-    );
-  }
-}
-
-// ─── FIELD TYPES ──────────────────────────────────────────────────────────────
-
-enum FieldType { yesNo, chips, number, text }
-
-class FieldDef {
-  final String        key;
-  final FieldType     type;
-  final List<String>? options;
-  final int?          maxValue;
-  final String?       unit;
-  final String?       enabledWhen;
-  final String?       enabledWhenValue;
-
-  const FieldDef(
-    this.key,
-    this.type, {
-    this.options,
-    this.maxValue,
-    this.unit,
-    this.enabledWhen,
-    this.enabledWhenValue,
-  });
-}
-
-// ─── SCHEMA ───────────────────────────────────────────────────────────────────
-
-const Map<String, List<FieldDef>> kSections = {
-  "RESPIRATORY": [
-    FieldDef("Respiratory support", FieldType.yesNo),
-    FieldDef(
-      "CPAP/HFNC/NIPPV/Nasal cannula/SIMV/HFOV",
-      FieldType.chips,
-      options          : ["CPAP", "HFNC", "NIPPV", "Nasal cannula", "SIMV", "HFOV"],
-      enabledWhen      : "Respiratory support",
-      enabledWhenValue : "Yes",
-    ),
-    FieldDef("FiO2 (%)", FieldType.number, maxValue: 100, unit: "%"),
-    FieldDef("Supplemental O2 >= 21% (any)", FieldType.yesNo),
-    FieldDef("Surfactant given", FieldType.yesNo),
-    FieldDef("Caffeine", FieldType.yesNo),
-    FieldDef("Apnea episodes", FieldType.yesNo),
-    FieldDef("Desaturations", FieldType.yesNo),
-    FieldDef("Extubation attempted", FieldType.yesNo),
-    FieldDef("Extubation failure (<72h)", FieldType.yesNo),
-    FieldDef("Pulmonary hemorrhage", FieldType.yesNo),
-    FieldDef("Pneumothorax", FieldType.yesNo),
-    FieldDef("Chest drain in situ", FieldType.yesNo),
-    FieldDef("Pulmonary HTN (PPHN)", FieldType.yesNo),
-    FieldDef("Postnatal steroids", FieldType.yesNo),
-  ],
-  "CARDIOVASCULAR": [
-    FieldDef("PDA suspected/confirmed", FieldType.yesNo),
-    FieldDef("Echo done", FieldType.yesNo),
-    FieldDef("IIS-PDA", FieldType.yesNo),
-    FieldDef("PDA medical Rx", FieldType.yesNo),
-    FieldDef("PDA ligation", FieldType.yesNo),
-    FieldDef("Shock", FieldType.yesNo),
-    FieldDef("Vasoactives", FieldType.yesNo),
-    FieldDef(
-      "Vasoactive type",
-      FieldType.chips,
-      options          : ["D", "Db", "A", "NA", "M", "V"],
-      enabledWhen      : "Vasoactives",
-      enabledWhenValue : "Yes",
-    ),
-  ],
-  "NEUROLOGICAL": [
-    FieldDef("Cranial USG done", FieldType.yesNo),
-    FieldDef("IVH (any grade)", FieldType.yesNo),
-    FieldDef(
-      "IVH grade",
-      FieldType.chips,
-      options          : ["1", "2", "3", "4"],
-      enabledWhen      : "IVH (any grade)",
-      enabledWhenValue : "Yes",
-    ),
-    FieldDef("PVL suspected", FieldType.yesNo),
-    FieldDef("cPVL confirmed", FieldType.yesNo),
-    FieldDef("Ventriculomegaly", FieldType.yesNo),
-    FieldDef("Seizures (clinical)", FieldType.yesNo),
-    FieldDef("Seizures (EEG confirmed)", FieldType.yesNo),
-    FieldDef("AEDs given", FieldType.yesNo),
-    FieldDef("Non-IVH ICH", FieldType.yesNo),
-    FieldDef("Meningitis suspected", FieldType.yesNo),
-  ],
-};
-
-final List<String> kAllFields =
-    kSections.values.expand((f) => f.map((d) => d.key)).toList();
-
-// ─── SITE-WISE NURSE ROSTER (same map as Form A) ──────────────────────────────
-// Add / update names here as your site roster changes.
-
-const Map<String, List<String>> kNursesBySite = {
-  "PGIMER": [
-    "Mannat Guliani", "Shalini Dhiman", "Navkiran Kaur",
-    "Geetika", "Priyanka Thakur", "Seemran Kaur",
-    "Tanvi Saini", "Yashvi Jolly",
-  ],
-  "GMCH"  : ["Nurse GMCH-1", "Nurse GMCH-2"],
-  "IOG"   : ["Nurse IOG-1",  "Nurse IOG-2"],
-  "AFMC"  : ["Nurse AFMC-1", "Nurse AFMC-2"],
-  "GMCH-A": ["Nurse GMCH-A-1"],
-  "AMC"   : ["Nurse AMC-1"],
-};
-
-// ─── STORAGE HELPER ───────────────────────────────────────────────────────────
-
-class _Storage {
-  static String _prefsKey(String babyUid) => 'nicu_records_$babyUid';
-  static const  _lastNurseKey             = 'nicu_last_nurse';
-
-  static Future<Map<String, DayRecord>> load(String babyUid) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw   = prefs.getString(_prefsKey(babyUid));
-      if (raw == null || raw.isEmpty) return {};
-      final decoded = jsonDecode(raw) as Map<String, dynamic>;
-      return decoded.map(
-        (k, v) => MapEntry(k, DayRecord.fromJson(v as Map<String, dynamic>)),
-      );
-    } catch (_) { return {}; }
-  }
-
-  static Future<void> save(
-      String babyUid, Map<String, DayRecord> records) async {
-    try {
-      final prefs   = await SharedPreferences.getInstance();
-      final encoded = jsonEncode(records.map((k, v) => MapEntry(k, v.toJson())));
-      await prefs.setString(_prefsKey(babyUid), encoded);
-    } catch (_) {}
-  }
-
-  static Future<String> loadLastNurse() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_lastNurseKey) ?? '';
-  }
-
-  static Future<void> saveLastNurse(String name) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_lastNurseKey, name);
-  }
-}
-
-// ─── MAIN WIDGET ──────────────────────────────────────────────────────────────
 
 class HelperForm2RespCvNeuro extends StatefulWidget {
   final String enrollmentId;
   final String gestation;
   final String motherName;
   final String babyUid;
-  /// Pass the site selected on the parent screen (e.g. "PGIMER").
-  /// Drives which nurse names appear in the dropdown.
-  /// Defaults to "PGIMER" so existing call sites without this param still compile.
   final String site;
 
   const HelperForm2RespCvNeuro({
@@ -230,1409 +33,1778 @@ class HelperForm2RespCvNeuro extends StatefulWidget {
       _HelperForm2RespCvNeuroState();
 }
 
-class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro>
-    with SingleTickerProviderStateMixin {
+class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
+  static const _lateGraceHour = 11;
 
-  late TabController _tabController;
+  final _api = FormsApiService.instance;
 
-  Map<String, String> _draft     = {};
-  bool _isSaving  = false;
-  bool _isLoading = true;
+  bool _loading = true;
+  bool _saving = false;
+  bool _submitting = false;
+  bool _dayLoading = false;
+  String? _banner;
+  bool _bannerError = false;
 
-  Map<String, DayRecord> _records       = {};
-  String                 _selectedNurse = 'Select';
+  DateTime? _day1Date;
+  bool _day1Locked = false;
+  int _totalDays = 14;
+  int _activeDay = 1;
+  int _todayNicuDay = 1;
 
-  // Nurse list for the current site — resolved once in initState.
-  late List<String> _siteNurses;
+  final Map<int, String> _dayStatus = {}; // empty|draft|complete|submitted|late
+  final Map<int, int> _dayPct = {};
 
-  // ── Init / Dispose ─────────────────────────────────────────────────────────
+  bool _recordExists = false;
+  bool _isEditing = true;
+  bool _isSubmitted = false;
+  /// Set when day GET fails — blocks save so prior-day values aren't written
+  /// onto the wrong NICU day.
+  bool _dayLoadFailed = false;
+  int _loadGen = 0;
+
+  // Controllers
+  final _weightCtrl = TextEditingController();
+  final _mapCpapCtrl = TextEditingController();
+  final _mapCpapSecCtrl = TextEditingController();
+  final _maxFio2Ctrl = TextEditingController();
+  final _maxFlowCtrl = TextEditingController();
+  final _phCtrl = TextEditingController();
+  final _pao2LowCtrl = TextEditingController();
+  final _pao2HighCtrl = TextEditingController();
+  final _paco2LowCtrl = TextEditingController();
+  final _paco2HighCtrl = TextEditingController();
+  final _apneaCtrl = TextEditingController();
+  final _desatCtrl = TextEditingController();
+  final _severeDesatCtrl = TextEditingController();
+  final _fluidBolusCtrl = TextEditingController();
+
+  bool? _respiratorySupport;
+  bool? _endotrachealIntubation;
+  List<String> _supportModes = [];
+  bool? _suppO2;
+  bool _pao2NotDone = false;
+  bool _paco2NotDone = false;
+  bool? _surfactant;
+  bool? _caffeine;
+  bool? _extubAttempted;
+  bool? _extubFailure;
+  bool? _pulmHemorrhage;
+  bool? _pneumothorax;
+  bool? _chestDrain;
+  bool? _pphn;
+  bool? _postnatalSteroids;
+
+  bool? _pdaSuspected;
+  bool? _echoDone;
+  bool? _hsPda;
+  bool? _shock;
+  bool? _vasoactiveSupport;
+  List<String> _vasoactiveDrugs = [];
+
+  bool? _cranialUsg;
+  bool? _ivh;
+  String? _ivhGrade;
+  bool? _cpvlConfirmed;
+  bool? _ventriculomegaly;
+  bool? _clinicalSeizures;
+  bool? _eegSeizures;
+  bool? _aedsGiven;
+  bool? _nonIvhIch;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    // Resolve nurse list for this site; fall back to empty list if unknown.
-    _siteNurses = kNursesBySite[widget.site] ?? [];
-    _loadData();
+    for (final c in [
+      _weightCtrl,
+      _mapCpapCtrl,
+      _mapCpapSecCtrl,
+      _maxFio2Ctrl,
+      _maxFlowCtrl,
+      _phCtrl,
+      _pao2LowCtrl,
+      _pao2HighCtrl,
+      _paco2LowCtrl,
+      _paco2HighCtrl,
+      _apneaCtrl,
+      _desatCtrl,
+      _severeDesatCtrl,
+      _fluidBolusCtrl,
+    ]) {
+      c.addListener(() => setState(() {}));
+    }
+    _bootstrap();
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
+    for (final c in [
+      _weightCtrl,
+      _mapCpapCtrl,
+      _mapCpapSecCtrl,
+      _maxFio2Ctrl,
+      _maxFlowCtrl,
+      _phCtrl,
+      _pao2LowCtrl,
+      _pao2HighCtrl,
+      _paco2LowCtrl,
+      _paco2HighCtrl,
+      _apneaCtrl,
+      _desatCtrl,
+      _severeDesatCtrl,
+      _fluidBolusCtrl,
+    ]) {
+      c.dispose();
+    }
     super.dispose();
   }
 
-  Future<void> _loadData() async {
-    Map<String, DayRecord> records;
+  Future<String> _nurseName() async {
+    final p = await TokenStorage.getProfile();
+    final name = (p?['full_name'] ?? p?['username'] ?? 'Nurse').toString();
+    return name.trim().isEmpty ? 'Nurse' : name.trim();
+  }
+
+  Future<void> _bootstrap() async {
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) {
+      setState(() {
+        _loading = false;
+        _banner = 'No enrollment ID — open from a randomised patient.';
+        _bannerError = true;
+      });
+      return;
+    }
     try {
-      final remote = await FormsApiService.instance.loadHelperForm(
-        babyUid: widget.babyUid, formType: 'resp_cv_neuro');
-      final raw = remote['records'] as Map<String, dynamic>? ?? {};
-      records = raw.isNotEmpty
-          ? raw.map((k,v) => MapEntry(k, DayRecord.fromJson(v as Map<String,dynamic>)))
-          : await _Storage.load(widget.babyUid);
-    } catch (_) { records = await _Storage.load(widget.babyUid); }
-    final lastNurse = await _Storage.loadLastNurse();
-    if (!mounted) return;
-    setState(() {
-      _records    = records;
-      _isLoading  = false;
-      // Pre-select last used nurse only if they are still in this site's list.
-      if (lastNurse.isNotEmpty && _siteNurses.contains(lastNurse)) {
-        _selectedNurse = lastNurse;
-      } else {
-        _selectedNurse = 'Select';
-      }
-    });
-  }
-
-  Future<void> _persistRecords() async =>
-      _Storage.save(widget.babyUid, _records);
-
-  // ── Date helpers ───────────────────────────────────────────────────────────
-
-  DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
-
-  String _dateKey(DateTime d) =>
-      "${d.year}-${d.month.toString().padLeft(2, '0')}-"
-      "${d.day.toString().padLeft(2, '0')}";
-
-  DayRecord get _todayRecord {
-    final key = _dateKey(DateTime.now());
-    _records.putIfAbsent(
-        key, () => DayRecord(date: _dateOnly(DateTime.now())));
-    return _records[key]!;
-  }
-
-  // ── Field logic ────────────────────────────────────────────────────────────
-
-  bool _isLocked(String key) => _todayRecord.isFilled(key);
-
-  String _displayValue(String key) {
-    if (_isLocked(key)) return _todayRecord.valueOf(key) ?? '';
-    return _draft[key] ?? '';
-  }
-
-  /// A field is enabled only when its parent condition is met.
-  /// Checks both locked AND draft values, so it works before and after save.
-  bool _isFieldEnabled(FieldDef fd) {
-    if (fd.enabledWhen == null) return true;
-    return _displayValue(fd.enabledWhen!) == fd.enabledWhenValue;
-  }
-
-  void _setDraft(String key, String val) {
-    if (_isLocked(key)) return;
-    setState(() {
-      _draft[key] = val;
-      // When a parent flips away from the condition value, clear child draft
-      // so disabled children can never accumulate unsaved values.
-      for (final section in kSections.values) {
-        for (final fd in section) {
-          if (fd.enabledWhen == key && val != fd.enabledWhenValue) {
-            if (!_isLocked(fd.key)) _draft[fd.key] = '';
-          }
+      try {
+        final d1 = await _api.loadDay1Date(eid);
+        final raw = d1['day1_date']?.toString();
+        if (raw != null && raw.isNotEmpty) {
+          _day1Date = DateTime.tryParse(raw.substring(0, 10));
         }
+        _day1Locked = d1['locked'] == true;
+      } catch (e) {
+        _banner =
+            'Could not load Day 1 Date from server — set it before saving: $e';
+        _bannerError = true;
       }
-    });
-  }
 
-  /// Only includes fields that:
-  ///   1. Have a non-empty draft value
-  ///   2. Are not already locked (saved)
-  ///   3. Are currently ENABLED (parent condition satisfied)
-  ///
-  /// This fixes the "missing fields" false-positive when a parent is "No"
-  /// and the child is disabled — those children are simply excluded.
-  Map<String, String> get _filledDraft {
-    final out = <String, String>{};
-    for (final section in kSections.values) {
-      for (final fd in section) {
-        if (_isLocked(fd.key)) continue;
-        if (!_isFieldEnabled(fd)) continue; // skip disabled children
-        final v = _draft[fd.key] ?? '';
-        if (v.isNotEmpty) out[fd.key] = v;
+      final summary = await _api.loadRespCvNeuroSummary(eid);
+      var maxDay = 14;
+      for (final row in summary) {
+        final n = row['nicu_day'];
+        final day = n is int ? n : int.tryParse('$n') ?? 0;
+        if (day < 1) continue;
+        if (day > maxDay) maxDay = day;
+        final st = (row['submission_status'] ?? 'empty').toString();
+        final pct = row['completion_pct'];
+        _dayStatus[day] = st;
+        _dayPct[day] = pct is int ? pct : int.tryParse('$pct') ?? 0;
+        if (st != 'empty' && st.isNotEmpty) _day1Locked = true;
       }
-    }
-    return out;
-  }
-
-  int get _totalFilled => _todayRecord.fields.length;
-
-  /// Progress counts only fields that are currently reachable (enabled).
-  /// Disabled child fields never count as "missing" toward the progress bar.
-  double _dayProgress() {
-    final lockable = <String>[];
-    for (final section in kSections.values) {
-      for (final fd in section) {
-        if (_isFieldEnabled(fd)) lockable.add(fd.key);
-      }
-    }
-    if (lockable.isEmpty) return 0;
-    return lockable.where((k) => _isLocked(k)).length / lockable.length;
-  }
-
-  // ── Save ───────────────────────────────────────────────────────────────────
-
-  Future<void> _save(AppColors c) async {
-    if (_selectedNurse == 'Select' || _selectedNurse.isEmpty) {
-      _showSimpleDialog(
-        title    : "Select your name",
-        body     : "Please choose your name from the dropdown before saving.",
-        icon     : Icons.badge_outlined,
-        iconColor: c.warning,
-        c        : c,
-      );
-      return;
-    }
-
-    final toSave = _filledDraft;
-    if (toSave.isEmpty) {
-      _showSimpleDialog(
-        title    : "Nothing to save",
-        body     : "Please fill in at least one field before saving.",
-        icon     : Icons.info_outline,
-        iconColor: c.primary,
-        c        : c,
-      );
-      return;
-    }
-
-    setState(() => _isSaving = true);
-
-    final now    = DateTime.now();
-    final record = _todayRecord;
-    toSave.forEach((key, val) {
-      record.fields[key] = FieldValue(
-        value   : val,
-        filledBy: _selectedNurse,
-        filledAt: now,
-      );
-    });
-
-    await _persistRecords();
-    await _Storage.saveLastNurse(_selectedNurse);
-    // ── Sync to backend ──────────────────────────────────────────────────────
-    try {
-      final recordsMap = _records.map(
-        (k, v) => MapEntry(k, v.toJson()),
-      );
-      await FormsApiService.instance.saveHelperForm(
-        babyUid   : widget.babyUid,
-        formType  : 'resp_cv_neuro',
-        records   : recordsMap,
-        updatedBy : _selectedNurse,
-      );
+      _totalDays = maxDay < 14 ? 14 : maxDay;
+      _recomputeTodayNicuDay();
+      _activeDay = _defaultActiveDay();
     } catch (e) {
-      debugPrint('Helper form backend sync failed: $e');
+      _banner = 'Could not load day summary: $e';
+      _bannerError = true;
     }
-
-    if (!mounted) return;
-    setState(() {
-      _draft    = {};
-      _isSaving = false;
-    });
-
-    _toast("${toSave.length} field(s) saved by $_selectedNurse",
-        ok: true, c: c);
-    _tabController.animateTo(1);
+    if (mounted) {
+      setState(() => _loading = false);
+      await _loadActiveDay();
+    }
   }
 
-  // ── BUILD ──────────────────────────────────────────────────────────────────
+  void _recomputeTodayNicuDay() {
+    if (_day1Date == null) {
+      _todayNicuDay = 1;
+      return;
+    }
+    final now = DateTime.now();
+    final d1 = DateTime(_day1Date!.year, _day1Date!.month, _day1Date!.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final diff = today.difference(d1).inDays + 1;
+    _todayNicuDay = diff < 1 ? 1 : diff;
+  }
+
+  int _defaultActiveDay() {
+    if (_day1Date == null) return 1;
+    final hour = DateTime.now().hour;
+    if (hour < _lateGraceHour && _todayNicuDay > 1) {
+      return _todayNicuDay - 1;
+    }
+    return _todayNicuDay;
+  }
+
+  DateTime? _calendarForDay(int day) {
+    if (_day1Date == null) return null;
+    return DateTime(_day1Date!.year, _day1Date!.month, _day1Date!.day)
+        .add(Duration(days: day - 1));
+  }
+
+  bool get _isFutureDay =>
+      _day1Date != null && _activeDay > _todayNicuDay;
+
+  bool get _isPastLocked {
+    if (_day1Date == null) return false;
+    if (_activeDay >= _todayNicuDay) return false;
+    // Late grace: yesterday editable before 11:00
+    if (_activeDay == _todayNicuDay - 1 &&
+        DateTime.now().hour < _lateGraceHour) {
+      return false;
+    }
+    return true;
+  }
+
+  bool get _isFieldEditable {
+    if (_isSubmitted) return false;
+    if (_isFutureDay) return false;
+    if (_isPastLocked) return false;
+    if (_recordExists && !_isEditing) return false;
+    return true;
+  }
+
+  RespCvNeuroCompletion get _completion => RespCvNeuroCompletion.compute(
+        weightKg: _weightCtrl.text,
+        respiratorySupport: _respiratorySupport,
+        endotrachealIntubation: _endotrachealIntubation,
+        supportModes: _supportModes,
+        mapCpap: _mapCpapCtrl.text,
+        mapCpapSecondary: _mapCpapSecCtrl.text,
+        maxFio2: _maxFio2Ctrl.text,
+        maxFlow: _maxFlowCtrl.text,
+        suppO2: _suppO2,
+        lowestPh: _phCtrl.text,
+        pao2NotDone: _pao2NotDone,
+        pao2Low: _pao2LowCtrl.text,
+        pao2High: _pao2HighCtrl.text,
+        paco2NotDone: _paco2NotDone,
+        paco2Low: _paco2LowCtrl.text,
+        paco2High: _paco2HighCtrl.text,
+        surfactant: _surfactant,
+        caffeine: _caffeine,
+        apneaCount: _apneaCtrl.text,
+        desatCount: _desatCtrl.text,
+        severeDesatCount: _severeDesatCtrl.text,
+        extubAttempted: _extubAttempted,
+        extubFailure: _extubFailure,
+        pulmHemorrhage: _pulmHemorrhage,
+        pneumothorax: _pneumothorax,
+        chestDrain: _chestDrain,
+        pphn: _pphn,
+        postnatalSteroids: _postnatalSteroids,
+        pdaSuspected: _pdaSuspected,
+        echoDone: _echoDone,
+        hsPda: _hsPda,
+        shock: _shock,
+        vasoactiveSupport: _vasoactiveSupport,
+        vasoactiveDrugs: _vasoactiveDrugs,
+        fluidBolus: _fluidBolusCtrl.text,
+        cranialUsg: _cranialUsg,
+        ivh: _ivh,
+        ivhGrade: _ivhGrade,
+        cpvlConfirmed: _cpvlConfirmed,
+        ventriculomegaly: _ventriculomegaly,
+        clinicalSeizures: _clinicalSeizures,
+        eegSeizures: _eegSeizures,
+        aedsGiven: _aedsGiven,
+        nonIvhIch: _nonIvhIch,
+      );
+
+  bool get _canSubmit =>
+      _completion.percent == 100 &&
+      !_isSubmitted &&
+      !_isFutureDay &&
+      !_isPastLocked;
+
+  Future<void> _loadActiveDay() async {
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) return;
+    final day = _activeDay;
+    final gen = ++_loadGen;
+    setState(() => _dayLoading = true);
+    try {
+      final raw = await _api.loadRespCvNeuroDay(eid, day);
+      if (!mounted || gen != _loadGen || day != _activeDay) return;
+      if (raw == null) {
+        _clearForm();
+        _recordExists = false;
+        _isEditing = true;
+        _isSubmitted = false;
+        _dayLoadFailed = false;
+      } else {
+        _applyDay(RespCvNeuroDay.fromJson(raw));
+        _recordExists = true;
+        _isSubmitted = (raw['submission_status']?.toString() == 'submitted');
+        _isEditing = false;
+        _dayLoadFailed = false;
+      }
+    } catch (e) {
+      if (!mounted || gen != _loadGen || day != _activeDay) return;
+      // Never keep previous day's values in the form on a failed load.
+      _clearForm();
+      _recordExists = false;
+      _isEditing = false;
+      _isSubmitted = false;
+      _dayLoadFailed = true;
+      _banner =
+          'Could not load Day $day — save disabled until reload succeeds: $e';
+      _bannerError = true;
+    } finally {
+      if (mounted && gen == _loadGen) setState(() => _dayLoading = false);
+    }
+  }
+
+  void _clearForm() {
+    for (final c in [
+      _weightCtrl,
+      _mapCpapCtrl,
+      _mapCpapSecCtrl,
+      _maxFio2Ctrl,
+      _maxFlowCtrl,
+      _phCtrl,
+      _pao2LowCtrl,
+      _pao2HighCtrl,
+      _paco2LowCtrl,
+      _paco2HighCtrl,
+      _apneaCtrl,
+      _desatCtrl,
+      _severeDesatCtrl,
+      _fluidBolusCtrl,
+    ]) {
+      c.clear();
+    }
+    _respiratorySupport = null;
+    _endotrachealIntubation = null;
+    _supportModes = [];
+    _suppO2 = null;
+    _pao2NotDone = false;
+    _paco2NotDone = false;
+    _surfactant = null;
+    _caffeine = null;
+    _extubAttempted = null;
+    _extubFailure = null;
+    _pulmHemorrhage = null;
+    _pneumothorax = null;
+    _chestDrain = null;
+    _pphn = null;
+    _postnatalSteroids = null;
+    _pdaSuspected = null;
+    _echoDone = null;
+    _hsPda = null;
+    _shock = null;
+    _vasoactiveSupport = null;
+    _vasoactiveDrugs = [];
+    _cranialUsg = null;
+    _ivh = null;
+    _ivhGrade = null;
+    _cpvlConfirmed = null;
+    _ventriculomegaly = null;
+    _clinicalSeizures = null;
+    _eegSeizures = null;
+    _aedsGiven = null;
+    _nonIvhIch = null;
+  }
+
+  void _applyDay(RespCvNeuroDay d) {
+    _weightCtrl.text = d.weightKg ?? '';
+    _respiratorySupport = d.respiratorySupport;
+    _endotrachealIntubation = d.endotrachealIntubation;
+    _supportModes = List.of(d.supportModes);
+    _mapCpapCtrl.text = d.mapCpap?.toString() ?? '';
+    _mapCpapSecCtrl.text = d.mapCpapSecondary?.toString() ?? '';
+    _maxFio2Ctrl.text = d.maxFio2?.toString() ?? '';
+    _maxFlowCtrl.text = d.maxFlow?.toString() ?? '';
+    _suppO2 = d.suppO2;
+    _phCtrl.text = d.lowestPh ?? '';
+    final pa = RespCvNeuroValidators.parseRange(d.pao2Range);
+    _pao2NotDone = pa.notDone;
+    _pao2LowCtrl.text = pa.low;
+    _pao2HighCtrl.text = pa.high;
+    final pc = RespCvNeuroValidators.parseRange(d.paco2Range);
+    _paco2NotDone = pc.notDone;
+    _paco2LowCtrl.text = pc.low;
+    _paco2HighCtrl.text = pc.high;
+    _surfactant = d.surfactant;
+    _caffeine = d.caffeine;
+    _apneaCtrl.text = d.apneaCount ?? '';
+    _desatCtrl.text = d.desaturationCount ?? '';
+    _severeDesatCtrl.text = d.severeDesaturationCount ?? '';
+    _extubAttempted = d.extubAttempted;
+    _extubFailure = d.extubFailure;
+    _pulmHemorrhage = d.pulmHemorrhage;
+    _pneumothorax = d.pneumothorax;
+    _chestDrain = d.chestDrain;
+    _pphn = d.pphn;
+    _postnatalSteroids = d.postnatalSteroids;
+    _pdaSuspected = d.pdaSuspected;
+    _echoDone = d.echoDone;
+    _hsPda = d.hsPda;
+    _shock = d.shock;
+    _vasoactiveSupport = d.vasoactiveSupport;
+    _vasoactiveDrugs = List.of(d.vasoactiveDrugs);
+    _fluidBolusCtrl.text = d.fluidBolus ?? '';
+    _cranialUsg = d.cranialUsg;
+    _ivh = d.ivh;
+    _ivhGrade = d.ivhGrade;
+    _cpvlConfirmed = d.cpvlConfirmed;
+    _ventriculomegaly = d.ventriculomegaly;
+    _clinicalSeizures = d.clinicalSeizures;
+    _eegSeizures = d.eegSeizures;
+    _aedsGiven = d.aedsGiven;
+    _nonIvhIch = d.nonIvhIch;
+  }
+
+  RespCvNeuroDay _buildModel() {
+    final d = RespCvNeuroDay(
+      enrollmentId: widget.enrollmentId.trim(),
+      nicuDay: _activeDay,
+    );
+    d.weightKg = _weightCtrl.text.trim().isEmpty ? null : _weightCtrl.text.trim();
+    d.respiratorySupport = _respiratorySupport;
+    d.endotrachealIntubation = _endotrachealIntubation;
+    d.supportModes = List.of(_supportModes);
+    d.mapCpap = double.tryParse(_mapCpapCtrl.text.trim());
+    d.mapCpapSecondary = double.tryParse(_mapCpapSecCtrl.text.trim());
+    d.maxFio2 = double.tryParse(_maxFio2Ctrl.text.trim());
+    d.maxFlow = double.tryParse(_maxFlowCtrl.text.trim());
+    d.suppO2 = _suppO2;
+    d.lowestPh = _phCtrl.text.trim().isEmpty ? null : _phCtrl.text.trim();
+    d.pao2Range = RespCvNeuroValidators.combineRange(
+        _pao2LowCtrl.text, _pao2HighCtrl.text, _pao2NotDone);
+    d.paco2Range = RespCvNeuroValidators.combineRange(
+        _paco2LowCtrl.text, _paco2HighCtrl.text, _paco2NotDone);
+    d.surfactant = _surfactant;
+    d.caffeine = _caffeine;
+    d.apneaCount = _apneaCtrl.text.trim().isEmpty ? null : _apneaCtrl.text.trim();
+    d.desaturationCount =
+        _desatCtrl.text.trim().isEmpty ? null : _desatCtrl.text.trim();
+    d.severeDesaturationCount = _severeDesatCtrl.text.trim().isEmpty
+        ? null
+        : _severeDesatCtrl.text.trim();
+    d.extubAttempted = _extubAttempted;
+    d.extubFailure = _extubFailure;
+    d.pulmHemorrhage = _pulmHemorrhage;
+    d.pneumothorax = _pneumothorax;
+    d.chestDrain = _chestDrain;
+    d.pphn = _pphn;
+    d.postnatalSteroids = _postnatalSteroids;
+    d.pdaSuspected = _pdaSuspected;
+    d.echoDone = _echoDone;
+    d.hsPda = _hsPda;
+    d.shock = _shock;
+    d.vasoactiveSupport = _vasoactiveSupport;
+    d.vasoactiveDrugs = List.of(_vasoactiveDrugs);
+    d.fluidBolus =
+        _fluidBolusCtrl.text.trim().isEmpty ? null : _fluidBolusCtrl.text.trim();
+    d.cranialUsg = _cranialUsg;
+    d.ivh = _ivh;
+    d.ivhGrade = _ivhGrade;
+    d.cpvlConfirmed = _cpvlConfirmed;
+    d.ventriculomegaly = _ventriculomegaly;
+    d.clinicalSeizures = _clinicalSeizures;
+    d.eegSeizures = _eegSeizures;
+    d.aedsGiven = _aedsGiven;
+    d.nonIvhIch = _nonIvhIch;
+    return d;
+  }
+
+  Future<void> _selectDay1Date() async {
+    if (_day1Locked) {
+      _toast('Day 1 Date is locked once daily logs exist', error: true);
+      return;
+    }
+    final picked = await showModernDatePicker(
+      context: context,
+      initialDate: _day1Date ?? DateTime.now(),
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now().add(const Duration(days: 1)),
+    );
+    if (picked == null) return;
+    final ymd =
+        '${picked.year.toString().padLeft(4, '0')}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}';
+    try {
+      await _api.saveDay1Date(widget.enrollmentId.trim(), ymd);
+      setState(() {
+        _day1Date = DateTime(picked.year, picked.month, picked.day);
+        _recomputeTodayNicuDay();
+        _activeDay = _defaultActiveDay();
+      });
+      await _loadActiveDay();
+    } catch (e) {
+      _toast('Could not save Day 1 Date: $e', error: true);
+    }
+  }
+
+  Future<void> _switchDay(int day) async {
+    if (day == _activeDay) return;
+    if (_day1Date != null && day > _todayNicuDay) {
+      _toast('Day $day is not available yet');
+      return;
+    }
+    setState(() => _activeDay = day);
+    await _loadActiveDay();
+  }
+
+  Future<void> _addDay() async {
+    setState(() => _totalDays += 1);
+  }
+
+  Future<void> _copyPrevious() async {
+    if (!_isFieldEditable || _activeDay <= 1) return;
+    try {
+      final raw = await _api.loadRespCvNeuroDay(
+          widget.enrollmentId.trim(), _activeDay - 1);
+      if (raw == null) {
+        _toast('No data on Day ${_activeDay - 1} to copy', error: true);
+        return;
+      }
+      final src = RespCvNeuroDay.fromJson(raw);
+      final cur = _buildModel()..copyClinicalFrom(src);
+      setState(() {
+        _applyDay(cur);
+        _recordExists = false; // force re-save as draft for this day
+        _isEditing = true;
+      });
+      _toast('Copied clinical fields from Day ${_activeDay - 1}');
+    } catch (e) {
+      _toast('Copy failed: $e', error: true);
+    }
+  }
+
+  Future<bool> _save({bool forLater = false, bool force = false}) async {
+    if (_dayLoadFailed) {
+      _toast('Day failed to load — switch day or reopen form before saving',
+          error: true);
+      return false;
+    }
+    if (!force && !_isFieldEditable && !_isEditing) return false;
+    if (_isFutureDay || _isSubmitted) return false;
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) return false;
+    if (_day1Date == null) {
+      _toast('Set Day 1 Date first', error: true);
+      return false;
+    }
+
+    setState(() => _saving = true);
+    try {
+      final name = await _nurseName();
+      final now = DateTime.now().toUtc().toIso8601String();
+      final model = _buildModel();
+      // Clear gated children only when parent is explicitly No (not unanswered).
+      // Matches web toggle clears; avoids wiping web orphans when parent is null.
+      if (model.respiratorySupport == false) {
+        model.supportModes = [];
+        model.mapCpap = null;
+        model.mapCpapSecondary = null;
+        model.maxFio2 = null;
+        model.maxFlow = null;
+        model.suppO2 = null;
+      }
+      if (model.extubAttempted == false) model.extubFailure = null;
+      if (model.vasoactiveSupport == false) model.vasoactiveDrugs = [];
+      if (model.cranialUsg == false) {
+        model.ivh = null;
+        model.ivhGrade = null;
+        model.cpvlConfirmed = null;
+        model.ventriculomegaly = null;
+      } else if (model.ivh == false) {
+        model.ivhGrade = null;
+      }
+      final mode = RespCvNeuroValidators.mapCpapMode(model.supportModes);
+      if (mode == 'NA') {
+        model.mapCpap = null;
+        model.mapCpapSecondary = null;
+      } else if (mode != 'BOTH') {
+        model.mapCpapSecondary = null;
+      }
+
+      final body = model.toJson(
+        submissionStatus: 'draft',
+        savedAt: now,
+        savedBy: name,
+      );
+      await _api.saveRespCvNeuroDay(body, alreadyExists: _recordExists);
+      final pct = _completion.percent;
+      setState(() {
+        _recordExists = true;
+        _isEditing = false;
+        _dayStatus[_activeDay] = pct == 100 ? 'complete' : 'draft';
+        _dayPct[_activeDay] = pct;
+        _day1Locked = true;
+        _banner = forLater
+            ? 'Day $_activeDay saved for later'
+            : 'Day $_activeDay saved successfully';
+        _bannerError = false;
+      });
+      return true;
+    } catch (e) {
+      setState(() {
+        _banner = 'Save failed: $e';
+        _bannerError = true;
+      });
+      return false;
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _submit() async {
+    if (!_canSubmit) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Submit Day $_activeDay Data'),
+        content: Text(
+          'This will lock the record for Day $_activeDay.\n\n'
+          'Completion: ${_completion.percent}%\n'
+          'After submission, nurses cannot edit this day.',
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Submit & Lock')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    setState(() => _submitting = true);
+    try {
+      // Always persist current edits before locking (force bypasses read-only
+      // "saved draft" view so Submit after Save still re-saves latest values).
+      final saved = await _save(force: true);
+      if (!saved) {
+        setState(() {
+          _banner = 'Submit cancelled — save current day data first';
+          _bannerError = true;
+        });
+        return;
+      }
+      final name = await _nurseName();
+      await _api.submitRespCvNeuroDay(
+        enrollmentId: widget.enrollmentId.trim(),
+        nicuDay: _activeDay,
+        submittedBy: name,
+      );
+      setState(() {
+        _isSubmitted = true;
+        _isEditing = false;
+        _dayStatus[_activeDay] = 'submitted';
+        _banner = 'Day $_activeDay submitted and locked';
+        _bannerError = false;
+      });
+    } catch (e) {
+      setState(() {
+        _banner = 'Submit failed: $e';
+        _bannerError = true;
+      });
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  void _toast(String msg, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      backgroundColor: error ? AppTheme.of(context).danger : null,
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  // ── Build ────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     final c = AppTheme.of(context);
-
-    if (_isLoading) {
+    if (_loading) {
       return Scaffold(
         backgroundColor: c.bg,
-        body: Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            CircularProgressIndicator(color: c.primary, strokeWidth: 2),
-            const SizedBox(height: 16),
-            Text("Loading records...",
-                style: TextStyle(color: c.textTertiary, fontSize: 13)),
-          ]),
-        ),
+        appBar: _appBar(c),
+        body: const Center(child: CircularProgressIndicator()),
       );
     }
 
+    final editable = _isFieldEditable;
+    final mapMode = RespCvNeuroValidators.mapCpapMode(_supportModes);
+    final supportYes = _respiratorySupport == true;
+
     return Scaffold(
       backgroundColor: c.bg,
-      appBar: _buildAppBar(c),
-      body: TabBarView(
-        controller: _tabController,
-        children: [_buildFillTab(c), _buildHistoryTab(c)],
+      appBar: _appBar(c),
+      body: Column(
+        children: [
+          _day1Bar(c),
+          _dayChips(c),
+          _statusBanner(c),
+          if (_banner != null) _messageBanner(c),
+          Expanded(
+            child: _dayLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _isFutureDay
+                    ? _lockedPanel(c, 'Not Available Yet',
+                        'Day $_activeDay is in the future.')
+                    : ListView(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                        children: [
+                          _progressHeader(c),
+                          if (_isPastLocked && !_isSubmitted)
+                            _infoChip(c, 'Locked (Past Day)', c.warning),
+                          if (_isSubmitted)
+                            _infoChip(c, 'Submitted — locked', c.success),
+                          if (_recordExists &&
+                              !_isEditing &&
+                              !_isSubmitted &&
+                              !_isPastLocked)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: OutlinedButton.icon(
+                                onPressed: () =>
+                                    setState(() => _isEditing = true),
+                                icon: const Icon(Icons.edit_outlined, size: 18),
+                                label: Text('Edit Day $_activeDay'),
+                              ),
+                            ),
+                          if (editable && _activeDay > 1)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: TextButton.icon(
+                                onPressed: _copyPrevious,
+                                icon: const Icon(Icons.copy_all_outlined,
+                                    size: 18),
+                                label: const Text('Copy from previous day'),
+                              ),
+                            ),
+                          _weightField(c, editable),
+                          _section(
+                            c,
+                            title: 'Respiratory Assessment',
+                            icon: Icons.air_rounded,
+                            color: c.primary,
+                            children: _respiratoryFields(
+                                c, editable, supportYes, mapMode),
+                          ),
+                          _section(
+                            c,
+                            title: 'Cardiovascular Assessment',
+                            icon: Icons.favorite_rounded,
+                            color: c.danger,
+                            children: _cvFields(c, editable),
+                          ),
+                          _section(
+                            c,
+                            title: 'Neurological Assessment',
+                            icon: Icons.psychology_rounded,
+                            color: c.purple,
+                            children: _neuroFields(c, editable),
+                          ),
+                        ],
+                      ),
+          ),
+        ],
       ),
+      bottomNavigationBar: _bottomBar(c),
     );
   }
 
-  // ── APP BAR ────────────────────────────────────────────────────────────────
-
-  AppBar _buildAppBar(AppColors c) {
-    final progress = _dayProgress();
+  AppBar _appBar(AppColors c) {
     return AppBar(
-      backgroundColor : c.surface,
-      elevation       : 0,
+      backgroundColor: c.surface,
+      elevation: 0,
       surfaceTintColor: Colors.transparent,
-      titleSpacing    : 16,
-      title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(widget.babyUid,
-            style: TextStyle(color: c.primary, fontSize: 13,
-                fontWeight: FontWeight.w800, letterSpacing: 1.1)),
-        Text(
-          "${widget.motherName}  |  ${widget.enrollmentId}  |  ${widget.gestation}",
-          style: TextStyle(color: c.textTertiary, fontSize: 11),
-        ),
-      ]),
-      actions: [
-        const Padding(
+      toolbarHeight: 66,
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(1),
+        child: Container(height: 1, color: c.borderLight),
+      ),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            widget.babyUid.isEmpty ? 'HELPER FORM 2' : widget.babyUid,
+            style: TextStyle(
+              color: c.primary,
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1.1,
+            ),
+          ),
+          Text(
+            'Resp / CV / Neuro Daily Log · ${widget.motherName.isEmpty ? widget.enrollmentId : widget.motherName}',
+            style: TextStyle(color: c.textTertiary, fontSize: 11),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+      actions: const [
+        Padding(
           padding: EdgeInsets.only(right: 8),
           child: Center(child: ThemeToggle()),
         ),
       ],
-      bottom: PreferredSize(
-        preferredSize: const Size.fromHeight(80),
-        child: Column(children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Row(children: [
+    );
+  }
+
+  Widget _day1Bar(AppColors c) {
+    final label = _day1Date == null
+        ? 'Not set'
+        : '${_day1Date!.day.toString().padLeft(2, '0')} '
+            '${_month(_day1Date!.month)} ${_day1Date!.year}';
+    return Container(
+      color: c.surface,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: Row(
+        children: [
+          Text('Day 1 Date',
+              style: TextStyle(
+                  color: c.textSecondary,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton(
+              onPressed: _day1Locked ? null : _selectDay1Date,
+              child: Text(label),
+            ),
+          ),
+          if (_day1Locked)
+            Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: Icon(Icons.lock_outline, size: 18, color: c.textTertiary),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _dayChips(AppColors c) {
+    return Container(
+      color: c.surface,
+      height: 72,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        itemCount: _totalDays + 1,
+        itemBuilder: (_, i) {
+          if (i == _totalDays) {
+            return Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: ActionChip(
+                label: const Text('+ Day'),
+                onPressed: _addDay,
+              ),
+            );
+          }
+          final day = i + 1;
+          final selected = day == _activeDay;
+          final future = _day1Date != null && day > _todayNicuDay;
+          final st = _dayStatus[day] ?? 'empty';
+          final cal = _calendarForDay(day);
+          final dateLabel = cal == null
+              ? ''
+              : '${cal.day} ${_month(cal.month)}';
+          Color dot;
+          switch (st) {
+            case 'submitted':
+              dot = c.success;
+              break;
+            case 'complete':
+              dot = c.primary;
+              break;
+            case 'draft':
+            case 'late':
+              dot = c.warning;
+              break;
+            default:
+              dot = c.border;
+          }
+          return Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: ChoiceChip(
+              selected: selected,
+              label: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                            color: dot, shape: BoxShape.circle),
+                      ),
+                      const SizedBox(width: 4),
+                      Text('D$day',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w800, fontSize: 12)),
+                      if (future) ...[
+                        const SizedBox(width: 2),
+                        const Icon(Icons.lock, size: 12),
+                      ],
+                    ],
+                  ),
+                  if (dateLabel.isNotEmpty)
+                    Text(dateLabel,
+                        style: TextStyle(
+                            fontSize: 9, color: c.textTertiary)),
+                ],
+              ),
+              onSelected: future ? null : (_) => _switchDay(day),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _statusBanner(AppColors c) {
+    if (_day1Date == null) {
+      return Container(
+        width: double.infinity,
+        color: c.warningSoft,
+        padding: const EdgeInsets.all(10),
+        child: Text('Set Day 1 Date to enable NICU day logging.',
+            style: TextStyle(color: c.warning, fontSize: 12)),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  Widget _messageBanner(AppColors c) {
+    return Container(
+      width: double.infinity,
+      color: _bannerError ? c.dangerSoft : c.successSoft,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      child: Text(_banner!,
+          style: TextStyle(
+              color: _bannerError ? c.danger : c.success, fontSize: 12)),
+    );
+  }
+
+  Widget _progressHeader(AppColors c) {
+    final pct = _completion.percent;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 52,
+            height: 52,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                CircularProgressIndicator(
+                  value: pct / 100,
+                  strokeWidth: 5,
+                  backgroundColor: c.borderLight,
+                  color: pct == 100 ? c.success : c.primary,
+                ),
+                Text('$pct%',
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        color: c.textPrimary)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Day $_activeDay',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 16,
+                        color: c.textPrimary)),
+                Text(
+                  '${_completion.answered}/${_completion.total} fields · Gestation ${widget.gestation}',
+                  style: TextStyle(color: c.textTertiary, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoChip(AppColors c, String text, Color color) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.lock_outline, size: 16, color: color),
+          const SizedBox(width: 8),
+          Text(text,
+              style: TextStyle(
+                  color: color, fontWeight: FontWeight.w700, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  Widget _lockedPanel(AppColors c, String title, String body) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.lock_clock_outlined, size: 48, color: c.textTertiary),
+            const SizedBox(height: 12),
+            Text(title,
+                style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 18,
+                    color: c.textPrimary)),
+            const SizedBox(height: 6),
+            Text(body,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: c.textSecondary)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _weightField(AppColors c, bool editable) {
+    final err = RespCvNeuroValidators.weightEntries(_weightCtrl.text);
+    return _fieldCard(
+      c,
+      number: '2.1',
+      label: 'Weight',
+      hint: '(all measured weights of the day, chronologically)',
+      child: _textField(_weightCtrl, c,
+          enabled: editable,
+          hint: 'e.g. 1250g, 1245g or 1.25kg',
+          error: err),
+    );
+  }
+
+  List<Widget> _respiratoryFields(
+    AppColors c,
+    bool editable,
+    bool supportYes,
+    String? mapMode,
+  ) {
+    final isBoth = mapMode == 'BOTH';
+    final isNa = mapMode == 'NA';
+    final mapFieldLabel = isBoth
+        ? 'Max MAP'
+        : mapMode == 'MAP'
+            ? 'Max MAP'
+            : mapMode == 'CPAP'
+                ? 'Max CPAP'
+                : 'Max CPAP/MAP';
+    final mapErr = isNa
+        ? null
+        : RespCvNeuroValidators.mapCpap(
+            _mapCpapCtrl.text, isBoth ? 'MAP' : mapMode);
+    final mapSecErr = isBoth
+        ? RespCvNeuroValidators.mapCpap(_mapCpapSecCtrl.text, 'CPAP')
+        : null;
+
+    final severeErr = RespCvNeuroValidators.count(_severeDesatCtrl.text,
+            max: 50, label: 'Severe desaturation count') ??
+        ((_desatCtrl.text.trim().isNotEmpty &&
+                _severeDesatCtrl.text.trim().isNotEmpty &&
+                (double.tryParse(_severeDesatCtrl.text) ?? 0) >
+                    (double.tryParse(_desatCtrl.text) ?? 0))
+            ? "Severe desaturations can't exceed total desaturations (#14)"
+            : null);
+
+    return [
+      _yn('1. Respiratory support', _respiratorySupport, editable, (v) {
+        setState(() {
+          _respiratorySupport = v;
+          if (v != true) {
+            _supportModes = [];
+            _mapCpapCtrl.clear();
+            _mapCpapSecCtrl.clear();
+            _maxFio2Ctrl.clear();
+            _maxFlowCtrl.clear();
+            _suppO2 = null;
+          }
+        });
+      }, c),
+      _yn('2. Endotracheally intubated', _endotrachealIntubation, editable,
+          (v) => setState(() => _endotrachealIntubation = v), c),
+      _fieldCard(
+        c,
+        number: '3',
+        label: 'Mode',
+        hint: supportYes
+            ? 'NC, HFNC, CPAP, NIPPV, SIMV, A/C, PSV, HFOV — select all that apply'
+            : 'Enabled once Respiratory support (#1) is Yes',
+        child: _pills(
+          RespCvNeuroDay.supportModeOptions,
+          _supportModes,
+          editable && supportYes,
+          (next) {
+            setState(() {
+              _supportModes = next;
+              final m = RespCvNeuroValidators.mapCpapMode(next);
+              if (m == 'NA') _mapCpapCtrl.clear();
+              if (m != 'BOTH') _mapCpapSecCtrl.clear();
+            });
+          },
+          c,
+          labels: const {
+            'AC': 'A/C',
+          },
+        ),
+      ),
+      if (isNa)
+        _fieldCard(c,
+            number: '4',
+            label: 'Max CPAP/MAP',
+            child: Text('NA — mode doesn\'t generate pressure',
+                style: TextStyle(color: c.textTertiary, fontSize: 13)))
+      else ...[
+        if (isBoth)
+          _fieldCard(
+            c,
+            number: '4',
+            label: 'Max CPAP',
+            child: _textField(_mapCpapSecCtrl, c,
+                enabled: editable && supportYes,
+                keyboard: const TextInputType.numberWithOptions(decimal: true),
+                hint: 'cm H₂O',
+                error: mapSecErr),
+          ),
+        _fieldCard(
+          c,
+          number: isBoth ? '4b' : '4',
+          label: mapFieldLabel,
+          child: _textField(_mapCpapCtrl, c,
+              enabled: editable && supportYes,
+              keyboard: const TextInputType.numberWithOptions(decimal: true),
+              hint: 'cm H₂O',
+              error: mapErr),
+        ),
+      ],
+      _fieldCard(
+        c,
+        number: '5',
+        label: 'Max FiO₂',
+        child: _textField(_maxFio2Ctrl, c,
+            enabled: editable && supportYes,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+            hint: '21',
+            error: supportYes
+                ? RespCvNeuroValidators.maxFio2(_maxFio2Ctrl.text)
+                : null),
+      ),
+      _fieldCard(
+        c,
+        number: '6',
+        label: 'Max Gas Flow',
+        child: _textField(_maxFlowCtrl, c,
+            enabled: editable && supportYes,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+            hint: 'L/min',
+            error: supportYes
+                ? RespCvNeuroValidators.maxFlow(_maxFlowCtrl.text)
+                : null),
+      ),
+      _yn('7. Supplemental O₂ >21% (any)', _suppO2, editable && supportYes,
+          (v) => setState(() => _suppO2 = v), c,
+          hint: supportYes ? null : 'Enabled once #1 is Yes'),
+      _fieldCard(
+        c,
+        number: '8',
+        label: 'pH',
+        hint: '(lowest of the day)',
+        child: _textField(_phCtrl, c,
+            enabled: editable,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+            hint: '7.25',
+            error: RespCvNeuroValidators.ph(_phCtrl.text)),
+      ),
+      _bloodGasField(
+        c,
+        number: '9',
+        label: 'PaO₂',
+        unit: '(mmHg)',
+        low: _pao2LowCtrl,
+        high: _pao2HighCtrl,
+        notDone: _pao2NotDone,
+        editable: editable,
+        min: 20,
+        max: 600,
+        onNotDone: (v) => setState(() {
+          _pao2NotDone = v;
+          if (v) {
+            _pao2LowCtrl.clear();
+            _pao2HighCtrl.clear();
+          }
+        }),
+      ),
+      _bloodGasField(
+        c,
+        number: '10',
+        label: 'PaCO₂',
+        unit: '(mmHg)',
+        low: _paco2LowCtrl,
+        high: _paco2HighCtrl,
+        notDone: _paco2NotDone,
+        editable: editable,
+        min: 15,
+        max: 150,
+        onNotDone: (v) => setState(() {
+          _paco2NotDone = v;
+          if (v) {
+            _paco2LowCtrl.clear();
+            _paco2HighCtrl.clear();
+          }
+        }),
+      ),
+      _yn('11. Surfactant given', _surfactant, editable,
+          (v) => setState(() => _surfactant = v), c),
+      _yn('12. Caffeine', _caffeine, editable,
+          (v) => setState(() => _caffeine = v), c),
+      _fieldCard(
+        c,
+        number: '13',
+        label: 'No of Apnea episodes',
+        child: _textField(_apneaCtrl, c,
+            enabled: editable,
+            keyboard: TextInputType.number,
+            error: RespCvNeuroValidators.count(_apneaCtrl.text,
+                max: 50, label: 'Apnea episode count')),
+      ),
+      _fieldCard(
+        c,
+        number: '14',
+        label: 'No of Desaturations (<91%)',
+        child: _textField(_desatCtrl, c,
+            enabled: editable,
+            keyboard: TextInputType.number,
+            error: RespCvNeuroValidators.count(_desatCtrl.text,
+                max: 50, label: 'Desaturation count')),
+      ),
+      _fieldCard(
+        c,
+        number: '15',
+        label: 'No of severe desaturations (<80%)',
+        child: _textField(_severeDesatCtrl, c,
+            enabled: editable,
+            keyboard: TextInputType.number,
+            error: severeErr),
+      ),
+      _yn('16. Extubation attempted', _extubAttempted, editable, (v) {
+        setState(() {
+          _extubAttempted = v;
+          if (v != true) _extubFailure = null;
+        });
+      }, c),
+      _yn(
+        '17. Extubation failure (<72h from extubation)',
+        _extubFailure,
+        editable && _extubAttempted == true,
+        (v) => setState(() => _extubFailure = v),
+        c,
+        hint: _extubAttempted == true
+            ? null
+            : 'Enabled once Extubation attempted (#16) is Yes',
+      ),
+      _yn('18. Pulmonary hemorrhage', _pulmHemorrhage, editable,
+          (v) => setState(() => _pulmHemorrhage = v), c),
+      _yn('19. Pneumothorax', _pneumothorax, editable,
+          (v) => setState(() => _pneumothorax = v), c),
+      _yn('20. Chest drain in situ', _chestDrain, editable,
+          (v) => setState(() => _chestDrain = v), c),
+      _yn('21. Pulmonary HTN (PPHN)', _pphn, editable,
+          (v) => setState(() => _pphn = v), c),
+      _yn('22. Postnatal steroids', _postnatalSteroids, editable,
+          (v) => setState(() => _postnatalSteroids = v), c),
+    ];
+  }
+
+  List<Widget> _cvFields(AppColors c, bool editable) {
+    return [
+      _yn('23. PDA suspected/confirmed', _pdaSuspected, editable,
+          (v) => setState(() => _pdaSuspected = v), c),
+      _yn('24. Echo done', _echoDone, editable,
+          (v) => setState(() => _echoDone = v), c),
+      _yn('25. HS-PDA', _hsPda, editable, (v) => setState(() => _hsPda = v),
+          c),
+      _yn('26. Shock', _shock, editable, (v) => setState(() => _shock = v),
+          c),
+      _yn('27. Vasoactives', _vasoactiveSupport, editable, (v) {
+        setState(() {
+          _vasoactiveSupport = v;
+          if (v != true) _vasoactiveDrugs = [];
+        });
+      }, c),
+      if (_vasoactiveSupport == true)
+        _fieldCard(
+          c,
+          number: '28',
+          label: 'Vasoactive type (select all that apply)',
+          child: _pills(
+            RespCvNeuroDay.vasoactiveDrugOptions,
+            _vasoactiveDrugs,
+            editable,
+            (next) => setState(() => _vasoactiveDrugs = next),
+            c,
+          ),
+        ),
+      _fieldCard(
+        c,
+        number: '29',
+        label: 'Fluid bolus',
+        child: _textField(_fluidBolusCtrl, c,
+            enabled: editable,
+            hint: 'e.g. 10ml/kg NS',
+            error: RespCvNeuroValidators.fluidBolus(_fluidBolusCtrl.text)),
+      ),
+    ];
+  }
+
+  List<Widget> _neuroFields(AppColors c, bool editable) {
+    final usgYes = _cranialUsg == true;
+    return [
+      _yn('30. Cranial USG done', _cranialUsg, editable, (v) {
+        setState(() {
+          _cranialUsg = v;
+          if (v != true) {
+            _ivh = null;
+            _ivhGrade = null;
+            _cpvlConfirmed = null;
+            _ventriculomegaly = null;
+          }
+        });
+      }, c),
+      if (usgYes) ...[
+        _yn('31. IVH (any grade)', _ivh, editable, (v) {
+          setState(() {
+            _ivh = v;
+            if (v != true) _ivhGrade = null;
+          });
+        }, c),
+        if (_ivh == true)
+          _fieldCard(
+            c,
+            number: '',
+            label: 'IVH Grade',
+            child: Wrap(
+              spacing: 8,
+              children: RespCvNeuroDay.ivhGradeOptions.map((g) {
+                final sel = _ivhGrade == g;
+                return ChoiceChip(
+                  label: Text(g),
+                  selected: sel,
+                  onSelected: !editable
+                      ? null
+                      : (_) => setState(
+                          () => _ivhGrade = sel ? null : g),
+                );
+              }).toList(),
+            ),
+          ),
+        _yn('32. cPVL (any grade)', _cpvlConfirmed, editable,
+            (v) => setState(() => _cpvlConfirmed = v), c),
+        _yn('33. Ventriculomegaly', _ventriculomegaly, editable,
+            (v) => setState(() => _ventriculomegaly = v), c),
+      ],
+      _yn('34. Seizures (clinical)', _clinicalSeizures, editable,
+          (v) => setState(() => _clinicalSeizures = v), c),
+      _yn('35. Seizures (EEG confirmed)', _eegSeizures, editable,
+          (v) => setState(() => _eegSeizures = v), c),
+      _yn('36. AEDs given', _aedsGiven, editable,
+          (v) => setState(() => _aedsGiven = v), c),
+      _yn('37. Non-IVH ICH', _nonIvhIch, editable,
+          (v) => setState(() => _nonIvhIch = v), c),
+    ];
+  }
+
+  Widget _bottomBar(AppColors c) {
+    final canEdit = _isFieldEditable ||
+        (_recordExists && !_isSubmitted && !_isPastLocked && !_isFutureDay);
+    return SafeArea(
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border(top: BorderSide(color: c.borderLight)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 10,
+              offset: const Offset(0, -3),
+            )
+          ],
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: (_saving || !canEdit || _isSubmitted)
+                    ? null
+                    : () {
+                        setState(() => _isEditing = true);
+                        _save(forLater: true);
+                      },
+                child: const Text('Save for Later'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: (_saving || !canEdit || _isSubmitted)
+                    ? null
+                    : () {
+                        setState(() => _isEditing = true);
+                        _save();
+                      },
+                style: ElevatedButton.styleFrom(backgroundColor: c.primary),
+                child: Text(
+                  _saving ? 'Saving…' : 'Save',
+                  style: const TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+            if (_canSubmit) ...[
+              const SizedBox(width: 8),
               Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value          : progress,
-                    minHeight      : 5,
-                    backgroundColor: c.border,
-                    valueColor     : AlwaysStoppedAnimation(
-                        progress == 1.0 ? c.success : c.primary),
+                child: ElevatedButton(
+                  onPressed: _submitting ? null : _submit,
+                  style: ElevatedButton.styleFrom(backgroundColor: c.success),
+                  child: Text(
+                    _submitting ? '…' : 'Submit',
+                    style: const TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.w700),
                   ),
                 ),
               ),
-              const SizedBox(width: 10),
-              Text(
-                "$_totalFilled filled today",
-                style: TextStyle(
-                    color: progress == 1.0 ? c.success : c.textTertiary,
-                    fontSize: 11, fontWeight: FontWeight.w600),
-              ),
-            ]),
-          ),
-          Container(
-            decoration: BoxDecoration(
-              border: Border(bottom: BorderSide(color: c.borderLight)),
-            ),
-            child: TabBar(
-              controller          : _tabController,
-              indicatorColor      : c.primary,
-              indicatorWeight     : 2,
-              labelColor          : c.primary,
-              unselectedLabelColor: c.textTertiary,
-              labelStyle: const TextStyle(
-                  fontWeight: FontWeight.bold, fontSize: 13),
-              tabs: [
-                Tab(
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    const Icon(Icons.edit_note_rounded, size: 17),
-                    const SizedBox(width: 6),
-                    const Text("Fill Form"),
-                    if (_filledDraft.isNotEmpty) ...[
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: c.warning.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text("${_filledDraft.length}",
-                            style: TextStyle(color: c.warning,
-                                fontSize: 10, fontWeight: FontWeight.bold)),
-                      ),
-                    ],
-                  ]),
-                ),
-                Tab(
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    const Icon(Icons.history_edu_rounded, size: 17),
-                    const SizedBox(width: 6),
-                    const Text("History"),
-                    if (_records.isNotEmpty) ...[
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: c.primary.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text("${_records.length}",
-                            style: TextStyle(color: c.primary,
-                                fontSize: 10, fontWeight: FontWeight.bold)),
-                      ),
-                    ],
-                  ]),
-                ),
-              ],
-            ),
-          ),
-        ]),
-      ),
-    );
-  }
-
-  // ── FILL TAB ───────────────────────────────────────────────────────────────
-
-  Widget _buildFillTab(AppColors c) {
-    return Column(children: [
-      Expanded(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(14, 18, 14, 100),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildStatusBanner(c),
-              _buildNurseCard(c),
-              const SizedBox(height: 6),
-              ...kSections.entries
-                  .map((e) => _buildSection(e.key, e.value, c)),
             ],
-          ),
-        ),
-      ),
-      _buildSaveBar(c),
-    ]);
-  }
-
-  // ── Status banner ──────────────────────────────────────────────────────────
-
-  Widget _buildStatusBanner(AppColors c) {
-    final filled = _todayRecord.fields.length;
-    final total  = kAllFields.length;
-
-    if (filled == 0) {
-      return _infoBanner(Icons.wb_sunny_outlined, c.primary,
-          "No fields filled yet today. Be the first to add data.", c);
-    }
-
-    final contributors = _todayRecord.fields.values
-        .map((v) => v.filledBy).toSet().toList();
-
-    if (filled >= total) {
-      return _infoBanner(Icons.check_circle_outline, c.success,
-          "All fields complete for today. Filled by: ${contributors.join(', ')}", c);
-    }
-
-    return _infoBanner(
-      Icons.pending_outlined, c.warning,
-      "$filled / $total fields filled today by ${contributors.join(', ')}. "
-      "${total - filled} remaining.", c,
-    );
-  }
-
-  // ── Nurse dropdown card ────────────────────────────────────────────────────
-
-  Widget _buildNurseCard(AppColors c) {
-    final nurseSelected = _selectedNurse != 'Select' && _selectedNurse.isNotEmpty;
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: c.border),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04),
-            blurRadius: 8, offset: const Offset(0, 2))],
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-
-        // Label row
-        Row(children: [
-          Icon(Icons.badge_outlined, color: c.primary, size: 16),
-          const SizedBox(width: 8),
-          Text("Your name (required before saving)",
-              style: TextStyle(color: c.textSecondary,
-                  fontSize: 12, fontWeight: FontWeight.w600)),
-          const Spacer(),
-          // Site chip — shows which site's nurses are loaded
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: c.primarySoft,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: c.primary.withOpacity(0.3)),
-            ),
-            child: Text(widget.site,
-                style: TextStyle(color: c.primary,
-                    fontSize: 11, fontWeight: FontWeight.w700)),
-          ),
-        ]),
-        const SizedBox(height: 10),
-
-        // Dropdown — same items pattern as Form A (_nursesBySite)
-        Container(
-          height: 48,
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          decoration: BoxDecoration(
-            color: c.surfaceAlt,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: nurseSelected
-                  ? c.primary.withOpacity(0.5) : c.border,
-              width: nurseSelected ? 1.5 : 1,
-            ),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              value: _selectedNurse,
-              dropdownColor: c.surface,
-              style: TextStyle(color: c.textPrimary,
-                  fontSize: 13, fontWeight: FontWeight.w600),
-              icon: Icon(Icons.keyboard_arrow_down_rounded,
-                  color: nurseSelected ? c.primary : c.textTertiary, size: 20),
-              isExpanded: true,
-              items: [
-                // "Select" placeholder
-                DropdownMenuItem(
-                  value: 'Select',
-                  child: Text("Select your name",
-                      style: TextStyle(color: c.textTertiary, fontSize: 13)),
-                ),
-                // Site-specific nurses
-                ..._siteNurses.map((name) {
-                  final isSel = name == _selectedNurse;
-                  return DropdownMenuItem(
-                    value: name,
-                    child: Row(children: [
-                      if (isSel)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 8),
-                          child: Icon(Icons.check_circle_rounded,
-                              color: c.primary, size: 16),
-                        ),
-                      Text(name,
-                          style: TextStyle(
-                            color: isSel ? c.primary : c.textPrimary,
-                            fontWeight: isSel
-                                ? FontWeight.bold : FontWeight.normal,
-                          )),
-                    ]),
-                  );
-                }),
-              ],
-              onChanged: (val) async {
-                if (val == null || val == 'Select') return;
-                setState(() => _selectedNurse = val);
-                await _Storage.saveLastNurse(val);
-              },
-            ),
-          ),
-        ),
-
-        // Empty roster warning
-        if (_siteNurses.isEmpty) ...[
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: c.warningSoft,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: c.warning.withOpacity(0.3)),
-            ),
-            child: Row(children: [
-              Icon(Icons.info_outline, color: c.warning, size: 14),
-              const SizedBox(width: 8),
-              Expanded(child: Text(
-                "No nurses configured for site \"${widget.site}\". "
-                "Update kNursesBySite in the source file.",
-                style: TextStyle(color: c.textSecondary, fontSize: 11),
-              )),
-            ]),
-          ),
-        ],
-
-        // Unsaved fields counter
-        if (_filledDraft.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: c.warning.withOpacity(0.07),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: c.warning.withOpacity(0.2)),
-            ),
-            child: Row(children: [
-              Icon(Icons.edit_note_rounded, color: c.warning, size: 16),
-              const SizedBox(width: 8),
-              Text("${_filledDraft.length} field(s) ready to save",
-                  style: TextStyle(color: c.warning,
-                      fontWeight: FontWeight.bold, fontSize: 13)),
-            ]),
-          ),
-        ],
-      ]),
-    );
-  }
-
-  // ── Section card ───────────────────────────────────────────────────────────
-
-  Widget _buildSection(
-      String title, List<FieldDef> fields, AppColors c) {
-    final sectionColor  = _sectionColor(title, c);
-    // Count only currently-enabled fields for the "X / Y" badge
-    final enabledFields = fields.where(_isFieldEnabled).toList();
-    final locked        = enabledFields.where((fd) => _isLocked(fd.key)).length;
-    final total         = enabledFields.length;
-    final allDone       = total > 0 && locked >= total;
-    final draftedHere   = fields
-        .where((fd) =>
-            !_isLocked(fd.key) &&
-            _isFieldEnabled(fd) &&
-            (_draft[fd.key] ?? '').isNotEmpty)
-        .length;
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: sectionColor.withOpacity(0.15)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04),
-            blurRadius: 8, offset: const Offset(0, 2))],
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-
-        // Section header
-        Container(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-          decoration: BoxDecoration(
-            color: sectionColor.withOpacity(0.07),
-            borderRadius:
-                const BorderRadius.vertical(top: Radius.circular(20)),
-            border: Border(
-                bottom: BorderSide(color: sectionColor.withOpacity(0.12))),
-          ),
-          child: Row(children: [
-            Container(width: 3, height: 18,
-                decoration: BoxDecoration(color: sectionColor,
-                    borderRadius: BorderRadius.circular(2))),
-            const SizedBox(width: 10),
-            Text(title,
-                style: TextStyle(color: sectionColor,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13, letterSpacing: 0.8)),
-            const Spacer(),
-            if (draftedHere > 0) ...[
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                    color: c.warning.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(20)),
-                child: Text("$draftedHere unsaved",
-                    style: TextStyle(color: c.warning,
-                        fontSize: 10, fontWeight: FontWeight.bold)),
-              ),
-              const SizedBox(width: 8),
-            ],
-            Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 10, vertical: 3),
-              decoration: BoxDecoration(
-                  color: allDone
-                      ? c.successSoft
-                      : sectionColor.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(20)),
-              child: Text("$locked / $total",
-                  style: TextStyle(
-                      color: allDone ? c.success : sectionColor,
-                      fontSize: 11, fontWeight: FontWeight.bold)),
-            ),
-          ]),
-        ),
-
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
-          child: Column(
-            children: fields
-                .map((fd) => _buildFieldRow(fd, sectionColor, c))
-                .toList(),
-          ),
-        ),
-      ]),
-    );
-  }
-
-  // ── Field row ──────────────────────────────────────────────────────────────
-
-  Widget _buildFieldRow(
-      FieldDef fd, Color sectionColor, AppColors c) {
-    final locked   = _isLocked(fd.key);
-    final enabled  = _isFieldEnabled(fd);
-    final hasDraft = !locked && (_draft[fd.key] ?? '').isNotEmpty;
-    final lockedBy = locked ? _todayRecord.fields[fd.key]!.filledBy : null;
-    final lockedAt = locked ? _todayRecord.fields[fd.key]!.filledAt : null;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Container(
-            width: 6, height: 6,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: locked
-                  ? c.success
-                  : hasDraft
-                      ? c.warning
-                      : c.border,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(fd.key,
-                style: TextStyle(
-                    color: locked
-                        ? c.textPrimary
-                        : enabled
-                            ? c.textSecondary
-                            : c.textTertiary.withOpacity(0.5),
-                    fontWeight: FontWeight.w500,
-                    fontSize: 13)),
-          ),
-          if (locked && lockedBy != null)
-            _lockedBadge(lockedBy, lockedAt!, c),
-        ]),
-        const SizedBox(height: 8),
-        if (!enabled && !locked)
-          _disabledPlaceholder(fd.enabledWhen ?? '', c)
-        else
-          _buildInputWidget(fd, sectionColor, locked, c),
-      ]),
-    );
-  }
-
-  Widget _lockedBadge(String nurse, DateTime at, AppColors c) {
-    final h = at.hour.toString().padLeft(2, '0');
-    final m = at.minute.toString().padLeft(2, '0');
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: c.successSoft,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: c.success.withOpacity(0.2)),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.lock_outline_rounded,
-            size: 10, color: c.success.withOpacity(0.7)),
-        const SizedBox(width: 4),
-        Text("$nurse  $h:$m",
-            style: TextStyle(color: c.success.withOpacity(0.8),
-                fontSize: 10, fontWeight: FontWeight.w600)),
-      ]),
-    );
-  }
-
-  Widget _disabledPlaceholder(String parentKey, AppColors c) {
-    return Container(
-      height: 42,
-      decoration: BoxDecoration(
-        color: c.surfaceAlt.withOpacity(0.5),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: c.borderLight),
-      ),
-      child: Center(
-        child: Text("Fill '$parentKey' first",
-            style: TextStyle(
-                color: c.textTertiary.withOpacity(0.5), fontSize: 11)),
-      ),
-    );
-  }
-
-  Widget _buildInputWidget(
-      FieldDef fd, Color sectionColor, bool locked, AppColors c) {
-    switch (fd.type) {
-      case FieldType.yesNo:
-        return _buildYesNo(fd.key, locked, c);
-      case FieldType.chips:
-        return _buildChips(fd.key, fd.options!, sectionColor, locked, c);
-      case FieldType.number:
-        return _buildNumberField(fd, locked, c);
-      case FieldType.text:
-        return TextFormField(
-          initialValue: _displayValue(fd.key),
-          enabled: !locked,
-          style: TextStyle(color: locked ? c.textTertiary : c.textPrimary),
-          decoration: _inputDec(fd.key, c),
-          onChanged: (v) => _setDraft(fd.key, v),
-        );
-    }
-  }
-
-  Widget _buildYesNo(String key, bool locked, AppColors c) {
-    final val = _displayValue(key);
-    return Row(children: [
-      Expanded(child: _toggleButton(
-          "Yes", Icons.check_rounded, val == "Yes",
-          c.success, locked, c, () => _setDraft(key, "Yes"))),
-      const SizedBox(width: 8),
-      Expanded(child: _toggleButton(
-          "No", Icons.close_rounded, val == "No",
-          c.danger, locked, c, () => _setDraft(key, "No"))),
-    ]);
-  }
-
-  Widget _toggleButton(
-      String label, IconData icon, bool selected,
-      Color selColor, bool locked, AppColors c, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: locked ? null : onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        decoration: BoxDecoration(
-          color: selected
-              ? selColor.withOpacity(locked ? 0.06 : 0.12) : c.surfaceAlt,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: selected
-                ? selColor.withOpacity(locked ? 0.35 : 0.8) : c.border,
-            width: selected ? 1.5 : 1,
-          ),
-        ),
-        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(icon, size: 14,
-              color: selected
-                  ? selColor.withOpacity(locked ? 0.5 : 1.0)
-                  : c.textTertiary),
-          const SizedBox(width: 5),
-          Text(label,
-              style: TextStyle(
-                  color: selected
-                      ? selColor.withOpacity(locked ? 0.5 : 1.0)
-                      : c.textTertiary,
-                  fontWeight: FontWeight.bold, fontSize: 13)),
-          if (locked && selected) ...[
-            const SizedBox(width: 6),
-            Icon(Icons.lock_outline_rounded,
-                size: 10, color: selColor.withOpacity(0.4)),
           ],
-        ]),
+        ),
       ),
     );
   }
 
-  Widget _buildChips(String key, List<String> options,
-      Color sectionColor, bool locked, AppColors c) {
-    final cur = _displayValue(key);
-    return Wrap(
-      spacing: 8, runSpacing: 8,
-      children: options.map((opt) {
-        final sel = cur == opt;
-        return GestureDetector(
-          onTap: locked ? null : () => _setDraft(key, opt),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-            decoration: BoxDecoration(
-              color: sel
-                  ? sectionColor.withOpacity(locked ? 0.06 : 0.12)
-                  : c.surfaceAlt,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: sel
-                    ? sectionColor.withOpacity(locked ? 0.35 : 0.8)
-                    : c.border,
-                width: sel ? 1.5 : 1,
-              ),
-            ),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Text(opt,
-                  style: TextStyle(
-                      color: sel
-                          ? sectionColor.withOpacity(locked ? 0.5 : 1.0)
-                          : c.textTertiary,
-                      fontWeight: FontWeight.bold, fontSize: 13)),
-              if (locked && sel) ...[
-                const SizedBox(width: 5),
-                Icon(Icons.lock_outline_rounded,
-                    size: 10, color: sectionColor.withOpacity(0.4)),
-              ],
-            ]),
-          ),
-        );
-      }).toList(),
-    );
-  }
+  // ── Small widgets ────────────────────────────────────────────────────────
 
-  Widget _buildNumberField(FieldDef fd, bool locked, AppColors c) {
-    final ctrl = TextEditingController(text: _displayValue(fd.key));
-    ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
-    return TextFormField(
-      controller  : ctrl,
-      enabled     : !locked,
-      keyboardType: TextInputType.number,
-      style       : TextStyle(color: locked ? c.textTertiary : c.textPrimary),
-      decoration  : _inputDec("Enter value", c).copyWith(
-        suffixText : fd.unit,
-        suffixStyle: TextStyle(color: c.primary),
-        suffixIcon : locked
-            ? Icon(Icons.lock_outline_rounded,
-                size: 16, color: c.success.withOpacity(0.4))
-            : null,
-      ),
-      onChanged: (v) {
-        if (fd.maxValue != null) {
-          final n = int.tryParse(v) ?? 0;
-          if (n > fd.maxValue!) {
-            ctrl.text  = fd.maxValue.toString();
-            ctrl.selection =
-                TextSelection.collapsed(offset: ctrl.text.length);
-            _setDraft(fd.key, fd.maxValue.toString());
-            return;
-          }
-        }
-        _setDraft(fd.key, v);
-      },
-    );
-  }
-
-  // ── Save bar ───────────────────────────────────────────────────────────────
-
-  Widget _buildSaveBar(AppColors c) {
-    final count = _filledDraft.length;
-    final ready = count > 0 &&
-        _selectedNurse != 'Select' &&
-        _selectedNurse.isNotEmpty;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 28),
-      decoration: BoxDecoration(
-        color: c.surface,
-        border: Border(top: BorderSide(color: c.borderLight)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05),
-            blurRadius: 10, offset: const Offset(0, -3))],
-      ),
-      child: Row(children: [
-        GestureDetector(
-          onTap: () => setState(() => _draft = {}),
-          child: Container(
-            width: 50, height: 50,
-            decoration: BoxDecoration(
-              color: c.surfaceAlt,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: c.border),
-            ),
-            child: Icon(Icons.refresh_rounded, color: c.textTertiary),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: GestureDetector(
-            onTap: _isSaving ? null : () => _save(c),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              height: 50,
-              decoration: BoxDecoration(
-                color: ready ? c.success : c.primary.withOpacity(0.4),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Center(
-                child: _isSaving
-                    ? const SizedBox(
-                        width: 20, height: 20,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
-                    : Row(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(count > 0
-                            ? Icons.save_outlined
-                            : Icons.edit_outlined,
-                            color: Colors.white, size: 18),
-                        const SizedBox(width: 8),
-                        Text(
-                          count > 0
-                              ? "Save $count field(s)"
-                              : "Fill fields above",
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14),
-                        ),
-                      ]),
-              ),
-            ),
-          ),
-        ),
-      ]),
-    );
-  }
-
-  // ── HISTORY TAB ────────────────────────────────────────────────────────────
-
-  Widget _buildHistoryTab(AppColors c) {
-    final sortedKeys = _records.keys.toList()
-      ..sort((a, b) => b.compareTo(a));
-
-    if (sortedKeys.isEmpty) {
-      return Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.history_edu_rounded, color: c.border, size: 56),
-          const SizedBox(height: 14),
-          Text("No entries yet",
-              style: TextStyle(color: c.textSecondary,
-                  fontSize: 15, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 6),
-          Text("Fill fields and save to see history here",
-              style: TextStyle(color: c.textTertiary, fontSize: 12)),
-        ]),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
-      itemCount: sortedKeys.length,
-      itemBuilder: (_, i) {
-        final record = _records[sortedKeys[i]]!;
-        return _HistoryDayCard(
-          record  : record,
-          isToday : i == 0 &&
-              _dateOnly(record.date) == _dateOnly(DateTime.now()),
-          c       : c,
-        );
-      },
-    );
-  }
-
-  // ── Shared helpers ─────────────────────────────────────────────────────────
-
-  Color _sectionColor(String title, AppColors c) {
-    switch (title) {
-      case "RESPIRATORY":    return c.primary;
-      case "CARDIOVASCULAR": return c.danger;
-      case "NEUROLOGICAL":   return c.purple;
-      default:               return c.primary;
-    }
-  }
-
-  InputDecoration _inputDec(String hint, AppColors c) => InputDecoration(
-    hintText      : hint,
-    hintStyle     : TextStyle(color: c.textTertiary, fontSize: 13),
-    filled        : true,
-    fillColor     : c.surfaceAlt,
-    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: c.border)),
-    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: c.border)),
-    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: c.primary, width: 1.5)),
-    disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: c.borderLight)),
-  );
-
-  Widget _infoBanner(
-      IconData icon, Color color, String msg, AppColors c) =>
-      Container(
-        margin: const EdgeInsets.only(bottom: 14),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.07),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withOpacity(0.25)),
-        ),
-        child: Row(children: [
-          Icon(icon, color: color, size: 18),
-          const SizedBox(width: 10),
-          Expanded(child: Text(msg,
-              style: TextStyle(
-                  color: color.withOpacity(0.9), fontSize: 12))),
-        ]),
-      );
-
-  void _toast(String msg, {required bool ok, required AppColors c}) {
-    ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      behavior       : SnackBarBehavior.floating,
-      backgroundColor: c.surface,
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: BorderSide(
-              color: (ok ? c.success : c.danger).withOpacity(0.4))),
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      content: Row(children: [
-        Icon(ok ? Icons.check_circle_outline : Icons.error_outline,
-            color: ok ? c.success : c.danger),
-        const SizedBox(width: 10),
-        Expanded(child: Text(msg,
-            style: TextStyle(color: c.textPrimary))),
-      ]),
-      duration: const Duration(seconds: 3),
-    ));
-  }
-
-  void _showSimpleDialog({
+  Widget _section(
+    AppColors c, {
     required String title,
-    required String body,
     required IconData icon,
-    required Color iconColor,
-    required AppColors c,
+    required Color color,
+    required List<Widget> children,
   }) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: c.surface,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(20)),
-        title: Row(children: [
-          Icon(icon, color: iconColor),
-          const SizedBox(width: 10),
-          Expanded(child: Text(title,
-              style: TextStyle(color: c.textPrimary,
-                  fontWeight: FontWeight.bold))),
-        ]),
-        content: Text(body,
-            style: TextStyle(color: c.textSecondary)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text("OK", style: TextStyle(color: c.primary)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── HISTORY DAY CARD ─────────────────────────────────────────────────────────
-
-class _HistoryDayCard extends StatefulWidget {
-  final DayRecord record;
-  final bool      isToday;
-  final AppColors c;
-
-  const _HistoryDayCard({
-    required this.record,
-    required this.isToday,
-    required this.c,
-  });
-
-  @override
-  State<_HistoryDayCard> createState() => _HistoryDayCardState();
-}
-
-class _HistoryDayCardState extends State<_HistoryDayCard> {
-  bool _open = false;
-
-  static const _months = [
-    '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
-
-  String _dateLabel(DateTime d) {
-    final now  = DateTime.now();
-    final diff = DateTime(now.year, now.month, now.day)
-        .difference(DateTime(d.year, d.month, d.day))
-        .inDays;
-    if (diff == 0) return "Today";
-    if (diff == 1) return "Yesterday";
-    return "${d.day} ${_months[d.month]}";
-  }
-
-  String _time(DateTime d) =>
-      "${d.hour.toString().padLeft(2, '0')}:"
-      "${d.minute.toString().padLeft(2, '0')}";
-
-  Map<String, int> _contributors() {
-    final map = <String, int>{};
-    for (final fv in widget.record.fields.values) {
-      map[fv.filledBy] = (map[fv.filledBy] ?? 0) + 1;
-    }
-    return map;
-  }
-
-  Color _sectionColor(String title, AppColors c) {
-    switch (title) {
-      case "RESPIRATORY":    return c.primary;
-      case "CARDIOVASCULAR": return c.danger;
-      case "NEUROLOGICAL":   return c.purple;
-      default:               return c.primary;
-    }
-  }
-
-  List<_ClinicalFlag> _flags(AppColors c) {
-    final get = (String k) => widget.record.fields[k]?.value ?? '';
-    final flags = <_ClinicalFlag>[];
-    if (get("Shock") == "Yes")
-      flags.add(_ClinicalFlag("SHOCK", c.danger));
-    if (get("Vasoactives") == "Yes")
-      flags.add(_ClinicalFlag("VASOACTIVE", c.warning));
-    if (get("Seizures (clinical)") == "Yes" ||
-        get("Seizures (EEG confirmed)") == "Yes")
-      flags.add(_ClinicalFlag("SEIZURES", c.warning));
-    if (get("IVH (any grade)") == "Yes") {
-      final grade = get("IVH grade");
-      flags.add(_ClinicalFlag(
-          "IVH Gr${grade.isEmpty ? '?' : grade}", c.purple));
-    }
-    if (get("Pulmonary hemorrhage") == "Yes")
-      flags.add(_ClinicalFlag("PULM HEM", c.danger));
-    if (get("Pneumothorax") == "Yes")
-      flags.add(_ClinicalFlag("PTX", c.warning));
-    if (get("Meningitis suspected") == "Yes")
-      flags.add(_ClinicalFlag("MENINGITIS", c.danger));
-    if (get("cPVL confirmed") == "Yes")
-      flags.add(_ClinicalFlag("cPVL", c.purple));
-    if (flags.isEmpty)
-      flags.add(_ClinicalFlag("Stable", c.success));
-    return flags;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c            = widget.c;
-    final r            = widget.record;
-    final label        = _dateLabel(r.date);
-    final isToday      = label == "Today";
-    final filled       = r.fields.length;
-    final total        = kAllFields.length;
-    final pct          = filled / total;
-    final contributors = _contributors();
-
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
       decoration: BoxDecoration(
         color: c.surface,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: isToday ? c.primary.withOpacity(0.3) : c.border,
-          width: isToday ? 1.5 : 1,
-        ),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04),
-            blurRadius: 8, offset: const Offset(0, 2))],
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: c.borderLight),
       ),
-      child: Column(children: [
-
-        GestureDetector(
-          onTap: () => setState(() => _open = !_open),
-          behavior: HitTestBehavior.opaque,
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Row(children: [
-
-              // Date badge
-              Container(
-                width: 52, height: 52,
-                decoration: BoxDecoration(
-                  color: isToday
-                      ? c.primary.withOpacity(0.1) : c.surfaceAlt,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: isToday
-                        ? c.primary.withOpacity(0.3) : c.border,
-                  ),
-                ),
-                child: Center(
-                  child: Text(
-                    label == "Today"   ? "TODAY"
-                    : label == "Yesterday" ? "YEST."
-                    : "${r.date.day}\n${_months[r.date.month]}",
-                    textAlign: TextAlign.center,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+            child: Row(
+              children: [
+                Icon(icon, color: color, size: 20),
+                const SizedBox(width: 8),
+                Text(title,
                     style: TextStyle(
-                      color: isToday ? c.primary : c.textSecondary,
-                      fontWeight: FontWeight.bold,
-                      fontSize: isToday ? 8 : 11,
-                      height: 1.3,
-                    ),
-                  ),
-                ),
-              ),
-
-              const SizedBox(width: 12),
-
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(children: [
-                      Expanded(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(3),
-                          child: LinearProgressIndicator(
-                            value          : pct,
-                            minHeight      : 4,
-                            backgroundColor: c.border,
-                            valueColor     : AlwaysStoppedAnimation(
-                                pct == 1.0 ? c.success : c.primary),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text("$filled/$total",
-                          style: TextStyle(
-                              color: pct == 1.0
-                                  ? c.success : c.textTertiary,
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold)),
-                    ]),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 6, runSpacing: 4,
-                      children: contributors.entries.map((e) =>
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                              color: c.surfaceAlt,
-                              borderRadius: BorderRadius.circular(8)),
-                          child: Row(mainAxisSize: MainAxisSize.min,
-                              children: [
-                            Icon(Icons.person_outline_rounded,
-                                size: 11, color: c.textTertiary),
-                            const SizedBox(width: 4),
-                            Text("${e.key} (${e.value})",
-                                style: TextStyle(
-                                    color: c.textSecondary, fontSize: 10)),
-                          ]),
-                        ),
-                      ).toList(),
-                    ),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 6, runSpacing: 4,
-                      children: _flags(c)
-                          .map((f) => _flagChip(f.label, f.color))
-                          .toList(),
-                    ),
-                  ],
-                ),
-              ),
-
-              AnimatedRotation(
-                turns: _open ? 0.5 : 0,
-                duration: const Duration(milliseconds: 200),
-                child: Icon(Icons.keyboard_arrow_down,
-                    color: c.textTertiary, size: 20),
-              ),
-            ]),
+                        fontWeight: FontWeight.w800,
+                        fontSize: 14,
+                        color: c.textPrimary)),
+              ],
+            ),
           ),
-        ),
-
-        if (_open) ...[
           Divider(height: 1, color: c.borderLight),
           Padding(
-            padding: const EdgeInsets.all(14),
-            child: _buildFullDetail(c),
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            child: Column(children: children),
           ),
         ],
-      ]),
+      ),
     );
   }
 
-  Widget _buildFullDetail(AppColors c) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: kSections.entries.map((sec) {
-        final secColor = _sectionColor(sec.key, c);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Container(width: 3, height: 14,
-                  decoration: BoxDecoration(color: secColor,
-                      borderRadius: BorderRadius.circular(2))),
-              const SizedBox(width: 8),
-              Text(sec.key,
-                  style: TextStyle(color: secColor,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 11, letterSpacing: 0.8)),
-            ]),
-            const SizedBox(height: 10),
-            ...sec.value.map((fd) {
-              final fv  = widget.record.fields[fd.key];
-              final val = fv?.value ?? '';
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(flex: 4,
-                        child: Text(fd.key,
-                            style: TextStyle(
-                                color: fv != null
-                                    ? c.textSecondary : c.textTertiary,
-                                fontSize: 12))),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      flex: 3,
-                      child: Text(
-                        val.isEmpty ? "-" : val,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: val.isEmpty
-                              ? c.textTertiary.withOpacity(0.4)
-                              : fd.type == FieldType.yesNo
-                                  ? (val == "Yes"
-                                      ? c.success : c.textSecondary)
-                                  : c.textPrimary,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                    Expanded(
-                      flex: 4,
-                      child: fv != null
-                          ? Column(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Text(fv.filledBy,
-                                    textAlign: TextAlign.right,
-                                    style: TextStyle(
-                                        color: c.success.withOpacity(0.8),
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w600)),
-                                Text(_time(fv.filledAt),
-                                    textAlign: TextAlign.right,
-                                    style: TextStyle(
-                                        color: c.textTertiary,
-                                        fontSize: 10)),
-                              ],
-                            )
-                          : Align(
-                              alignment: Alignment.centerRight,
-                              child: Text("not filled",
-                                  style: TextStyle(
-                                      color: c.textTertiary.withOpacity(0.4),
-                                      fontSize: 10)),
-                            ),
-                    ),
-                  ],
-                ),
-              );
-            }),
-            const SizedBox(height: 6),
+  Widget _fieldCard(
+    AppColors c, {
+    required String number,
+    required String label,
+    String? hint,
+    required Widget child,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            number.isEmpty ? label : '$number. $label',
+            style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 13,
+                color: c.textPrimary),
+          ),
+          if (hint != null) ...[
+            const SizedBox(height: 2),
+            Text(hint,
+                style: TextStyle(fontSize: 11, color: c.textTertiary)),
           ],
+          const SizedBox(height: 6),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _yn(
+    String label,
+    bool? value,
+    bool enabled,
+    ValueChanged<bool?> onChanged,
+    AppColors c, {
+    String? hint,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label,
+                    style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                        color: c.textPrimary)),
+                if (hint != null)
+                  Text(hint,
+                      style:
+                          TextStyle(fontSize: 11, color: c.textTertiary)),
+              ],
+            ),
+          ),
+          _ynToggle(value, enabled, onChanged, c),
+        ],
+      ),
+    );
+  }
+
+  Widget _ynToggle(
+    bool? value,
+    bool enabled,
+    ValueChanged<bool?> onChanged,
+    AppColors c,
+  ) {
+    Widget btn(String text, bool? target, Color activeColor) {
+      final active = value == target;
+      return InkWell(
+        onTap: !enabled
+            ? null
+            : () => onChanged(active ? null : target),
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? activeColor : c.surfaceAlt,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+                color: active ? activeColor : c.border),
+          ),
+          child: Text(
+            text,
+            style: TextStyle(
+              color: active ? Colors.white : c.textSecondary,
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        btn('Yes', true, c.success),
+        const SizedBox(width: 6),
+        btn('No', false, c.danger),
+      ],
+    );
+  }
+
+  Widget _pills(
+    List<String> options,
+    List<String> selected,
+    bool enabled,
+    ValueChanged<List<String>> onChanged,
+    AppColors c, {
+    Map<String, String> labels = const {},
+  }) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: options.map((o) {
+        final sel = selected.contains(o);
+        return FilterChip(
+          label: Text(labels[o] ?? o),
+          selected: sel,
+          onSelected: !enabled
+              ? null
+              : (v) {
+                  final next = List<String>.from(selected);
+                  if (v) {
+                    next.add(o);
+                  } else {
+                    next.remove(o);
+                  }
+                  onChanged(next);
+                },
         );
       }).toList(),
     );
   }
 
-  Widget _flagChip(String label, Color color) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: color.withOpacity(0.25)),
+  Widget _textField(
+    TextEditingController ctrl,
+    AppColors c, {
+    bool enabled = true,
+    String? hint,
+    String? error,
+    TextInputType? keyboard,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextField(
+          controller: ctrl,
+          enabled: enabled,
+          keyboardType: keyboard,
+          decoration: InputDecoration(
+            hintText: hint,
+            isDense: true,
+            filled: true,
+            fillColor: enabled ? c.surfaceAlt : c.bg,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.border),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: c.border),
+            ),
+          ),
         ),
-        child: Text(label,
-            style: TextStyle(color: color,
-                fontSize: 10, fontWeight: FontWeight.bold)),
-      );
-}
+        if (error != null) ...[
+          const SizedBox(height: 4),
+          Text(error,
+              style: TextStyle(color: c.warning, fontSize: 11)),
+        ],
+      ],
+    );
+  }
 
-class _ClinicalFlag {
-  final String label;
-  final Color  color;
-  const _ClinicalFlag(this.label, this.color);
+  Widget _bloodGasField(
+    AppColors c, {
+    required String number,
+    required String label,
+    required String unit,
+    required TextEditingController low,
+    required TextEditingController high,
+    required bool notDone,
+    required bool editable,
+    required double min,
+    required double max,
+    required ValueChanged<bool> onNotDone,
+  }) {
+    final lowErr = notDone
+        ? null
+        : RespCvNeuroValidators.bloodGasValue(low.text,
+            min: min, max: max, label: '$label lowest');
+    final highErr = notDone
+        ? null
+        : RespCvNeuroValidators.bloodGasValue(high.text,
+            min: min, max: max, label: '$label highest');
+    final orderErr =
+        notDone ? null : RespCvNeuroValidators.rangeOrder(low.text, high.text);
+    final err = lowErr ?? highErr ?? orderErr;
+
+    return _fieldCard(
+      c,
+      number: number,
+      label: '$label $unit',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: _textField(low, c,
+                    enabled: editable && !notDone,
+                    hint: 'Lowest',
+                    keyboard:
+                        const TextInputType.numberWithOptions(decimal: true)),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Text('–', style: TextStyle(color: c.textSecondary)),
+              ),
+              Expanded(
+                child: _textField(high, c,
+                    enabled: editable && !notDone,
+                    hint: 'Highest',
+                    keyboard:
+                        const TextInputType.numberWithOptions(decimal: true)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          FilterChip(
+            label: const Text('Not Done'),
+            selected: notDone,
+            onSelected: !editable ? null : (v) => onNotDone(v),
+          ),
+          if (err != null) ...[
+            const SizedBox(height: 4),
+            Text(err, style: TextStyle(color: c.warning, fontSize: 11)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static String _month(int m) {
+    const names = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
+    ];
+    return names[m - 1];
+  }
 }

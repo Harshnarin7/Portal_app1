@@ -50,6 +50,7 @@ class BirthResuscitationData {
   bool? randomised;                // randomised            (B3: 24.)
   String? randomisationDate;       // randomisation_date    (B3: 25.)
   String? strata;                  // strata                (B3: 27.)
+  String? blenderLetter;           // blender_letter (device identifier, from Blender Code selector)
   String? enrollmentReasonNotRandomized;       // (B3: 28.)
   String? enrollmentReasonNotRandomizedOther;
 
@@ -104,11 +105,12 @@ class BirthResuscitationData {
   double? cordPh;                  // cord_ph                 (59.)
   double? cordSbe;                 // cord_sbe                (59.)
   double? cordPco2;                // cord_pco2                (59.)
-  double? spo2ExitTrialGas;        // spo2_exit_trial_gas     (61.)
-  int? totalResusTime;             // total_resus_time        (62.)
-  String? reasonExitTrialGas;      // reason_exit_trial_gas   (63.)
+  double? spo2ExitTrialGas;     // spo2_exit_trial_gas
+  String? totalResusTime;       // total_resus_time — MM:SS from APGAR timer
+  String? reasonExitTrialGas;   // reason_exit_trial_gas
   String? reasonExitTrialGasOther; // reason_exit_trial_gas_other
-  bool? blenderStopped;            // blender_stopped         (64.)
+  bool? blenderStopped;            // blender_stopped          (59.)
+  List<String> blenderInterruptReasons = []; // blender_interrupt_reasons (60.)
   String? blenderStoppedDescription; // blender_stopped_description
 
   BirthResuscitationData();
@@ -154,6 +156,7 @@ class BirthResuscitationData {
       'randomised': randomised,
       'randomisation_date': randomisationDate,
       'strata': strata,
+      'blender_letter': blenderLetter,
       'enrollment_reason_not_randomized': enrollmentReasonNotRandomized,
       'enrollment_reason_not_randomized_other':
           enrollmentReasonNotRandomizedOther,
@@ -203,7 +206,14 @@ class BirthResuscitationData {
               : 'Other')
           : reasonExitTrialGas,
       'blender_stopped': blenderStopped,
-      'blender_stopped_description': blenderStoppedDescription,
+      // Only send when this screen answered Q59 (Form C). Form B leaves
+      // blenderStopped null so omitNulls won't wipe Form C's reasons.
+      'blender_interrupt_reasons': blenderStopped == null
+          ? null
+          : blenderInterruptReasons.join(', '),
+      'blender_stopped_description': blenderStopped == false
+          ? ''
+          : blenderStoppedDescription,
     };
     if (omitNulls) {
       map.removeWhere((_, v) => v == null);
@@ -277,6 +287,7 @@ class BirthResuscitationData {
     d.randomised = json['randomised'];
     d.randomisationDate = json['randomisation_date'];
     d.strata = json['strata'];
+    d.blenderLetter = json['blender_letter'];
     d.enrollmentReasonNotRandomized = json['enrollment_reason_not_randomized'];
     d.enrollmentReasonNotRandomizedOther =
         json['enrollment_reason_not_randomized_other'];
@@ -334,11 +345,58 @@ class BirthResuscitationData {
     d.cordSbe = (json['cord_sbe'] as num?)?.toDouble();
     d.cordPco2 = (json['cord_pco2'] as num?)?.toDouble();
     d.spo2ExitTrialGas = (json['spo2_exit_trial_gas'] as num?)?.toDouble();
-    d.totalResusTime = json['total_resus_time'];
+    d.totalResusTime = normalizeTotalResusTimeMmSs(json['total_resus_time']);
     d.reasonExitTrialGas = json['reason_exit_trial_gas'];
     d.reasonExitTrialGasOther = json['reason_exit_trial_gas_other'];
     d.blenderStopped = json['blender_stopped'];
+    d.blenderInterruptReasons = parseBlenderInterruptReasons(
+      json['blender_interrupt_reasons'],
+    );
+    if (d.blenderInterruptReasons.isEmpty &&
+        d.blenderStopped == true &&
+        (json['blender_stopped_description'] ?? '').toString().trim().isNotEmpty) {
+      d.blenderInterruptReasons = [kBlenderAbruptReason];
+    }
     d.blenderStoppedDescription = json['blender_stopped_description'];
     return d;
   }
+}
+
+/// Field 57 Total resus time — store/display as MM:SS.
+/// Legacy integer minutes become "MM:00".
+String? normalizeTotalResusTimeMmSs(dynamic value) {
+  if (value == null) return null;
+  final s = value.toString().trim();
+  if (s.isEmpty) return null;
+  if (RegExp(r'^\d{1,3}$').hasMatch(s)) {
+    final m = int.tryParse(s) ?? 0;
+    return '${m.toString().padLeft(2, '0')}:00';
+  }
+  final m = RegExp(r'^(\d{1,3}):([0-5]?\d)$').firstMatch(s);
+  if (m == null) return s;
+  final mm = (int.tryParse(m.group(1)!) ?? 0).clamp(0, 999);
+  final ss = (int.tryParse(m.group(2)!) ?? 0).clamp(0, 59);
+  return '${mm.toString().padLeft(2, '0')}:${ss.toString().padLeft(2, '0')}';
+}
+
+const kBlenderInterruptReasons = [
+  "Blender stopped abruptly",
+  "Surfactant decision",
+  "Intubation",
+  "FiO₂ – 21 or 100%",
+  "Early transfer",
+];
+const kBlenderAbruptReason = "Blender stopped abruptly";
+
+List<String> parseBlenderInterruptReasons(dynamic raw) {
+  if (raw == null) return [];
+  if (raw is List) {
+    return raw
+        .map((e) => e.toString().trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+  }
+  final s = raw.toString().trim();
+  if (s.isEmpty) return [];
+  return s.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
 }

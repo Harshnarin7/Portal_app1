@@ -17,12 +17,15 @@ import '../providers/auth_provider.dart';
 import '../services/screening_api_service.dart';
 import '../services/forms_api_service.dart';
 import '../services/api_client.dart';
+import '../utils/screening_status.dart';
 import 'dashboard_screen.dart';
 
 // ── Theme ──────────────────────────────────────────────────────────────────
 import '../theme/app_theme.dart';
+import '../widgets/modern_date_picker.dart';
 import '../theme/theme_notifier.dart';
 import '../widgets/theme_toggle_widget.dart';
+import '../widgets/required_asterisk.dart';
 
 String screeningCounterKey(String site) => "screening_counter_$site";
 const String draftIndexKey = "screening_draft_keys";
@@ -31,11 +34,16 @@ String _userRole = "admin";
 class ScreeningForm extends StatefulWidget {
   final bool loadDraft;
   final String? draftKey;
+  /// Open an already-saved screening in read-only mode (View filled forms).
+  final bool viewOnly;
+  final String? existingScreeningId;
 
   const ScreeningForm({
     super.key,
     this.loadDraft = false,
     this.draftKey,
+    this.viewOnly = false,
+    this.existingScreeningId,
   });
 
   @override
@@ -92,7 +100,11 @@ class _ScreeningFormState extends State<ScreeningForm>
   Timer? _draftDebounce;
 
   bool _idAssigned = false;
-  bool _exclusionPresent = false;
+  // Derived from _exclusionAnswers — never store a separate bool that can
+  // drift (that caused "All options No" while field 23 showed Yes).
+  bool get _exclusionPresent =>
+      _exclusionAnswers.values.any((v) => v == "Yes");
+  bool _loadingExisting = false;
 
   bool get _canShowClinicalDecision =>
       _gestationKnownInWeeks == true || _eddKnown == true;
@@ -222,6 +234,8 @@ class _ScreeningFormState extends State<ScreeningForm>
   String _hydropsType         = "";
 
   String _consentStatus              = "Select";
+  /// ISO datetime for consent — set once when consent becomes Yes/Trial run.
+  String? _consentDateTimeIso;
   String _gaAssessmentMethod         = "Select";
   String _relationshipToParticipant  = "Select";
   String _relationshipOtherText      = "";
@@ -350,23 +364,231 @@ class _ScreeningFormState extends State<ScreeningForm>
       setState(() => _maternalUidLimitReached = _maternalUidCtrl.text.length >= 15);
     });
 
-    _attachDraftListeners();
+    if (!widget.viewOnly) {
+      _attachDraftListeners();
+      // Match web ~10s autosave cadence
+      _autoSaveTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+        if (mounted && !_isFormCompletelyEmpty()) _saveDraft(silent: true);
+      });
+    }
 
-    // Match web ~10s autosave cadence
-    _autoSaveTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (mounted && !_isFormCompletelyEmpty()) _saveDraft(silent: true);
-    });
-
-    // Load site context first, then draft — avoids clearing restored IDs/fields.
+    // Load site context first, then draft / existing — avoids clearing restored IDs/fields.
     _bootstrapForm();
   }
 
   Future<void> _bootstrapForm() async {
     await _loadUserContext();
     if (!mounted) return;
+    final existingId = widget.existingScreeningId?.trim();
+    if (existingId != null && existingId.isNotEmpty) {
+      await _loadExistingScreening(existingId);
+      return;
+    }
     if (widget.loadDraft && widget.draftKey != null) {
       _currentDraftKey = widget.draftKey;
       await _loadDraftIfExists();
+    }
+  }
+
+  String _isoToDdMmYyyy(String? iso) {
+    if (iso == null || iso.trim().isEmpty) return "";
+    final dt = DateTime.tryParse(iso.trim());
+    if (dt == null) return "";
+    return "${dt.day}/${dt.month}/${dt.year}";
+  }
+
+  String _isoToDdMmYyyyHHmm(String? iso) {
+    if (iso == null || iso.trim().isEmpty) return "";
+    final dt = DateTime.tryParse(iso.trim());
+    if (dt == null) return "";
+    final h = dt.hour.toString().padLeft(2, '0');
+    final m = dt.minute.toString().padLeft(2, '0');
+    return "${dt.day}/${dt.month}/${dt.year} $h:$m";
+  }
+
+  String _unmapGestationMethod(String? v) {
+    switch (v) {
+      case "LMP":
+        return "LMP";
+      case "Early USG":
+        return "Early USG (<24w)";
+      case "Fundal Height":
+        return "Fundal Height";
+      case "Unknown":
+        return "Method not known";
+      default:
+        return (v == null || v.isEmpty) ? "Select" : v;
+    }
+  }
+
+  String? _exclusionKeyForLabel(String label) {
+    final t = label.trim().toLowerCase();
+    if (t.isEmpty) return null;
+    if (t.contains('structural') || t.contains('anomal')) return "ANOMALY";
+    if (t.contains('hydrops')) return "HYDROPS";
+    if (t.contains('resuscitation') || t.contains('forego')) return "RESUSCITATION";
+    if (t.contains('insufficient')) return "INSUFFICIENT";
+    if (t.contains('iufd')) return "IUFD";
+    return null;
+  }
+
+  /// Draft JSON may store exclusion answers as Map<String, dynamic>.
+  Map<String, String?> _parseExclusionAnswersMap(dynamic raw) {
+    final out = <String, String?>{
+      for (final k in _exclusionAnswers.keys) k: null,
+    };
+    if (raw is! Map) return out;
+    for (final key in out.keys) {
+      final v = raw[key];
+      if (v == null) {
+        out[key] = null;
+      } else {
+        final s = v.toString().trim();
+        out[key] = (s == "Yes" || s == "No") ? s : null;
+      }
+    }
+    return out;
+  }
+
+  Future<void> _loadExistingScreening(String screeningId) async {
+    setState(() => _loadingExisting = true);
+    try {
+      final clinical = await ScreeningApiService.instance.getScreening(screeningId);
+      final pii = await ScreeningApiService.instance.getPii(screeningId);
+      if (!mounted) return;
+      if (clinical == null) {
+        setState(() => _loadingExisting = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not load screening $screeningId')),
+        );
+        return;
+      }
+
+      final reasonsRaw = (clinical['exclusion_reasons'] ?? '').toString();
+      final yesKeys = <String>{};
+      for (final part in reasonsRaw.split(RegExp(r'[,;]'))) {
+        final key = _exclusionKeyForLabel(part);
+        if (key != null) yesKeys.add(key);
+      }
+      // Prefer answers derived from reasons; treat server exclusion_present as
+      // a fallback only when reasons are empty (legacy rows).
+      final exclusionPresent =
+          yesKeys.isNotEmpty || clinical['exclusion_present'] == true;
+      final exclusionAnswers = <String, String?>{};
+      for (final key in _exclusionAnswers.keys) {
+        if (yesKeys.contains(key)) {
+          exclusionAnswers[key] = "Yes";
+        } else if (exclusionPresent ||
+            reasonsRaw.isNotEmpty ||
+            (clinical['consent_given']?.toString().isNotEmpty == true)) {
+          exclusionAnswers[key] = "No";
+        } else {
+          exclusionAnswers[key] = null;
+        }
+      }
+
+      final gestKnown = clinical['gestation_known']?.toString();
+      final gaSource = clinical['ga_source']?.toString();
+
+      setState(() {
+        _assignedScreeningId = screeningId;
+        _screeningIdCtrl.text = screeningId;
+        _enrollmentId = clinical['enrollment_id']?.toString();
+        _idAssigned = true;
+        _serverConfirmedId = true;
+        _selectedSite = (clinical['site_name'] ?? _selectedSite).toString();
+        _screeningDateTimeCtrl.text =
+            _isoToDdMmYyyyHHmm(clinical['screening_datetime']?.toString());
+        _screenedByCtrl.text = (clinical['screened_by'] ?? '').toString();
+        _motherFirstCtrl.text =
+            (pii?['mother_first_name'] ?? clinical['mother_first_name'] ?? '').toString();
+        _motherSurnameCtrl.text =
+            (pii?['mother_surname'] ?? clinical['mother_surname'] ?? '').toString();
+        _husbandFirstCtrl.text =
+            (pii?['husband_first_name'] ?? clinical['husband_first_name'] ?? '').toString();
+        _husbandSurnameCtrl.text =
+            (pii?['husband_surname'] ?? clinical['husband_surname'] ?? '').toString();
+        _motherPhoneCtrl.text =
+            (pii?['mother_contact'] ?? clinical['mother_contact'] ?? '').toString();
+        _husbandPhoneCtrl.text =
+            (pii?['husband_contact'] ?? clinical['husband_contact'] ?? '').toString();
+        _maternalUidCtrl.text =
+            (pii?['maternal_uid'] ?? clinical['maternal_uid'] ?? '').toString();
+        _hospitalNoCtrl.text = (pii?['hospital_admission_number'] ??
+                clinical['hospital_admission_number'] ??
+                '')
+            .toString();
+        _gestationKnownInWeeks = gestKnown == "Yes"
+            ? true
+            : (gestKnown == "No" ? false : (clinical['gestation_weeks'] != null));
+        _gaSource = gaSource;
+        _eddKnown = clinical['expected_delivery_date'] != null ? true : _eddKnown;
+        _gestWeeksCtrl.text = clinical['gestation_weeks']?.toString() ?? "";
+        _gestDaysCtrl.text = clinical['gestation_days']?.toString() ?? "0";
+        _gaAssessmentMethod =
+            _unmapGestationMethod(clinical['gestation_method']?.toString());
+        _expectedDeliveryCtrl.text =
+            _isoToDdMmYyyy(clinical['expected_delivery_date']?.toString());
+        _lmpCtrl.text = _isoToDdMmYyyy(clinical['lmp_date']?.toString());
+        _exclusionAnswers
+          ..clear()
+          ..addAll(exclusionAnswers);
+        // Keep detail fields only when that exclusion is Yes
+        _insufficientReason = yesKeys.contains("INSUFFICIENT")
+            ? (clinical['reason_for_insufficient_time'] ?? '').toString()
+            : "";
+        final resus = yesKeys.contains("RESUSCITATION")
+            ? (clinical['decision_forego_resuscitation_reason'] ?? '').toString()
+            : "";
+        _resuscitationReasons = resus.isEmpty
+            ? {}
+            : resus.split(RegExp(r'[,;]')).map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+        _resuscitationOther = yesKeys.contains("RESUSCITATION")
+            ? (clinical['decision_forego_resuscitation_reason_other'] ?? '').toString()
+            : "";
+        _anomalyDetails = yesKeys.contains("ANOMALY")
+            ? (clinical['major_structural_anomalies_if_yes'] ?? '').toString()
+            : "";
+        final hydrops = yesKeys.contains("HYDROPS")
+            ? (clinical['fetal_hydrops'] ?? '').toString()
+            : "";
+        _hydropsType = hydrops;
+        final consent = (clinical['consent_given'] ?? '').toString();
+        _consentStatus = consent.isNotEmpty ? consent : "Select";
+        final consentDt = (clinical['consent_datetime'] ?? '').toString().trim();
+        _consentDateTimeIso = consentDt.isNotEmpty ? consentDt : null;
+        final rel = (clinical['relationship_to_participant'] ?? '').toString();
+        _relationshipToParticipant = rel.isNotEmpty ? rel : "Select";
+        _relationshipOtherText =
+            (clinical['relationship_other'] ?? '').toString();
+        final takenBy = (clinical['consent_taken_by'] ?? '').toString();
+        _consentTakenBy = takenBy.isNotEmpty ? takenBy : "Select";
+        final refuse = (clinical['reason_for_consent_refusal'] ?? '').toString();
+        _consentRefusalReasons = refuse.isEmpty
+            ? {}
+            : refuse.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+        _consentRefusalOtherText =
+            (clinical['reason_for_consent_refusal_other'] ?? '').toString();
+        final notApp = (clinical['reason_not_approached'] ?? '').toString();
+        _notApproachedReasons = notApp.isEmpty
+            ? {}
+            : notApp.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+        _notApproachedOtherText =
+            (clinical['reason_not_approached_other'] ?? '').toString();
+        final video = (clinical['video_pis_shown'] ?? '').toString();
+        _videoPisShown = video.isNotEmpty ? video : "Select";
+        _proceedToConsent = (exclusionAnswers.values.every((v) => v == "No") &&
+                !exclusionAnswers.values.contains(null)) ||
+            _consentStatus != "Select";
+        _previousYesExclusions = yesKeys;
+        _loadingExisting = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loadingExisting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load screening: $e')),
+      );
     }
   }
 
@@ -393,6 +615,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (widget.viewOnly) return;
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
@@ -408,7 +631,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     _autoSaveTimer?.cancel();
     _draftDebounce?.cancel();
     // Flush once more before controllers are disposed
-    if (!_isFormCompletelyEmpty()) {
+    if (!widget.viewOnly && !_isFormCompletelyEmpty()) {
       // Fire-and-forget; dispose must stay sync
       _saveDraft(silent: true);
     }
@@ -612,7 +835,6 @@ class _ScreeningFormState extends State<ScreeningForm>
   void _resetExclusionSection() {
     setState(() {
       _exclusionAnswers.updateAll((key, value) => null);
-      _exclusionPresent = false;
       _previousYesExclusions.clear();
       _proceedToConsent   = false;
       _consentPopupShown  = false;
@@ -634,7 +856,7 @@ class _ScreeningFormState extends State<ScreeningForm>
         .toSet();
     final List<String> currentYesLabels = currentYesKeys.map(_exclusionLabel).toList();
 
-    setState(() => _exclusionPresent = currentYesKeys.isNotEmpty);
+    // _exclusionPresent is derived from answers — no separate assignment.
 
     final bool yesSetChanged = !setEquals(currentYesKeys, _previousYesExclusions);
 
@@ -754,21 +976,24 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (_isFormCompletelyEmpty()) return;
     final siteCode = _siteMap[_selectedSite] ?? "00";
 
-    try {
-      final resp = await _syncToBackend(isDraft: true);
-      final sid = resp?['screening_id']?.toString();
-      if (sid != null && sid.isNotEmpty) {
-        _assignedScreeningId  = sid;
-        _screeningIdCtrl.text = sid;
-        _enrollmentId          = resp?['enrollment_id']?.toString();
-        _serverConfirmedId     = true;
-        _idAssigned            = true;
-        if (mounted) setState(() {});
-        return;
+    // Only create a server screening once we have real identity + GA —
+    // never invent "DRAFT" placeholder patients.
+    if (_canSyncDraftToServer()) {
+      try {
+        final resp = await _syncToBackend(isDraft: true);
+        final sid = resp?['screening_id']?.toString();
+        if (sid != null && sid.isNotEmpty) {
+          _assignedScreeningId  = sid;
+          _screeningIdCtrl.text = sid;
+          _enrollmentId          = resp?['enrollment_id']?.toString();
+          _serverConfirmedId     = true;
+          _idAssigned            = true;
+          if (mounted) setState(() {});
+          return;
+        }
+      } catch (_) {
+        // Offline / backend unreachable — fall back to a local placeholder ID.
       }
-    } catch (_) {
-      // Offline / backend unreachable — fall back to a local placeholder ID.
-      // It is replaced by the server's real ID as soon as a sync succeeds.
     }
 
     final prefs = await SharedPreferences.getInstance();
@@ -779,6 +1004,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     _screeningIdCtrl.text = _assignedScreeningId!;
     await prefs.setInt(key, next);
     _idAssigned = true;
+    if (mounted) setState(() {});
   }
 
   // ── SYNC PAYLOAD ──────────────────────────────────────────────────────────
@@ -852,15 +1078,16 @@ class _ScreeningFormState extends State<ScreeningForm>
         'screening_id': _assignedScreeningId,
       'screening_datetime': _ddmmyyyyHHmmToIso(_screeningDateTimeCtrl.text) ??
           (useDraftFallbacks ? DateTime.now().toIso8601String() : null),
-      'site_name'   : _selectedSite.isNotEmpty ? _selectedSite : (useDraftFallbacks ? "DRAFT" : null),
-      'site_id'     : _siteMap[_selectedSite] ?? (useDraftFallbacks ? "00" : null),
+      'site_name'   : _selectedSite.isNotEmpty ? _selectedSite : null,
+      'site_id'     : _siteMap[_selectedSite],
       'screened_by' : _screenedByCtrl.text.trim().isNotEmpty && _screenedByCtrl.text != "Select"
-          ? _screenedByCtrl.text.trim() : (useDraftFallbacks ? "DRAFT" : null),
+          ? _screenedByCtrl.text.trim() : null,
+      // Never send literal "DRAFT" — it shows up as fake patients on Home.
       'mother_first_name' : _motherFirstCtrl.text.trim().isNotEmpty
-          ? _motherFirstCtrl.text.trim() : (useDraftFallbacks ? "DRAFT" : null),
+          ? _motherFirstCtrl.text.trim() : null,
       'mother_surname'    : _motherSurnameCtrl.text.trim().isNotEmpty ? _motherSurnameCtrl.text.trim() : null,
       'husband_first_name': _husbandFirstCtrl.text.trim().isNotEmpty
-          ? _husbandFirstCtrl.text.trim() : (useDraftFallbacks ? "DRAFT" : null),
+          ? _husbandFirstCtrl.text.trim() : null,
       'husband_surname'   : _husbandSurnameCtrl.text.trim().isNotEmpty ? _husbandSurnameCtrl.text.trim() : null,
       'mother_contact'    : _motherPhoneCtrl.text.trim().isNotEmpty ? _motherPhoneCtrl.text.trim() : null,
       'husband_contact'   : _husbandPhoneCtrl.text.trim().isNotEmpty ? _husbandPhoneCtrl.text.trim() : null,
@@ -871,22 +1098,48 @@ class _ScreeningFormState extends State<ScreeningForm>
           ? "Yes"
           : (_gestationKnownInWeeks == false ? "No" : null),
       'ga_source': _gestationKnownInWeeks == false ? (_gaSource) : null,
-      'gestation_weeks': weeks ?? (useDraftFallbacks ? 0 : null),
+      'gestation_weeks': weeks,
       'gestation_days' : days  ?? 0,
       'gestation_method': gaMethod,
       'expected_delivery_date': _ddmmyyyyToIsoDate(_expectedDeliveryCtrl.text),
       'lmp_date'              : _ddmmyyyyToIsoDate(_lmpCtrl.text),
-      'exclusion_present': _exclusionPresent,
-      'exclusion_reasons': exclusionLabels.isNotEmpty ? exclusionLabels.join(", ") : null,
-      'reason_for_insufficient_time': _exclusionAnswers["INSUFFICIENT"] == "Yes" && _insufficientReason.trim().isNotEmpty
-          ? _insufficientReason.trim() : null,
-      'decision_forego_resuscitation_reason': _exclusionAnswers["RESUSCITATION"] == "Yes" && _resuscitationReasons.isNotEmpty
-          ? _resuscitationReasons.join(", ") : null,
-      'decision_forego_resuscitation_reason_other': _resuscitationReasons.contains("Other") && _resuscitationOther.trim().isNotEmpty
-          ? _resuscitationOther.trim() : null,
-      'major_structural_anomalies_if_yes': _exclusionAnswers["ANOMALY"] == "Yes" && _anomalyDetails.trim().isNotEmpty
-          ? _anomalyDetails.trim() : null,
-      'fetal_hydrops': _exclusionAnswers["HYDROPS"] == "Yes" && _hydropsType.isNotEmpty ? _hydropsType : null,
+      // Omit until exclusions are answered — sending false early makes web
+      // treat unanswered criteria as "No" when the draft is reopened.
+      'exclusion_present': _allExclusionsAnswered ? _exclusionPresent : null,
+      // Use "" (not null) once answered so PUT clears a stale reasons string;
+      // null is stripped by removeWhere and would leave old "Insufficient time".
+      'exclusion_reasons': !_allExclusionsAnswered
+          ? null
+          : (exclusionLabels.isNotEmpty ? exclusionLabels.join(", ") : ""),
+      'reason_for_insufficient_time': !_allExclusionsAnswered
+          ? null
+          : (_exclusionAnswers["INSUFFICIENT"] == "Yes" &&
+                  _insufficientReason.trim().isNotEmpty
+              ? _insufficientReason.trim()
+              : ""),
+      'decision_forego_resuscitation_reason': !_allExclusionsAnswered
+          ? null
+          : (_exclusionAnswers["RESUSCITATION"] == "Yes" &&
+                  _resuscitationReasons.isNotEmpty
+              ? _resuscitationReasons.join(", ")
+              : ""),
+      'decision_forego_resuscitation_reason_other': !_allExclusionsAnswered
+          ? null
+          : (_resuscitationReasons.contains("Other") &&
+                  _resuscitationOther.trim().isNotEmpty
+              ? _resuscitationOther.trim()
+              : ""),
+      'major_structural_anomalies_if_yes': !_allExclusionsAnswered
+          ? null
+          : (_exclusionAnswers["ANOMALY"] == "Yes" &&
+                  _anomalyDetails.trim().isNotEmpty
+              ? _anomalyDetails.trim()
+              : ""),
+      'fetal_hydrops': !_allExclusionsAnswered
+          ? null
+          : (_exclusionAnswers["HYDROPS"] == "Yes" && _hydropsType.isNotEmpty
+              ? _hydropsType
+              : ""),
       'consent_given'   : _consentStatus != "Select" ? _consentStatus : null,
       'consent_taken_by': _consentTakenBy != "Select" ? _consentTakenBy : null,
       'relationship_to_participant': _relationshipToParticipant != "Select" ? _relationshipToParticipant : null,
@@ -899,14 +1152,42 @@ class _ScreeningFormState extends State<ScreeningForm>
       'consent_form_version': 'v1.0',
       'consent_language': 'English',
       if (_consentStatus == "Yes" || _consentStatus == "Trial run")
-        'consent_datetime': DateTime.now().toIso8601String(),
+        'consent_datetime': () {
+          _consentDateTimeIso ??= DateTime.now().toIso8601String();
+          return _consentDateTimeIso;
+        }(),
     };
+  }
+
+  /// Draft/server sync only when required ScreeningCreate fields are real
+  /// (avoids creating "DRAFT / Excluded" ghost patients on the home list).
+  bool _canSyncDraftToServer() {
+    final weeks = int.tryParse(_gestWeeksCtrl.text.trim());
+    return _selectedSite.isNotEmpty
+        && _siteMap[_selectedSite] != null
+        && _screenedByCtrl.text.trim().isNotEmpty
+        && _screenedByCtrl.text != "Select"
+        && _motherFirstCtrl.text.trim().isNotEmpty
+        && _husbandFirstCtrl.text.trim().isNotEmpty
+        && weeks != null
+        && weeks >= 18
+        && weeks <= 42;
   }
 
   /// POSTs (create) or PUTs (update) the current form state to the real
   /// `/screenings/` backend endpoint — the same one ScreeningForm.jsx uses.
   Future<Map<String, dynamic>?> _syncToBackend({bool isDraft = false}) async {
+    if (isDraft && !_canSyncDraftToServer() && !_serverConfirmedId) {
+      return null;
+    }
+    if (isDraft && !_canSyncDraftToServer() && _serverConfirmedId) {
+      // Allow updates only when we already have a server row AND names are set,
+      // so we can overwrite an old "DRAFT" placeholder with the real name.
+      if (_motherFirstCtrl.text.trim().isEmpty) return null;
+    }
     final payload = _buildSyncPayload(useDraftFallbacks: isDraft);
+    // Drop null keys so we don't overwrite required server fields with null.
+    payload.removeWhere((_, v) => v == null);
     final resp = await ScreeningApiService.instance.syncScreening(
       payload: payload,
       existingScreeningId: _serverConfirmedId ? _assignedScreeningId : null,
@@ -951,14 +1232,18 @@ class _ScreeningFormState extends State<ScreeningForm>
     // Best-effort background sync to the real backend so progress is visible
     // on the web portal too. Failures (e.g. offline) are silent here — the
     // local SharedPreferences draft below still keeps the data safe.
+    Map<String, dynamic>? syncResp;
     try {
-      await _syncToBackend(isDraft: true);
-    } catch (_) {}
+      syncResp = await _syncToBackend(isDraft: true);
+    } catch (_) {
+      syncResp = null;
+    }
 
-    // If this screening is already complete enough AND on the server, do NOT
-    // keep a local "Draft" — that is why nurses saw the same case as Draft on
-    // mobile while it already looked perfect on the website.
-    if (_serverConfirmedId && _looksFullyFilledForDraftClear()) {
+    // Only drop the local draft after a successful server sync. If sync failed
+    // (offline / error), keep SharedPreferences so edits are never lost.
+    if (syncResp != null &&
+        _serverConfirmedId &&
+        _looksFullyFilledForDraftClear()) {
       await _clearLocalDraft();
       if (!mounted) return;
       if (!silent) {
@@ -1055,9 +1340,11 @@ class _ScreeningFormState extends State<ScreeningForm>
       _gestDaysCtrl.text         = data["gestDays"] ?? "0";
       _gaAssessmentMethod        = data["gaMethod"] ?? "Select";
       _expectedDeliveryCtrl.text = data["expectedDelivery"] ?? "";
-      _exclusionAnswers.addAll(
-          Map<String, String?>.from(data["exclusionAnswers"] ?? {}));
+      _exclusionAnswers
+        ..clear()
+        ..addAll(_parseExclusionAnswersMap(data["exclusionAnswers"]));
       _insufficientReason        = data["insufficientReason"] ?? "";
+      if (_exclusionAnswers["INSUFFICIENT"] != "Yes") _insufficientReason = "";
       if (data["resuscitationReasons"] != null) {
         _resuscitationReasons = Set<String>.from(data["resuscitationReasons"]);
       } else if ((data["resuscitationReason"] ?? "").toString().isNotEmpty) {
@@ -1065,9 +1352,14 @@ class _ScreeningFormState extends State<ScreeningForm>
       } else {
         _resuscitationReasons = {};
       }
+      if (_exclusionAnswers["RESUSCITATION"] != "Yes") {
+        _resuscitationReasons = {};
+      }
       _resuscitationOther        = data["resuscitationOther"] ?? "";
       _anomalyDetails            = data["anomalyDetails"] ?? "";
+      if (_exclusionAnswers["ANOMALY"] != "Yes") _anomalyDetails = "";
       _hydropsType               = data["hydropsType"] ?? "";
+      if (_exclusionAnswers["HYDROPS"] != "Yes") _hydropsType = "";
       _consentStatus             = data["consentStatus"] ?? "Select";
       _relationshipToParticipant = data["relationship"] ?? "Select";
       _relationshipOtherText     = data["relationshipOther"] ?? "";
@@ -1079,7 +1371,11 @@ class _ScreeningFormState extends State<ScreeningForm>
       _notApproachedReasons      = Set<String>.from(data["notApproachedReasons"] ?? []);
       _notApproachedOtherText    = data["notApproachedOther"] ?? "";
       _videoPisShown             = data["videoPisShown"] ?? "Select";
-      _proceedToConsent          = data["proceedToConsent"] ?? false;
+      _proceedToConsent = _allExclusionsNo || _consentStatus != "Select";
+      _previousYesExclusions = _exclusionAnswers.entries
+          .where((e) => e.value == "Yes")
+          .map((e) => e.key)
+          .toSet();
       _currentDraftKey           = widget.draftKey;
       _hospitalNoLiveError       = _hospitalNoLiveMessage(_hospitalNoCtrl.text);
     });
@@ -1171,49 +1467,65 @@ class _ScreeningFormState extends State<ScreeningForm>
       return false;
     }
 
-    final weeks       = int.tryParse(_gestWeeksCtrl.text.trim()) ?? 0;
-    final days        = int.tryParse(_gestDaysCtrl.text.trim())  ?? 0;
-    final eligibility = _exclusionPresent ? "Not Eligible" : "Eligible";
-
-    final crf = CRF(
-      screeningId         : _assignedScreeningId!,
-      site                : _selectedSite,
-      siteId              : _siteMap[_selectedSite] ?? "",
-      screeningDateTime   : _screeningDateTimeCtrl.text.trim(),
-      screenedBy          : _screenedByCtrl.text.trim(),
-      motherFirstName     : _motherFirstCtrl.text.trim(),
-      motherSurname       : _motherSurnameCtrl.text.trim(),
-      husbandFirstName    : _husbandFirstCtrl.text.trim(),
-      husbandSurname      : _husbandSurnameCtrl.text.trim(),
-      motherPhone         : _motherPhoneCtrl.text.trim(),
-      husbandPhone        : _husbandPhoneCtrl.text.trim(),
-      maternalUid         : _maternalUidCtrl.text.trim(),
-      hospitalNo          : _hospitalNoCtrl.text.trim(),
-      gestationWeeks      : weeks,
-      gestationDays       : days,
-      gestationMethod     : _gaAssessmentMethod,
-      expectedDeliveryDate: _expectedDeliveryCtrl.text.trim(),
-      gestationKnownInWeeks: _gestationKnownInWeeks == true,
-      eddKnown            : _eddKnown == true,
-      exclusion           : _exclusionPresent,
-      exclusionReason     : _exclusionAnswers.entries
-          .where((e) => e.value == "Yes")
-          .map((e) => e.key)
-          .join("; "),
-      anomalyDetails      : _anomalyDetails,
-      eligibilityStatus   : eligibility,
-      consentStatus       : _consentStatus,
-      consentRefusalReason: _consentStatus == "No" && _consentRefusalReasons.isNotEmpty
-          ? _consentRefusalReasons.join(", ")
-          : "",
-      relationshipToParticipant: _relationshipToParticipant,
-      relationshipOther   : _relationshipOtherText,
-      consentTakenBy      : _consentTakenBy != "Select" ? _consentTakenBy : "",
-    );
+    final weeksParsed = int.tryParse(_gestWeeksCtrl.text.trim());
+    final days        = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
 
     try {
       // Sync to shared backend FIRST so web + mobile stay aligned.
-      await _syncToBackend(isDraft: false);
+      final syncResp = await _syncToBackend(isDraft: false);
+      final serverStatus = syncResp?['screening_status']?.toString();
+      final eligibility = (serverStatus != null && serverStatus.isNotEmpty)
+          ? normalizeScreeningStatus(serverStatus)
+          : computeScreeningStatus(
+              gestationWeeks: weeksParsed,
+              gestationDays: days,
+              exclusionPresent:
+                  _allExclusionsAnswered ? _exclusionPresent : null,
+              consentGiven:
+                  _consentStatus != "Select" ? _consentStatus : null,
+              gestationKnown: _gestationKnownInWeeks == true
+                  ? "Yes"
+                  : (_gestationKnownInWeeks == false ? "No" : null),
+              gaSource:
+                  _gestationKnownInWeeks == false ? _gaSource : null,
+            );
+
+      final crf = CRF(
+        screeningId         : _assignedScreeningId!,
+        site                : _selectedSite,
+        siteId              : _siteMap[_selectedSite] ?? "",
+        screeningDateTime   : _screeningDateTimeCtrl.text.trim(),
+        screenedBy          : _screenedByCtrl.text.trim(),
+        motherFirstName     : _motherFirstCtrl.text.trim(),
+        motherSurname       : _motherSurnameCtrl.text.trim(),
+        husbandFirstName    : _husbandFirstCtrl.text.trim(),
+        husbandSurname      : _husbandSurnameCtrl.text.trim(),
+        motherPhone         : _motherPhoneCtrl.text.trim(),
+        husbandPhone        : _husbandPhoneCtrl.text.trim(),
+        maternalUid         : _maternalUidCtrl.text.trim(),
+        hospitalNo          : _hospitalNoCtrl.text.trim(),
+        gestationWeeks      : weeksParsed ?? 0,
+        gestationDays       : days,
+        gestationMethod     : _gaAssessmentMethod,
+        expectedDeliveryDate: _expectedDeliveryCtrl.text.trim(),
+        gestationKnownInWeeks: _gestationKnownInWeeks == true,
+        eddKnown            : _eddKnown == true,
+        exclusion           : _exclusionPresent,
+        exclusionReason     : _exclusionAnswers.entries
+            .where((e) => e.value == "Yes")
+            .map((e) => e.key)
+            .join("; "),
+        anomalyDetails      : _anomalyDetails,
+        eligibilityStatus   : eligibility,
+        consentStatus       : _consentStatus,
+        consentRefusalReason: _consentStatus == "No" && _consentRefusalReasons.isNotEmpty
+            ? _consentRefusalReasons.join(", ")
+            : "",
+        relationshipToParticipant: _relationshipToParticipant,
+        relationshipOther   : _relationshipOtherText,
+        consentTakenBy      : _consentTakenBy != "Select" ? _consentTakenBy : "",
+        enrollmentId        : _enrollmentId ?? "",
+      );
 
       // Local device CRF store (best-effort — must not block draft cleanup).
       try {
@@ -1504,14 +1816,22 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   // ── DECORATIONS ───────────────────────────────────────────────────────────
 
-  InputDecoration _inputDecoration(String label, {String? hint, String? helper}) {
+  InputDecoration _inputDecoration(
+    String label, {
+    String? hint,
+    String? helper,
+    bool required = false,
+  }) {
     final c = AppTheme.of(context);
+    final labelStyle = TextStyle(color: c.textSecondary, fontSize: 13);
     return InputDecoration(
-      labelText  : label,
+      // Red * for mandatory fields (not black labelText "*").
+      label: requiredLabel(label, style: labelStyle, required: required),
       hintText   : hint,
       helperText : helper,
       helperStyle: TextStyle(color: c.textTertiary, fontSize: 12),
-      labelStyle : TextStyle(color: c.textSecondary, fontSize: 13),
+      labelStyle : labelStyle,
+      floatingLabelStyle: labelStyle,
       hintStyle  : TextStyle(color: c.textTertiary,  fontSize: 13),
       filled     : true,
       fillColor  : c.surfaceAlt,
@@ -1535,7 +1855,14 @@ class _ScreeningFormState extends State<ScreeningForm>
   }
 
   InputDecoration _requiredDecoration(String label, {String? hint, String? helper}) =>
-      _inputDecoration("$label *", hint: hint, helper: helper);
+      _inputDecoration(label, hint: hint, helper: helper, required: true);
+
+  Widget _reqText(String label, AppColors c, {double fontSize = 13}) =>
+      requiredLabel(
+        label,
+        style: TextStyle(color: c.textSecondary, fontSize: fontSize),
+        required: true,
+      );
 
   // ── SECTION CARD ──────────────────────────────────────────────────────────
 
@@ -1709,8 +2036,26 @@ class _ScreeningFormState extends State<ScreeningForm>
     final c        = AppTheme.of(context);
     final selected = _exclusionAnswers[key] == value;
     return GestureDetector(
+      key: ValueKey('excl-$key-$value'),
       onTap: () => setState(() {
         _exclusionAnswers[key] = value;
+        if (value == "No") {
+          switch (key) {
+            case "INSUFFICIENT":
+              _insufficientReason = "";
+              break;
+            case "RESUSCITATION":
+              _resuscitationReasons = {};
+              _resuscitationOther = "";
+              break;
+            case "ANOMALY":
+              _anomalyDetails = "";
+              break;
+            case "HYDROPS":
+              _hydropsType = "";
+              break;
+          }
+        }
         _checkExclusionAndAlert();
       }),
       child: AnimatedContainer(
@@ -1745,7 +2090,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
       case "RESUSCITATION":
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text("22. If yes (select all that apply) *", style: TextStyle(color: c.textSecondary, fontSize: 13)),
+          _reqText("22. If yes (select all that apply)", c),
           const SizedBox(height: 6),
           ...["Periviable", "Socio-economic", "Major CMF", "Other"].map((v) =>
               _multiCheckboxTile(v, _resuscitationReasons, c, () => setState(() {
@@ -1783,7 +2128,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
       case "HYDROPS":
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text("20. If yes *", style: TextStyle(color: c.textSecondary, fontSize: 13)),
+          _reqText("20. If yes", c),
           const SizedBox(height: 6),
           ...["Immune", "Non-immune", "Unclear"].map((v) =>
               _styledRadio(v, _hydropsType, c, (val) =>
@@ -1809,9 +2154,12 @@ class _ScreeningFormState extends State<ScreeningForm>
         margin: const EdgeInsets.only(bottom: 6),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: selected ? c.primarySoft : c.surface,
+          color: selected ? c.primary.withOpacity(0.14) : c.surface,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: selected ? c.primary : c.border),
+          border: Border.all(
+            color: selected ? c.primary : c.border,
+            width: selected ? 2 : 1,
+          ),
         ),
         child: Row(children: [
           Container(
@@ -1825,8 +2173,8 @@ class _ScreeningFormState extends State<ScreeningForm>
           ),
           const SizedBox(width: 10),
           Text(value, style: TextStyle(
-              color: selected ? c.primary : c.textSecondary,
-              fontWeight: selected ? FontWeight.w700 : FontWeight.w500, fontSize: 13)),
+              color: selected ? c.primaryDark : c.textSecondary,
+              fontWeight: selected ? FontWeight.w800 : FontWeight.w500, fontSize: 13)),
         ]),
       ),
     );
@@ -1935,6 +2283,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
     return WillPopScope(
       onWillPop: () async {
+        if (widget.viewOnly) return true;
         if (_submitted) return true;
         if (_isFormCompletelyEmpty()) return true;
 
@@ -1974,8 +2323,10 @@ class _ScreeningFormState extends State<ScreeningForm>
       child: Scaffold(
         backgroundColor: c.bg,
         appBar: _buildAppBar(c),
-        bottomNavigationBar: _buildBottomBar(c),
-        body: Container(
+        bottomNavigationBar: widget.viewOnly ? null : _buildBottomBar(c),
+        body: _loadingExisting
+            ? const Center(child: CircularProgressIndicator())
+            : Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topCenter, end: Alignment.bottomCenter,
@@ -1985,49 +2336,78 @@ class _ScreeningFormState extends State<ScreeningForm>
           child: SafeArea(
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+              child: AbsorbPointer(
+                absorbing: widget.viewOnly,
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
 
-                    _buildStepIndicator(c),
-
-                    _buildGestationSection(c),
-
-                    if (_isEligibleGestation) _buildIdentificationSection(c, nameFormatter),
-
-                    if (_isEligibleGestation) _buildExclusionSection(c),
-
-                    if (_isEligibleGestation && (_allExclusionsNo || (_consentStatus != "Select" && _consentStatus.isNotEmpty)))
-                      _buildConsentSection(c),
-
-                    if (_submitted && _formKey.currentState?.validate() == false)
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        margin: const EdgeInsets.only(bottom: 16),
-                        decoration: BoxDecoration(
-                          color: c.dangerSoft,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: c.danger.withOpacity(0.4)),
+                      if (widget.viewOnly) ...[
+                        Container(
+                          width: double.infinity,
+                          margin: const EdgeInsets.only(bottom: 12),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: c.primary.withOpacity(0.08),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: c.primary.withOpacity(0.25)),
+                          ),
+                          child: Text(
+                            "View only — previously filled Form A (Screening)",
+                            style: TextStyle(
+                              color: c.primary,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13,
+                            ),
+                          ),
                         ),
-                        child: Row(children: [
-                          Icon(Icons.error_outline, color: c.danger),
-                          const SizedBox(width: 10),
-                          Expanded(child: Text(
-                            "Please fill all mandatory fields highlighted in red",
-                            style: TextStyle(color: c.danger, fontWeight: FontWeight.w600),
-                          )),
-                        ]),
+                      ],
+
+                      _buildStepIndicator(c),
+
+                      _buildGestationSection(c),
+
+                      if (_isEligibleGestation) _buildIdentificationSection(c, nameFormatter),
+
+                      if (_isEligibleGestation) _buildExclusionSection(c),
+
+                      // Match web: show A5 when all exclusions No, or consent already saved
+                      if (_isEligibleGestation &&
+                          (_allExclusionsNo ||
+                              (_consentStatus != "Select" &&
+                                  _consentStatus.isNotEmpty)))
+                        _buildConsentSection(c),
+
+                      if (_submitted && _formKey.currentState?.validate() == false)
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          margin: const EdgeInsets.only(bottom: 16),
+                          decoration: BoxDecoration(
+                            color: c.dangerSoft,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: c.danger.withOpacity(0.4)),
+                          ),
+                          child: Row(children: [
+                            Icon(Icons.error_outline, color: c.danger),
+                            const SizedBox(width: 10),
+                            Expanded(child: Text(
+                              "Please fill all mandatory fields highlighted in red",
+                              style: TextStyle(color: c.danger, fontWeight: FontWeight.w600),
+                            )),
+                          ]),
+                        ),
+
+                      // Same as web NotesBox — optional local notes keyed by screening id.
+                      NotesBox(
+                        formKey: "form_a_${(_assignedScreeningId != null && _assignedScreeningId!.isNotEmpty) ? _assignedScreeningId! : "new"}",
                       ),
 
-                    // Same as web NotesBox — optional local notes keyed by screening id.
-                    NotesBox(
-                      formKey: "form_a_${(_assignedScreeningId != null && _assignedScreeningId!.isNotEmpty) ? _assignedScreeningId! : "new"}",
-                    ),
-
-                    const SizedBox(height: 40),
-                  ],
+                      const SizedBox(height: 40),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -2104,8 +2484,12 @@ class _ScreeningFormState extends State<ScreeningForm>
   // ── STICKY BOTTOM BAR ─────────────────────────────────────────────────────
 
   Widget _buildBottomBar(AppColors c) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+    // SafeArea keeps buttons above tablet/system nav bars.
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.only(bottom: 8),
+      child: Container(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
       decoration: BoxDecoration(
         color: c.surface,
         border: Border(top: BorderSide(color: c.borderLight)),
@@ -2193,6 +2577,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           ),
         ),
       ]),
+    ),
     );
   }
 
@@ -2232,10 +2617,6 @@ class _ScreeningFormState extends State<ScreeningForm>
               _numberStepper(controller: _gestDaysCtrl, min: 0, max: 6),
             ])),
           ]),
-          if (_gestWeeksCtrl.text.trim().isNotEmpty) ...[
-            const SizedBox(height: 14),
-            _gestationResultBanner(c),
-          ],
           const SizedBox(height: 14),
           DropdownButtonFormField<String>(
             value: _gaAssessmentMethod,
@@ -2267,7 +2648,7 @@ class _ScreeningFormState extends State<ScreeningForm>
                 suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18)),
               style: TextStyle(color: c.textPrimary),
               onTap: () async {
-                final picked = await showDatePicker(
+                final picked = await showModernDatePicker(
                   context: context,
                   initialDate: DateTime.now(),
                   firstDate: DateTime(2020), lastDate: DateTime.now(),
@@ -2286,6 +2667,12 @@ class _ScreeningFormState extends State<ScreeningForm>
               decoration: _inputDecoration("EDD (auto-calculated from LMP)"),
               style: TextStyle(color: c.textPrimary),
             ),
+          ],
+
+          // Field 7 comes after method (3.) — same order as web Form A.
+          if (_gestWeeksCtrl.text.trim().isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _gestationResultBanner(c),
           ],
         ],
 
@@ -2320,7 +2707,7 @@ class _ScreeningFormState extends State<ScreeningForm>
                 suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18)),
               style: TextStyle(color: c.textPrimary),
               onTap: () async {
-                final picked = await showDatePicker(
+                final picked = await showModernDatePicker(
                   context: context,
                   initialDate: DateTime.now(),
                   firstDate: DateTime(2020), lastDate: DateTime.now(),
@@ -2367,7 +2754,7 @@ class _ScreeningFormState extends State<ScreeningForm>
                 suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18)),
               style: TextStyle(color: c.textPrimary),
               onTap: () async {
-                final picked = await showDatePicker(
+                final picked = await showModernDatePicker(
                   context: context,
                   initialDate: DateTime.now(),
                   firstDate: DateTime.now(), lastDate: DateTime(2035),
@@ -2600,7 +2987,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           validator: _screeningDateValidator,
           onTap: () async {
             final now = DateTime.now();
-            final pickedDate = await showDatePicker(
+            final pickedDate = await showModernDatePicker(
               context: context,
               initialDate: now,
               firstDate: now.subtract(const Duration(days: 7)),
@@ -2933,6 +3320,11 @@ class _ScreeningFormState extends State<ScreeningForm>
           onChanged: (v) {
             setState(() {
               _consentStatus = v!;
+              if (v == "Yes" || v == "Trial run") {
+                _consentDateTimeIso ??= DateTime.now().toIso8601String();
+              } else {
+                _consentDateTimeIso = null;
+              }
               if (_consentStatus != "Yes" && _consentStatus != "No" && _consentStatus != "Trial run") {
                 _relationshipToParticipant = "Select";
                 _relationshipOtherText     = "";
@@ -2988,8 +3380,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
         // 28. Reason for refusal (if No)
         if (_consentStatus == "No") ...[
-          Text("28. If no, reason for consent refusal (select all that apply) *",
-              style: TextStyle(color: c.textSecondary, fontSize: 13)),
+          _reqText("28. If no, reason for consent refusal (select all that apply)", c),
           const SizedBox(height: 8),
           ...[
             "Fear of adverse effects", "Family pressure", "Not known", "Other"
@@ -3013,8 +3404,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
         // 30. Reason not approached (if Not approached) — multi-select, matches webform
         if (_consentStatus == "Not approached") ...[
-          Text("29. If not approached, reason (select all that apply) *",
-              style: TextStyle(color: c.textSecondary, fontSize: 13)),
+          _reqText("29. If not approached, reason (select all that apply)", c),
           const SizedBox(height: 8),
           ...[
             "Nurse on leave", "Parent not available", "Missed screening", "Other"

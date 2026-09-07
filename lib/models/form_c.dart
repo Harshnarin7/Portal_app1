@@ -1,30 +1,43 @@
+import 'birth_resuscitation.dart';
+
+/// Local cache model for mobile Form C (SharedPreferences).
+/// Includes every UI field so drafts never lose resuscitation details.
 class FormC {
   final String screeningId;
 
-  final bool ventilation;
+  final bool? ventilation;
   final String device;
-  final bool sibPeep;
+  final bool? sibPeep;
+  final String? sibPeepWith;
+  final String sibPeepCmh2o;
+  final String tpiecePip;
+  final String tpiecePeep;
+  final String tpieceFlow;
   final String interface;
   final String ventilationDuration;
 
-  final bool intubation;
-  final bool chestCompression;
+  final bool? intubation;
+  final bool? chestCompression;
   final String chestCompressionDuration;
 
-  final bool epinephrine;
+  final bool? epinephrine;
   final String epinephrineDoses;
+  final String? adrenalineDilution;
+  final String? adrenalineRoute;
 
-  final bool fluidBolus;
+  final bool? fluidBolus;
+  final String fluidBolusDoses;
+  final String fluidBolusCumulative;
 
-  final bool placentalTransfusion;
+  final bool? placentalTransfusion;
   final String placentalMethod;
 
-  final String cordClampedAt;      // ← ADD
+  final String cordClampedAt;
   final String cordClampTime;
   final String timeToRespiration;
-  final String timeToSpo2Above80;  // ← ADD
+  final String timeToSpo2Above80;
   final String spo2At5Min;
-  final String totalTime;          // ← ADD
+  final String totalTime;
 
   final String fio2Exit;
   final String spo2Exit;
@@ -33,84 +46,151 @@ class FormC {
   final String be;
   final String pco2;
 
-  final bool cordBloodDone;
-  final bool resusFailure;
+  final bool? cordBloodDone;
+  final bool? cordBloodWithin1hr;
+  final String? cordBloodSource;
+  final bool? resusFailure;
   final String exitReason;
-  final Map<String, Map<int, bool>> timelineChecks;
+  final bool? blenderStopped;
+  final List<String> blenderInterruptReasons;
+  final String blenderStoppedDescription;
+  final String blenderLetter;
+
+  /// Minute-wise Y / N / NR (string) — preserves NR unlike bool map.
+  final Map<String, Map<int, String>> timelineChecks;
   final Map<int, String> apgarScores;
 
   FormC({
     required this.screeningId,
-    required this.ventilation,
+    this.ventilation,
     required this.device,
-    required this.sibPeep,
+    this.sibPeep,
+    this.sibPeepWith,
+    this.sibPeepCmh2o = "",
+    this.tpiecePip = "",
+    this.tpiecePeep = "",
+    this.tpieceFlow = "",
     required this.interface,
     required this.ventilationDuration,
-    required this.intubation,
-    required this.chestCompression,
+    this.intubation,
+    this.chestCompression,
     required this.chestCompressionDuration,
-    required this.epinephrine,
-    required this.epinephrineDoses,
-    required this.fluidBolus,
-    required this.placentalTransfusion,
+    this.epinephrine,
+    this.epinephrineDoses = "",
+    this.adrenalineDilution,
+    this.adrenalineRoute,
+    this.fluidBolus,
+    this.fluidBolusDoses = "",
+    this.fluidBolusCumulative = "",
+    this.placentalTransfusion,
     required this.placentalMethod,
-    required this.cordClampedAt,      // ← ADD
+    required this.cordClampedAt,
     required this.cordClampTime,
     required this.timeToRespiration,
-    required this.timeToSpo2Above80,  // ← ADD
+    required this.timeToSpo2Above80,
     required this.spo2At5Min,
-    required this.totalTime,          // ← ADD
+    required this.totalTime,
     required this.timelineChecks,
     required this.apgarScores,
-    required this.fio2Exit,
+    this.fio2Exit = "",
     required this.spo2Exit,
     required this.ph,
     required this.be,
     required this.pco2,
-    required this.cordBloodDone,
-    required this.resusFailure,
+    this.cordBloodDone,
+    this.cordBloodWithin1hr,
+    this.cordBloodSource,
+    this.resusFailure,
     required this.exitReason,
+    this.blenderStopped,
+    this.blenderInterruptReasons = const [],
+    this.blenderStoppedDescription = "",
+    this.blenderLetter = "",
   });
+
+  static Map<String, Map<int, String>> _parseTimeline(dynamic raw) {
+    final out = <String, Map<int, String>>{};
+    if (raw is! Map) return out;
+    raw.forEach((k, v) {
+      if (v is! Map) return;
+      final mins = <int, String>{};
+      v.forEach((minKey, val) {
+        final m = int.tryParse(minKey.toString());
+        if (m == null) return;
+        if (val == null) return;
+        if (val is bool) {
+          mins[m] = val ? "Y" : "N";
+        } else {
+          final s = val.toString().trim();
+          if (s.isEmpty) return;
+          // Normalize legacy Yes/No
+          if (s == "Yes" || s == "Y") {
+            mins[m] = "Y";
+          } else if (s == "No" || s == "N") {
+            mins[m] = "N";
+          } else {
+            mins[m] = s; // NR or other
+          }
+        }
+      });
+      out[k.toString()] = mins;
+    });
+    return out;
+  }
 
   factory FormC.fromJson(Map<String, dynamic> json) {
     return FormC(
-      screeningId: json["screeningId"] ?? "",
-      ventilation: json["ventilation"] ?? false,
-      device: json["device"] ?? "",
-      sibPeep: json["sibPeep"] ?? false,
-      interface: json["interface"] ?? "",
-      ventilationDuration: json["ventilationDuration"] ?? "",
-      intubation: json["intubation"] ?? false,
-      chestCompression: json["chestCompression"] ?? false,
-      chestCompressionDuration: json["chestCompressionDuration"] ?? "",
-      epinephrine: json["epinephrine"] ?? false,
-      epinephrineDoses: json["epinephrineDoses"] ?? "",
-      fluidBolus: json["fluidBolus"] ?? false,
-      placentalTransfusion: json["placentalTransfusion"] ?? false,
-      placentalMethod: json["placentalMethod"] ?? "",
-      cordClampedAt: json["cordClampedAt"] ?? "",        // ← ADD
-      cordClampTime: json["cordClampTime"] ?? "",
-      timeToRespiration: json["timeToRespiration"] ?? "",
-      timeToSpo2Above80: json["timeToSpo2Above80"] ?? "", // ← ADD
-      spo2At5Min: json["spo2At5Min"] ?? "",
-      totalTime: json["totalTime"] ?? "",                 // ← ADD
-      fio2Exit: json["fio2Exit"] ?? "",
-      spo2Exit: json["spo2Exit"] ?? "",
-      ph: json["ph"] ?? "",
-      be: json["be"] ?? "",
-      pco2: json["pco2"] ?? "",
-      cordBloodDone: json["cordBloodDone"] ?? false,
-      resusFailure: json["resusFailure"] ?? false,
-      exitReason: json["exitReason"] ?? "",
-      timelineChecks: (json["timelineChecks"] as Map<String, dynamic>? ?? {})
-          .map((k, v) => MapEntry(
-                k,
-                (v as Map<String, dynamic>).map(
-                  (min, val) => MapEntry(int.parse(min), val as bool),
-                ),
-              )),
-      apgarScores: (json["apgarScores"] as Map<String, dynamic>? ?? {})
-          .map((k, v) => MapEntry(int.parse(k), v as String)),
+      screeningId: (json["screeningId"] ?? "").toString(),
+      ventilation: json["ventilation"] as bool?,
+      device: (json["device"] ?? "").toString(),
+      sibPeep: json["sibPeep"] as bool?,
+      sibPeepWith: json["sibPeepWith"]?.toString(),
+      sibPeepCmh2o: (json["sibPeepCmh2o"] ?? "").toString(),
+      tpiecePip: (json["tpiecePip"] ?? "").toString(),
+      tpiecePeep: (json["tpiecePeep"] ?? "").toString(),
+      tpieceFlow: (json["tpieceFlow"] ?? "").toString(),
+      interface: (json["interface"] ?? "").toString(),
+      ventilationDuration: (json["ventilationDuration"] ?? "").toString(),
+      intubation: json["intubation"] as bool?,
+      chestCompression: json["chestCompression"] as bool?,
+      chestCompressionDuration:
+          (json["chestCompressionDuration"] ?? "").toString(),
+      epinephrine: json["epinephrine"] as bool?,
+      epinephrineDoses: (json["epinephrineDoses"] ?? "").toString(),
+      adrenalineDilution: json["adrenalineDilution"]?.toString(),
+      adrenalineRoute: json["adrenalineRoute"]?.toString(),
+      fluidBolus: json["fluidBolus"] as bool?,
+      fluidBolusDoses: (json["fluidBolusDoses"] ?? "").toString(),
+      fluidBolusCumulative: (json["fluidBolusCumulative"] ?? "").toString(),
+      placentalTransfusion: json["placentalTransfusion"] as bool?,
+      placentalMethod: (json["placentalMethod"] ?? "").toString(),
+      cordClampedAt: (json["cordClampedAt"] ?? "").toString(),
+      cordClampTime: (json["cordClampTime"] ?? "").toString(),
+      timeToRespiration: (json["timeToRespiration"] ?? "").toString(),
+      timeToSpo2Above80: (json["timeToSpo2Above80"] ?? "").toString(),
+      spo2At5Min: (json["spo2At5Min"] ?? "").toString(),
+      totalTime: (json["totalTime"] ?? "").toString(),
+      fio2Exit: (json["fio2Exit"] ?? "").toString(),
+      spo2Exit: (json["spo2Exit"] ?? "").toString(),
+      ph: (json["ph"] ?? "").toString(),
+      be: (json["be"] ?? "").toString(),
+      pco2: (json["pco2"] ?? "").toString(),
+      cordBloodDone: json["cordBloodDone"] as bool?,
+      cordBloodWithin1hr: json["cordBloodWithin1hr"] as bool?,
+      cordBloodSource: json["cordBloodSource"]?.toString(),
+      resusFailure: json["resusFailure"] as bool?,
+      exitReason: (json["exitReason"] ?? "").toString(),
+      blenderStopped: json["blenderStopped"] as bool?,
+      blenderInterruptReasons: parseBlenderInterruptReasons(
+        json["blenderInterruptReasons"] ?? json["blender_interrupt_reasons"],
+      ),
+      blenderStoppedDescription:
+          (json["blenderStoppedDescription"] ?? "").toString(),
+      blenderLetter: (json["blenderLetter"] ?? "").toString(),
+      timelineChecks: _parseTimeline(json["timelineChecks"]),
+      apgarScores: (json["apgarScores"] as Map<String, dynamic>? ?? {}).map(
+        (k, v) => MapEntry(int.parse(k), v.toString()),
+      ),
     );
   }
 
@@ -119,6 +199,11 @@ class FormC {
         "ventilation": ventilation,
         "device": device,
         "sibPeep": sibPeep,
+        "sibPeepWith": sibPeepWith,
+        "sibPeepCmh2o": sibPeepCmh2o,
+        "tpiecePip": tpiecePip,
+        "tpiecePeep": tpiecePeep,
+        "tpieceFlow": tpieceFlow,
         "interface": interface,
         "ventilationDuration": ventilationDuration,
         "intubation": intubation,
@@ -126,23 +211,33 @@ class FormC {
         "chestCompressionDuration": chestCompressionDuration,
         "epinephrine": epinephrine,
         "epinephrineDoses": epinephrineDoses,
+        "adrenalineDilution": adrenalineDilution,
+        "adrenalineRoute": adrenalineRoute,
         "fluidBolus": fluidBolus,
+        "fluidBolusDoses": fluidBolusDoses,
+        "fluidBolusCumulative": fluidBolusCumulative,
         "placentalTransfusion": placentalTransfusion,
         "placentalMethod": placentalMethod,
-        "cordClampedAt": cordClampedAt,        // ← ADD
+        "cordClampedAt": cordClampedAt,
         "cordClampTime": cordClampTime,
         "timeToRespiration": timeToRespiration,
-        "timeToSpo2Above80": timeToSpo2Above80, // ← ADD
+        "timeToSpo2Above80": timeToSpo2Above80,
         "spo2At5Min": spo2At5Min,
-        "totalTime": totalTime,                 // ← ADD
+        "totalTime": totalTime,
         "fio2Exit": fio2Exit,
         "spo2Exit": spo2Exit,
         "ph": ph,
         "be": be,
         "pco2": pco2,
         "cordBloodDone": cordBloodDone,
+        "cordBloodWithin1hr": cordBloodWithin1hr,
+        "cordBloodSource": cordBloodSource,
         "resusFailure": resusFailure,
         "exitReason": exitReason,
+        "blenderStopped": blenderStopped,
+        "blenderInterruptReasons": blenderInterruptReasons,
+        "blenderStoppedDescription": blenderStoppedDescription,
+        "blenderLetter": blenderLetter,
         "timelineChecks": timelineChecks.map(
           (k, v) => MapEntry(
             k,

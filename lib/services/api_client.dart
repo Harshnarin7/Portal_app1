@@ -107,6 +107,41 @@ class ApiClient {
   Future<Map<String, dynamic>> get(String path) =>
       request('GET', path);
 
+  /// GET that treats JSON `null` / empty body as null (Helper Form 4 empty day).
+  Future<Map<String, dynamic>?> getNullable(String path) async {
+    final token = await TokenStorage.getAccessToken();
+    final deviceId = await TokenStorage.getOrCreateDeviceId();
+    final headers = {
+      'Content-Type': 'application/json',
+      'X-Device-ID': deviceId,
+      if (token != null) 'Authorization': 'Bearer $token',
+    };
+    final uri = Uri.parse('$_base$path');
+    var resp = await http.get(uri, headers: headers)
+        .timeout(const Duration(seconds: 30));
+    if (resp.statusCode == 401 && !_refreshing) {
+      final refreshed = await _silentRefresh();
+      if (refreshed) {
+        final token2 = await TokenStorage.getAccessToken();
+        resp = await http
+            .get(uri, headers: {
+              ...headers,
+              if (token2 != null) 'Authorization': 'Bearer $token2',
+            })
+            .timeout(const Duration(seconds: 30));
+      } else {
+        throw const ApiException(401, 'Session expired. Please log in again.');
+      }
+    }
+    if (resp.statusCode >= 200 && resp.statusCode < 300) {
+      if (resp.body.isEmpty || resp.body.trim() == 'null') return null;
+      final decoded = jsonDecode(resp.body);
+      if (decoded == null) return null;
+      return Map<String, dynamic>.from(decoded as Map);
+    }
+    throw ApiException(resp.statusCode, 'Request failed (${resp.statusCode})');
+  }
+
   // For endpoints that return a raw JSON array (e.g. GET /screenings/)
   // rather than an object — get() above can't be reused here since it's
   // hard-typed to Map and would throw a cast error on a List response.
