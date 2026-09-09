@@ -57,7 +57,9 @@ class MetabRenalVascEyeDay {
   List<MrveReading> calciumReadings = [];
 
   bool? akiSuspected;
-  String? akiStage; // Stage 1|2|3
+  // KDIGO stage removed to match web (MetabRenalVascEyeLog.jsx) — no longer
+  // captured going forward. akiStageOptions kept only as a reference for
+  // legacy-data migration below.
   String? creatinineValue;
   double? urineOutput8am2pm;
   double? urineOutput2pm8pm;
@@ -82,7 +84,9 @@ class MetabRenalVascEyeDay {
   bool? plusDisease;
   bool? ropTreatment;
 
-  String? location;
+  // Multi-select to match web (PillMulti in MetabRenalVascEyeLog.jsx);
+  // wire format is a comma-joined string, same as feedType elsewhere.
+  List<String> location = [];
   bool? survivedTheDay;
 
   String? submissionStatus;
@@ -91,7 +95,7 @@ class MetabRenalVascEyeDay {
 
   MetabRenalVascEyeDay({required this.enrollmentId, required this.nicuDay});
 
-  static const akiStageOptions = ['Stage 1', 'Stage 2', 'Stage 3'];
+  // Legacy KDIGO values recognized only for migrating old rows above.
   static const ropStageOptions = [
     'Stage 1',
     'Stage 2',
@@ -106,6 +110,22 @@ class MetabRenalVascEyeDay {
     'KMC-N',
     'Other'
   ];
+
+  static List<String> _splitCsv(dynamic v) {
+    if (v == null) return [];
+    if (v is List) {
+      return v
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+    }
+    return v
+        .toString()
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+  }
 
   static bool? _asBool(dynamic v) {
     if (v == null) return null;
@@ -217,16 +237,17 @@ class MetabRenalVascEyeDay {
     d.potassiumReadings = _parseVal(json['potassium_readings_json']);
     d.calciumReadings = _parseVal(json['calcium_readings_json']);
     d.akiSuspected = _asBool(json['aki_suspected']);
-    d.akiStage = json['aki_stage']?.toString();
-    // Legacy AKI migrate (same as web migrateAkiFromLegacy)
-    final legacyAki = json['aki_kdigo_stage']?.toString() ?? d.akiStage;
+    // KDIGO stage is no longer captured on this form (removed, matches web
+    // migrateAkiFromLegacy) — this only derives aki_suspected, including
+    // from older rows that pre-date the aki_suspected/aki_stage split and
+    // only had a combined "N"/"Stage X" legacy value.
+    final legacyAki =
+        json['aki_kdigo_stage']?.toString() ?? json['aki_stage']?.toString();
     if (d.akiSuspected == null && legacyAki != null && legacyAki.isNotEmpty) {
       if (legacyAki == 'N' || legacyAki.toLowerCase() == 'no') {
         d.akiSuspected = false;
-        d.akiStage = null;
       } else if (legacyAki.startsWith('Stage')) {
         d.akiSuspected = true;
-        d.akiStage = legacyAki;
       }
     }
     d.creatinineValue = json['creatinine_value']?.toString();
@@ -255,7 +276,7 @@ class MetabRenalVascEyeDay {
     d.ropStage = json['rop_stage']?.toString();
     d.plusDisease = _asBool(json['plus_disease']);
     d.ropTreatment = _asBool(json['rop_treatment']);
-    d.location = json['location']?.toString();
+    d.location = _splitCsv(json['location']);
     d.survivedTheDay = _asBool(json['survived_the_day']);
     d.submissionStatus = json['submission_status']?.toString();
     d.savedAt = json['saved_at']?.toString();
@@ -310,7 +331,6 @@ class MetabRenalVascEyeDay {
             MrveReading(date: r.date, time: r.time, value: r.value))
         .toList();
     akiSuspected = src.akiSuspected;
-    akiStage = src.akiStage;
     creatinineValue = src.creatinineValue;
     urineOutput8am2pm = src.urineOutput8am2pm;
     urineOutput2pm8pm = src.urineOutput2pm8pm;
@@ -331,7 +351,7 @@ class MetabRenalVascEyeDay {
     ropStage = src.ropStage;
     plusDisease = src.plusDisease;
     ropTreatment = src.ropTreatment;
-    location = src.location;
+    location = List.of(src.location);
     survivedTheDay = src.survivedTheDay;
   }
 
@@ -364,7 +384,6 @@ class MetabRenalVascEyeDay {
       'calcium_readings_json':
           jsonEncode(calciumReadings.map((r) => r.toValueJson()).toList()),
       'aki_suspected': akiSuspected,
-      'aki_stage': akiSuspected == true ? akiStage : null,
       'creatinine_value': creatinineValue,
       'creatinine': creatNum,
       'urine_output_8am_2pm': urineOutput8am2pm,
@@ -386,7 +405,7 @@ class MetabRenalVascEyeDay {
       'rop_stage': ropStage,
       'plus_disease': plusDisease,
       'rop_treatment': ropTreatment,
-      'location': location,
+      'location': location.isEmpty ? null : location.join(','),
       'survived_the_day': survivedTheDay,
       'submission_status': submissionStatus,
       'saved_at': savedAt,
@@ -406,7 +425,8 @@ class MetabRenalVascEyeCompletion {
   static bool _ans(dynamic v) {
     if (v == null) return false;
     if (v is String) return v.trim().isNotEmpty;
-    return true;
+    if (v is List) return v.isNotEmpty;
+    return true; // bool false counts as answered
   }
 
   static MetabRenalVascEyeCompletion compute(MetabRenalVascEyeDay d) {
@@ -429,7 +449,6 @@ class MetabRenalVascEyeCompletion {
       _ans(d.ionizedCalciumValue),
       _ans(d.osteopeniaSuspected),
       _ans(d.akiSuspected),
-      if (d.akiSuspected == true) _ans(d.akiStage),
       _ans(d.creatinineValue),
       urineAnswered,
       _ans(d.dialysisCrrt),

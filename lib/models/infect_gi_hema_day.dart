@@ -1,6 +1,63 @@
 // Helper Form 3 — Infection / GI / Hematology Daily Log
 // Mirrors InfectGIHemaLog.jsx + InfectGIHemaDayCreate (fields 1–30).
 
+import 'dart:convert';
+
+/// Repeatable sepsis screen entry — mirrors web's `blankSepsisScreen()`
+/// shape (id/date/time/type/value/result). Not part of the original
+/// numbered CRF sequence; added so Form H's Infection auto-fill can
+/// distinguish clinical vs. screen-positive vs. culture-positive sepsis.
+class SepsisScreenEntry {
+  String id;
+  String date;
+  String time;
+  String type; // CRP | PCT | Hematological
+  String value;
+  String result; // '' | Positive | Negative
+
+  SepsisScreenEntry({
+    String? id,
+    this.date = '',
+    this.time = '',
+    this.type = 'CRP',
+    this.value = '',
+    this.result = '',
+  }) : id = id ?? DateTime.now().microsecondsSinceEpoch.toString();
+
+  factory SepsisScreenEntry.blank() {
+    final now = DateTime.now();
+    return SepsisScreenEntry(
+      date: '${now.year.toString().padLeft(4, '0')}-'
+          '${now.month.toString().padLeft(2, '0')}-'
+          '${now.day.toString().padLeft(2, '0')}',
+      time: '${now.hour.toString().padLeft(2, '0')}:'
+          '${now.minute.toString().padLeft(2, '0')}',
+      type: 'CRP',
+    );
+  }
+
+  factory SepsisScreenEntry.fromJson(Map<String, dynamic> j) =>
+      SepsisScreenEntry(
+        id: j['id']?.toString(),
+        date: j['date']?.toString() ?? '',
+        time: j['time']?.toString() ?? '',
+        type: j['type']?.toString().isNotEmpty == true
+            ? j['type'].toString()
+            : 'CRP',
+        value: j['value'] == null ? '' : '${j['value']}',
+        result: j['result']?.toString() ?? '',
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'date': date,
+        'time': time,
+        'type': type,
+        'value': value,
+        'result': result,
+      };
+}
+
 class InfectGiHemaDay {
   final String enrollmentId;
   int nicuDay;
@@ -15,6 +72,10 @@ class InfectGiHemaDay {
   String? meningitisType; // Probable | Proven
   bool? clabsi;
   bool? vap;
+  // Not part of the original numbered CRF sequence — mirrors web's
+  // sepsis_screen_sent gate + repeatable sepsis_screens list.
+  bool? sepsisScreenSent;
+  List<SepsisScreenEntry> sepsisScreens = [SepsisScreenEntry.blank()];
 
   // GI 10–22
   bool? npo;
@@ -56,6 +117,8 @@ class InfectGiHemaDay {
   // that backend check (unrecognized key defaults to 0) and was also
   // invisible to web's picker, which only recognizes these six values.
   static const necStageOptions = ['IA', 'IB', 'IIA', 'IIB', 'IIIA', 'IIIB'];
+  static const sepsisScreenTypeOptions = ['CRP', 'PCT', 'Hematological'];
+  static const sepsisScreenResultOptions = ['Positive', 'Negative'];
 
   static bool? _asBool(dynamic v) {
     if (v == null) return null;
@@ -85,6 +148,20 @@ class InfectGiHemaDay {
         .toList();
   }
 
+  static List<SepsisScreenEntry> _parseSepsisScreens(dynamic raw) {
+    try {
+      final list = raw is String ? jsonDecode(raw) : raw;
+      if (list is! List || list.isEmpty) return [SepsisScreenEntry.blank()];
+      final parsed = list
+          .whereType<Map>()
+          .map((e) => SepsisScreenEntry.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+      return parsed.isEmpty ? [SepsisScreenEntry.blank()] : parsed;
+    } catch (_) {
+      return [SepsisScreenEntry.blank()];
+    }
+  }
+
   factory InfectGiHemaDay.fromJson(Map<String, dynamic> json) {
     final d = InfectGiHemaDay(
       enrollmentId: (json['enrollment_id'] ?? '').toString(),
@@ -101,6 +178,8 @@ class InfectGiHemaDay {
     d.meningitisType = json['meningitis_type']?.toString();
     d.clabsi = _asBool(json['clabsi']);
     d.vap = _asBool(json['vap']);
+    d.sepsisScreenSent = _asBool(json['sepsis_screen_sent']);
+    d.sepsisScreens = _parseSepsisScreens(json['sepsis_screens_json']);
     d.npo = _asBool(json['npo']);
     d.men = _asBool(json['men']);
     d.enteralFeedsReceived = _asBool(json['enteral_feeds_received']);
@@ -138,6 +217,10 @@ class InfectGiHemaDay {
     meningitisType = src.meningitisType;
     clabsi = src.clabsi;
     vap = src.vap;
+    sepsisScreenSent = src.sepsisScreenSent;
+    sepsisScreens = src.sepsisScreens
+        .map((e) => SepsisScreenEntry.fromJson(e.toJson()))
+        .toList();
     npo = src.npo;
     men = src.men;
     enteralFeedsReceived = src.enteralFeedsReceived;
@@ -179,6 +262,9 @@ class InfectGiHemaDay {
           (meningitisType?.trim().isEmpty ?? true) ? null : meningitisType,
       'clabsi': clabsi,
       'vap': vap,
+      'sepsis_screen_sent': sepsisScreenSent,
+      'sepsis_screens_json':
+          jsonEncode(sepsisScreens.map((e) => e.toJson()).toList()),
       'npo': npo,
       'men': men,
       'enteral_feeds_received': enteralFeedsReceived,

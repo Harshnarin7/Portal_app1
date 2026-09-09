@@ -81,6 +81,10 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   String? _meningitisType;
   bool? _clabsi;
   bool? _vap;
+  // Not part of the original numbered CRF sequence — sepsis screen gate +
+  // repeatable entries (mirrors web's sepsis_screen_sent / sepsis_screens).
+  bool? _sepsisScreenSent;
+  List<SepsisScreenEntry> _sepsisScreens = [SepsisScreenEntry.blank()];
 
   // GI 10–22
   bool? _npo;
@@ -310,6 +314,8 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _meningitisType = null;
     _clabsi = null;
     _vap = null;
+    _sepsisScreenSent = null;
+    _sepsisScreens = [SepsisScreenEntry.blank()];
     _npo = null;
     _men = null;
     _enteralFeedsReceived = null;
@@ -339,6 +345,12 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _meningitisType = d.meningitisType;
     _clabsi = d.clabsi;
     _vap = d.vap;
+    _sepsisScreenSent = d.sepsisScreenSent;
+    _sepsisScreens = d.sepsisScreens.isEmpty
+        ? [SepsisScreenEntry.blank()]
+        : d.sepsisScreens
+            .map((e) => SepsisScreenEntry.fromJson(e.toJson()))
+            .toList();
     _npo = d.npo;
     _men = d.men;
     _enteralFeedsReceived = d.enteralFeedsReceived;
@@ -377,6 +389,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     d.meningitisType = _meningitisType;
     d.clabsi = _clabsi;
     d.vap = _vap;
+    d.sepsisScreenSent = _sepsisScreenSent;
+    d.sepsisScreens =
+        _sepsisScreens.map((e) => SepsisScreenEntry.fromJson(e.toJson())).toList();
     d.npo = _npo;
     d.men = _men;
     d.enteralFeedsReceived = _enteralFeedsReceived;
@@ -635,6 +650,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     final editable = _isFieldEditable;
     final sepsisYes = _sepsisSuspected == true;
     final cultureSentYes = _bloodCultureSent == true;
+    final sepsisScreenSentYes = _sepsisScreenSent == true;
     final meningitisYes = _meningitis == true;
     final npoNo = _npo == false;
     final enteralYes = _enteralFeedsReceived == true;
@@ -698,6 +714,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
                               editable,
                               sepsisYes: sepsisYes,
                               cultureSentYes: cultureSentYes,
+                              sepsisScreenSentYes: sepsisScreenSentYes,
                               meningitisYes: meningitisYes,
                             ),
                           ),
@@ -1002,11 +1019,83 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     );
   }
 
+  void _updateSepsisScreen(int i, String field, String v) {
+    if (!_isFieldEditable) return;
+    setState(() {
+      final e = _sepsisScreens[i];
+      switch (field) {
+        case 'date':
+          e.date = v;
+          break;
+        case 'time':
+          e.time = v;
+          break;
+        case 'type':
+          e.type = v;
+          break;
+        case 'value':
+          e.value = v;
+          break;
+        case 'result':
+          e.result = v;
+          break;
+      }
+    });
+  }
+
+  void _addSepsisScreen() {
+    if (!_isFieldEditable) return;
+    setState(() => _sepsisScreens.add(SepsisScreenEntry.blank()));
+  }
+
+  void _removeSepsisScreen(int i) {
+    if (!_isFieldEditable || _sepsisScreens.length <= 1) return;
+    setState(() => _sepsisScreens.removeAt(i));
+  }
+
+  Widget _sepsisScreensBlock(AppColors c, bool editable) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Sepsis Screens',
+              style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                  color: c.textTertiary)),
+          const SizedBox(height: 6),
+          for (var i = 0; i < _sepsisScreens.length; i++)
+            _SepsisScreenEntryRow(
+              key: ValueKey(_sepsisScreens[i].id),
+              index: i,
+              entry: _sepsisScreens[i],
+              editable: editable,
+              canDelete: _sepsisScreens.length > 1,
+              colors: c,
+              onChanged: (field, v) => _updateSepsisScreen(i, field, v),
+              onDelete: () => _removeSepsisScreen(i),
+            ),
+          if (editable)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _addSepsisScreen,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add screen'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   List<Widget> _infectionFields(
     AppColors c,
     bool editable, {
     required bool sepsisYes,
     required bool cultureSentYes,
+    required bool sepsisScreenSentYes,
     required bool meningitisYes,
   }) {
     return [
@@ -1029,6 +1118,17 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         if (cultureSentYes)
           _yn('3. Blood Culture Positive', _bloodCulturePositive, editable,
               (v) => setState(() => _bloodCulturePositive = v), c),
+        // Not part of the original numbered CRF sequence — mirrors web's
+        // sepsis_screen_sent gate + repeatable sepsis_screens list, added
+        // so Form H's Infection auto-fill can distinguish clinical vs.
+        // screen-positive vs. culture-positive sepsis.
+        _yn('Sepsis Screen Sent', _sepsisScreenSent, editable, (v) {
+          setState(() {
+            _sepsisScreenSent = v;
+            if (v != true) _sepsisScreens = [SepsisScreenEntry.blank()];
+          });
+        }, c),
+        if (sepsisScreenSentYes) _sepsisScreensBlock(c, editable),
       ],
       _yn('4. Antibiotics', _antibiotics, editable,
           (v) => setState(() => _antibiotics = v), c),
@@ -1534,5 +1634,205 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       'Dec'
     ];
     return names[m - 1];
+  }
+}
+
+class _SepsisScreenEntryRow extends StatefulWidget {
+  final int index;
+  final SepsisScreenEntry entry;
+  final bool editable;
+  final bool canDelete;
+  final AppColors colors;
+  final void Function(String field, String value) onChanged;
+  final VoidCallback onDelete;
+
+  const _SepsisScreenEntryRow({
+    super.key,
+    required this.index,
+    required this.entry,
+    required this.editable,
+    required this.canDelete,
+    required this.colors,
+    required this.onChanged,
+    required this.onDelete,
+  });
+
+  @override
+  State<_SepsisScreenEntryRow> createState() => _SepsisScreenEntryRowState();
+}
+
+class _SepsisScreenEntryRowState extends State<_SepsisScreenEntryRow> {
+  late final TextEditingController _dateCtrl;
+  late final TextEditingController _timeCtrl;
+  late final TextEditingController _valueCtrl;
+
+  static const _typeOptions = ['CRP', 'PCT', 'Hematological'];
+  static const _resultOptions = ['Positive', 'Negative'];
+
+  @override
+  void initState() {
+    super.initState();
+    _dateCtrl = TextEditingController(text: widget.entry.date);
+    _timeCtrl = TextEditingController(text: widget.entry.time);
+    _valueCtrl = TextEditingController(text: widget.entry.value);
+  }
+
+  @override
+  void didUpdateWidget(covariant _SepsisScreenEntryRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final e = widget.entry;
+    final o = oldWidget.entry;
+    if (o.id != e.id ||
+        o.date != e.date ||
+        o.time != e.time ||
+        o.value != e.value) {
+      _dateCtrl.text = e.date;
+      _timeCtrl.text = e.time;
+      _valueCtrl.text = e.value;
+    }
+  }
+
+  @override
+  void dispose() {
+    _dateCtrl.dispose();
+    _timeCtrl.dispose();
+    _valueCtrl.dispose();
+    super.dispose();
+  }
+
+  Widget _choiceRow(
+    String label,
+    List<String> options,
+    String? selected,
+    ValueChanged<String> onSelect, {
+    bool clearable = false,
+  }) {
+    final c = widget.colors;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 56,
+            child: Text(label,
+                style: TextStyle(fontSize: 12, color: c.textSecondary)),
+          ),
+          Expanded(
+            child: Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: options.map((o) {
+                final sel = selected == o;
+                return ChoiceChip(
+                  label: Text(o),
+                  selected: sel,
+                  onSelected: !widget.editable
+                      ? null
+                      : (_) => onSelect(
+                          clearable && sel ? '' : o),
+                );
+              }).toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.colors;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: c.surfaceAlt,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.borderLight),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (widget.canDelete)
+                Text('#${widget.index + 1}',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12,
+                        color: c.textTertiary)),
+              const Spacer(),
+              if (widget.canDelete && widget.editable)
+                IconButton(
+                  icon: Icon(Icons.delete_outline, size: 18, color: c.danger),
+                  onPressed: widget.onDelete,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+            ],
+          ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _dateCtrl,
+                  enabled: widget.editable,
+                  decoration: const InputDecoration(
+                    labelText: 'Date',
+                    isDense: true,
+                  ),
+                  onChanged: (v) => widget.onChanged('date', v),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: TextField(
+                  controller: _timeCtrl,
+                  enabled: widget.editable,
+                  decoration: const InputDecoration(
+                    labelText: 'Time',
+                    isDense: true,
+                  ),
+                  onChanged: (v) => widget.onChanged('time', v),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          _choiceRow('Type', _typeOptions, widget.entry.type,
+              (v) => widget.onChanged('type', v)),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 56,
+                child: Text('Value',
+                    style: TextStyle(fontSize: 12, color: c.textSecondary)),
+              ),
+              Expanded(
+                child: TextField(
+                  controller: _valueCtrl,
+                  enabled: widget.editable,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(isDense: true),
+                  onChanged: (v) => widget.onChanged('value', v),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          _choiceRow(
+            'Result',
+            _resultOptions,
+            widget.entry.result.isEmpty ? null : widget.entry.result,
+            (v) => widget.onChanged('result', v),
+            clearable: true,
+          ),
+        ],
+      ),
+    );
   }
 }

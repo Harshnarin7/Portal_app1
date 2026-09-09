@@ -353,7 +353,6 @@ class _HelperForm4MetabRenalVascEyeState
             id: r.id, date: r.date, time: r.time, value: r.value))
         .toList();
     m.akiSuspected = _model.akiSuspected;
-    m.akiStage = _model.akiStage;
     m.creatinineValue = _creatinineCtrl.text.trim().isEmpty
         ? null
         : _creatinineCtrl.text.trim();
@@ -404,7 +403,6 @@ class _HelperForm4MetabRenalVascEyeState
   bool get _ropDue => _model.ropScreeningDue == true;
   bool get _ropScreenedYes => _model.ropScreened == true;
   bool get _ropYes => _model.ropDetected == true;
-  bool get _akiSuspectedYes => _model.akiSuspected == true;
 
   MrveReading _blankReading({String value = ''}) {
     final now = DateTime.now();
@@ -593,7 +591,6 @@ class _HelperForm4MetabRenalVascEyeState
     if (!MetabRenalVascEyeDay.isNumericHighGlucose(m.highestGlucose)) {
       m.insulin = null;
     }
-    if (m.akiSuspected != true) m.akiStage = null;
     if (m.peripheralIv != true && m.peripheralArterial != true) {
       m.extravasationInjury = null;
     }
@@ -968,7 +965,8 @@ class _HelperForm4MetabRenalVascEyeState
                                 c,
                                 number: '',
                                 label: 'Location',
-                                child: _singlePills(
+                                hint: 'Select all that apply',
+                                child: _pillsMulti(
                                   MetabRenalVascEyeDay.locationOptions,
                                   _model.location,
                                   editable,
@@ -1068,26 +1066,10 @@ class _HelperForm4MetabRenalVascEyeState
 
   List<Widget> _renalFields(AppColors c, bool editable) {
     return [
-      _yn('11. AKI suspected', _model.akiSuspected, editable, (v) {
-        setState(() {
-          _model.akiSuspected = v;
-          if (v != true) _model.akiStage = null;
-        });
-      }, c),
-      if (_akiSuspectedYes) ...[
-        _fieldCard(
-          c,
-          number: '',
-          label: 'KDIGO stage',
-          child: _singlePills(
-            MetabRenalVascEyeDay.akiStageOptions,
-            _model.akiStage,
-            editable,
-            (v) => setState(() => _model.akiStage = v),
-            c,
-          ),
-        ),
-      ],
+      // KDIGO stage removed to match web — only AKI suspected Y/N is
+      // captured now (MetabRenalVascEyeLog.jsx no longer collects it).
+      _yn('11. AKI suspected', _model.akiSuspected, editable,
+          (v) => setState(() => _model.akiSuspected = v), c),
       _fieldCard(
         c,
         number: '12',
@@ -1835,6 +1817,38 @@ class _HelperForm4MetabRenalVascEyeState
           onSelected: !enabled
               ? null
               : (_) => onChanged(sel ? null : o),
+        );
+      }).toList(),
+    );
+  }
+
+  /// Multi-select pills (e.g. Location) — matches web's PillMulti.
+  Widget _pillsMulti(
+    List<String> options,
+    List<String> selected,
+    bool enabled,
+    ValueChanged<List<String>> onChanged,
+    AppColors c,
+  ) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: options.map((o) {
+        final sel = selected.contains(o);
+        return FilterChip(
+          label: Text(o),
+          selected: sel,
+          onSelected: !enabled
+              ? null
+              : (v) {
+                  final next = List<String>.from(selected);
+                  if (v) {
+                    next.add(o);
+                  } else {
+                    next.remove(o);
+                  }
+                  onChanged(next);
+                },
         );
       }).toList(),
     );
