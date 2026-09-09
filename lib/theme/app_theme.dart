@@ -147,6 +147,46 @@ class AppTheme {
       dividerColor       : c.borderLight,
       dialogBackgroundColor: c.surface,
       useMaterial3       : true,
+      // Modern fade-through page transitions on every platform (replaces
+      // the default abrupt slide-in on Android / iOS-only slide on iOS).
+      // Applies automatically to every MaterialPageRoute push/pop in the
+      // app — no per-screen changes needed.
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {
+          TargetPlatform.android: _FadeThroughTransitionsBuilder(),
+          TargetPlatform.iOS: _FadeThroughTransitionsBuilder(),
+          TargetPlatform.macOS: _FadeThroughTransitionsBuilder(),
+          TargetPlatform.windows: _FadeThroughTransitionsBuilder(),
+          TargetPlatform.linux: _FadeThroughTransitionsBuilder(),
+        },
+      ),
+    );
+  }
+}
+
+/// Fade + subtle upward slide, used for every route change. Feels closer
+/// to modern Material 3 "fade through" motion than the platform default.
+class _FadeThroughTransitionsBuilder extends PageTransitionsBuilder {
+  const _FadeThroughTransitionsBuilder();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic);
+    return FadeTransition(
+      opacity: curved,
+      child: SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(0, 0.03),
+          end: Offset.zero,
+        ).animate(curved),
+        child: child,
+      ),
     );
   }
 }

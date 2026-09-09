@@ -270,7 +270,7 @@ class _NurseHome extends StatefulWidget {
 // first `piiLimit` patients get PII — API returns newest-first
 // (`created_at.desc`), so that is the latest N shown on Home / pickers.
 // Pass null to fetch PII for everyone (Patients tab search-by-name).
-Future<List<CRF>> fetchPatientCrfs({int? piiLimit}) async {
+Future<List<CRF>> fetchPatientCrfs({int? piiLimit, String? ownSite}) async {
   try {
     // Same site-scoped list webforms uses — raise limit so AWS patients
     // created on web appear here (and vice versa). Newest first from API.
@@ -308,7 +308,7 @@ Future<List<CRF>> fetchPatientCrfs({int? piiLimit}) async {
       }
     }
 
-    return List.generate(patients.length, (i) {
+    final mappedList = List.generate(patients.length, (i) {
       final p = patients[i];
       final sid = p['screening_id']?.toString() ?? '';
       final pii = (i < piiCount && sid.isNotEmpty)
@@ -360,12 +360,29 @@ Future<List<CRF>> fetchPatientCrfs({int? piiLimit}) async {
       };
       return CRF.fromJson(mapped);
     });
+    return _filterOwnSite(mappedList, ownSite);
   } catch (_) {
     // Only use device cache when the server is unreachable — never prefer
     // local-only data over a successful empty site list (that hid AWS /
     // webform patients).
-    return ApiService().loadAllCRFs();
+    final local = await ApiService().loadAllCRFs();
+    return _filterOwnSite(local, ownSite);
   }
+}
+
+/// Extra client-side site lock so a nurse never sees another site's Form A
+/// even if a stale cache or token glitch returned extra rows. Superadmin /
+/// monitor (isGlobal) pass null and see the server's full accessible list.
+List<CRF> _filterOwnSite(List<CRF> list, String? ownSite) {
+  final site = (ownSite ?? '').trim();
+  if (site.isEmpty) return list;
+  return list.where((c) => c.site == site).toList();
+}
+
+String? _ownSiteListFilter(UserProfile user) {
+  if (user.role.isGlobal) return null;
+  final s = (user.siteName ?? '').trim();
+  return s.isEmpty ? null : s;
 }
 
 // ── Shared patient status helpers ───────────────────────────────────────────
@@ -925,7 +942,7 @@ class _NursePatientsPageState extends State<_NursePatientsPage> with RouteAware 
 
   Future<void> _load() async {
     setState(() => _loading = true);
-    final crfs = await fetchPatientCrfs();
+    final crfs = await fetchPatientCrfs(ownSite: _ownSiteListFilter(widget.user));
     if (!mounted) return;
     setState(() { _all = crfs; _loading = false; });
   }
@@ -1114,7 +1131,7 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
     // ── Load patients from BACKEND (site-isolated), PII merged in ──────
     // Home only ever shows the 5 most recent *real* patients — skip server
     // rows that are still draft placeholders (mother name "DRAFT").
-    final allCrfs = await fetchPatientCrfs(piiLimit: 20);
+    final allCrfs = await fetchPatientCrfs(piiLimit: 20, ownSite: _ownSiteListFilter(widget.user));
     final crfs = allCrfs
         .where((c) => !_isPlaceholderPatientName(c.motherFirstName, c.motherSurname))
         .take(5)
@@ -1316,7 +1333,7 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
     );
     List<CRF> all;
     try {
-      all = await fetchPatientCrfs(piiLimit: 40);
+      all = await fetchPatientCrfs(piiLimit: 40, ownSite: _ownSiteListFilter(widget.user));
     } catch (_) {
       all = _crfs;
     }
@@ -1457,7 +1474,7 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
     );
     List<CRF> all;
     try {
-      all = await fetchPatientCrfs(piiLimit: 40);
+      all = await fetchPatientCrfs(piiLimit: 40, ownSite: _ownSiteListFilter(widget.user));
     } catch (_) {
       all = _crfs;
     }

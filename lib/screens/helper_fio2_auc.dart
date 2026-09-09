@@ -372,13 +372,11 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     });
   }
 
-  bool _isDayLocked(int index) {
-    if (index <= 0) return false;
-    return !_days[index - 1].isComplete;
-  }
+  /// Listed days already have Helper 2 Supplemental O₂ = Yes (or saved FiO₂).
+  /// Each is independently editable — do not gate Day N on Day N−1.
+  bool _isDayLocked(int index) => false;
 
   void _addRow(_FiO2Day day, bool isW1) {
-    if (_isDayLocked(_days.indexOf(day))) return;
     setState(() {
       final rows = isW1 ? day.w1 : day.w2;
       final last = rows.isNotEmpty ? rows.last : null;
@@ -697,9 +695,9 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
                     _kpiStrip(c),
                     const SizedBox(height: 14),
                     ...List.generate(_days.length, (i) {
-                      final day = _days[i];
-                      final locked = _isDayLocked(i);
-                      return _dayCard(c, day, locked);
+                      // All listed days (Helper 2 Supplemental O₂ = Yes, or
+                      // saved FiO₂) are independently editable.
+                      return _dayCard(c, _days[i], false);
                     }),
                     const SizedBox(height: 10),
                     _formulaInfo(c),

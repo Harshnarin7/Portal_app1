@@ -123,6 +123,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (_gestationKnownInWeeks == false && _eddKnown == false) return true;
     if (_assignedScreeningId == null) return false;
     if (_screeningDateTimeCtrl.text.trim().isEmpty) return false;
+    if (_selectedSite.isEmpty) return false;
     if (_screenedByCtrl.text == "Select") return false;
 
     if (_consentStatus == "No" && _consentRefusalReasons.isEmpty) return false;
@@ -213,7 +214,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   final TextEditingController _maternalUidCtrl   = TextEditingController();
   final TextEditingController _hospitalNoCtrl    = TextEditingController();
   final TextEditingController _gestWeeksCtrl     = TextEditingController();
-  final TextEditingController _gestDaysCtrl      = TextEditingController(text: "0");
+  final TextEditingController _gestDaysCtrl      = TextEditingController();
   final TextEditingController _expectedDeliveryCtrl = TextEditingController();
   final TextEditingController _lmpCtrl           = TextEditingController();
   final TextEditingController _screeningDateTimeCtrl = TextEditingController();
@@ -249,22 +250,11 @@ class _ScreeningFormState extends State<ScreeningForm>
     "AMC"   : "06",
   };
 
-  final Map<String, List<String>> _nursesBySite = {
-    "PGIMER": [
-      "Mannat Guliani", "Shalini Dhiman", "Navkiran Kaur",
-      "Geetika", "Priyanka Thakur", "Seemran Kaur",
-      "Tanvi Saini", "Yashvi Jolly",
-    ],
-    "GMCH": ["Research Nurse"],
-    "IOG": ["Research Nurse"],
-    "AFMC": ["Research Nurse"],
-    "GMCH-A": ["Research Nurse"],
-    "AMC": ["Research Nurse"],
-  };
-
   List<String> _siteScreeners = [];
 
-  String _selectedSite = "PGIMER";
+  /// Empty unless the logged-in user is site-locked (matches web `isSiteLocked`).
+  String _selectedSite = "";
+  bool _siteLocked = false;
 
   late AnimationController _scanController;
   late Animation<double> _scanAnimation;
@@ -273,6 +263,8 @@ class _ScreeningFormState extends State<ScreeningForm>
     return "15. Maternal UID (CR number)";
   }
 
+  int _maternalUidMaxLen() => _selectedSite == "PGIMER" ? 12 : 15;
+
   List<TextInputFormatter> _maternalUidFormatters() {
     if (_selectedSite == "AMC") {
       return [
@@ -280,9 +272,16 @@ class _ScreeningFormState extends State<ScreeningForm>
         LengthLimitingTextInputFormatter(15),
       ];
     }
+    if (_selectedSite == "PGIMER") {
+      return [
+        FilteringTextInputFormatter.digitsOnly,
+        LengthLimitingTextInputFormatter(12),
+      ];
+    }
+    // GMCH / GMCH-A / IOG / AFMC: alphanumeric like web
     return [
-      FilteringTextInputFormatter.digitsOnly,
-      LengthLimitingTextInputFormatter(12),
+      FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z0-9/]')),
+      LengthLimitingTextInputFormatter(15),
     ];
   }
 
@@ -309,13 +308,34 @@ class _ScreeningFormState extends State<ScreeningForm>
         LengthLimitingTextInputFormatter(15),
       ];
     }
-    int maxLen = 15;
-    if (_selectedSite == "PGIMER") maxLen = 10;
-    if (_selectedSite == "GMCH-A" || _selectedSite == "GMCH") maxLen = 11;
-    if (_selectedSite == "IOG") maxLen = 6;
+    if (_selectedSite == "PGIMER") {
+      return [
+        FilteringTextInputFormatter.digitsOnly,
+        LengthLimitingTextInputFormatter(10),
+      ];
+    }
+    if (_selectedSite == "GMCH-A") {
+      return [
+        FilteringTextInputFormatter.digitsOnly,
+        LengthLimitingTextInputFormatter(6),
+      ];
+    }
+    if (_selectedSite == "GMCH") {
+      return [
+        FilteringTextInputFormatter.digitsOnly,
+        LengthLimitingTextInputFormatter(11),
+      ];
+    }
+    if (_selectedSite == "IOG") {
+      return [
+        FilteringTextInputFormatter.digitsOnly,
+        LengthLimitingTextInputFormatter(6),
+      ];
+    }
+    // AFMC and unknown: alphanumeric like web
     return [
-      FilteringTextInputFormatter.digitsOnly,
-      LengthLimitingTextInputFormatter(maxLen),
+      FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z0-9/]')),
+      LengthLimitingTextInputFormatter(15),
     ];
   }
 
@@ -361,7 +381,8 @@ class _ScreeningFormState extends State<ScreeningForm>
     );
 
     _maternalUidCtrl.addListener(() {
-      setState(() => _maternalUidLimitReached = _maternalUidCtrl.text.length >= 15);
+      setState(() => _maternalUidLimitReached =
+          _maternalUidCtrl.text.length >= _maternalUidMaxLen());
     });
 
     if (!widget.viewOnly) {
@@ -583,6 +604,7 @@ class _ScreeningFormState extends State<ScreeningForm>
         _previousYesExclusions = yesKeys;
         _loadingExisting = false;
       });
+      await _loadSiteScreeners();
     } catch (e) {
       if (!mounted) return;
       setState(() => _loadingExisting = false);
@@ -663,54 +685,66 @@ class _ScreeningFormState extends State<ScreeningForm>
   Future<void> _loadUserContext() async {
     final prefs = await SharedPreferences.getInstance();
     _userRole = prefs.getString("user_role") ?? "admin";
-    if (_userRole == "site") {
-      final site = prefs.getString("site_name");
-      if (site != null && mounted) {
-        setState(() {
-          _selectedSite = site;
+    if (!mounted) return;
+
+    final user = context.read<AuthProvider>().user;
+    final prefsSite = prefs.getString("site_name")?.trim() ?? "";
+    final userSite = user?.siteName?.trim() ?? "";
+
+    String? lockedSite;
+    if (_userRole == "site" && prefsSite.isNotEmpty) {
+      lockedSite = prefsSite;
+    } else if (user != null && !user.role.isGlobal && userSite.isNotEmpty) {
+      lockedSite = userSite;
+    }
+
+    if (mounted) {
+      setState(() {
+        _siteLocked = lockedSite != null;
+        if (lockedSite != null) {
+          _selectedSite = lockedSite;
           // Never wipe an in-progress / draft screening ID on reopen.
           if (!widget.loadDraft) {
             _screeningIdCtrl.clear();
             _idAssigned = false;
           }
-        });
-      }
-    }
-
-    // Auto-fill screened_by with FULL name (web uses full_name for audit)
-    if (!widget.loadDraft && mounted) {
-      final user = context.read<AuthProvider>().user;
-      if (user != null && user.fullName.trim().isNotEmpty) {
-        setState(() => _screenedByCtrl.text = user.fullName.trim());
-      }
+        }
+        // Do not default to PGIMER and do not write login name into Q12.
+      });
     }
 
     await _loadSiteScreeners();
   }
 
   Future<void> _loadSiteScreeners() async {
+    if (_selectedSite.isEmpty) {
+      if (mounted) setState(() => _siteScreeners = []);
+      return;
+    }
     try {
       final list = await ApiClient.instance.getList(
         '/sites/${Uri.encodeComponent(_selectedSite)}/screeners',
       );
       final names = list.map((e) => e.toString()).where((s) => s.trim().isNotEmpty).toList();
-      if (mounted && names.isNotEmpty) {
-        setState(() => _siteScreeners = names);
-        // Match web: autofill screened_by only when nurse list contains login name.
-        final user = context.read<AuthProvider>().user;
-        final target = user?.fullName.trim().toLowerCase() ?? "";
-        if (target.isNotEmpty && _screenedByCtrl.text.trim().isEmpty) {
-          String? match;
-          for (final n in names) {
-            if (n.trim().toLowerCase() == target) { match = n; break; }
-          }
-          if (match != null) {
-            setState(() => _screenedByCtrl.text = match!);
-          }
-        }
+      if (!mounted) return;
+      setState(() => _siteScreeners = names);
+      // Match web: autofill screened_by only when site-locked AND login name is on the roster.
+      if (!_siteLocked) return;
+      final user = context.read<AuthProvider>().user;
+      final target = user?.fullName.trim().toLowerCase() ?? "";
+      if (target.isEmpty) return;
+      final cur = _screenedByCtrl.text.trim();
+      if (cur.isNotEmpty && cur != "Select") return;
+      String? match;
+      for (final n in names) {
+        if (n.trim().toLowerCase() == target) { match = n; break; }
+      }
+      if (match != null) {
+        setState(() => _screenedByCtrl.text = match!);
       }
     } catch (_) {
-      // Fall back to hardcoded _nursesBySite
+      // No hardcoded nurse fallback — empty roster until the API succeeds.
+      if (mounted) setState(() => _siteScreeners = []);
     }
   }
 
@@ -810,10 +844,14 @@ class _ScreeningFormState extends State<ScreeningForm>
   }
 
   bool get _isEligibleGestation {
+    // Web shows A2–A5 as soon as Q1 = Yes, even before weeks are entered.
+    // Hide them only when a completed GA is outside 25w0d–31w6d.
+    if (_gestWeeksCtrl.text.trim().isEmpty) {
+      return _gestationKnownInWeeks == true;
+    }
     final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
     final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
     final t = weeks * 7 + days;
-    if (_gestWeeksCtrl.text.trim().isEmpty) return false;
     if (t < 25 * 7) return false;
     if (t > 31 * 7 + 6) return false;
     return true;
@@ -974,6 +1012,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   Future<void> _assignScreeningIdIfNeeded() async {
     if (_idAssigned) return;
     if (_isFormCompletelyEmpty()) return;
+    if (_selectedSite.isEmpty || !_siteMap.containsKey(_selectedSite)) return;
     final siteCode = _siteMap[_selectedSite] ?? "00";
 
     // Only create a server screening once we have real identity + GA —
@@ -1065,6 +1104,19 @@ class _ScreeningFormState extends State<ScreeningForm>
   Map<String, dynamic> _buildSyncPayload({bool useDraftFallbacks = false}) {
     final weeks = int.tryParse(_gestWeeksCtrl.text.trim());
     final days  = int.tryParse(_gestDaysCtrl.text.trim());
+    final ended = _gaEndedParticipation || useDraftFallbacks;
+    String screenedBy = _screenedByCtrl.text.trim();
+    if (screenedBy.isEmpty || screenedBy == "Select") {
+      screenedBy = "";
+      if (ended) {
+        try {
+          final name = context.read<AuthProvider>().user?.fullName.trim() ?? "";
+          screenedBy = name.isNotEmpty ? name : "N/A";
+        } catch (_) {
+          screenedBy = "N/A";
+        }
+      }
+    }
 
     final exclusionLabels = _exclusionAnswers.entries
         .where((e) => e.value == "Yes")
@@ -1080,14 +1132,13 @@ class _ScreeningFormState extends State<ScreeningForm>
           (useDraftFallbacks ? DateTime.now().toIso8601String() : null),
       'site_name'   : _selectedSite.isNotEmpty ? _selectedSite : null,
       'site_id'     : _siteMap[_selectedSite],
-      'screened_by' : _screenedByCtrl.text.trim().isNotEmpty && _screenedByCtrl.text != "Select"
-          ? _screenedByCtrl.text.trim() : null,
+      'screened_by' : screenedBy.isNotEmpty ? screenedBy : null,
       // Never send literal "DRAFT" — it shows up as fake patients on Home.
       'mother_first_name' : _motherFirstCtrl.text.trim().isNotEmpty
-          ? _motherFirstCtrl.text.trim() : null,
+          ? _motherFirstCtrl.text.trim() : (ended ? "" : null),
       'mother_surname'    : _motherSurnameCtrl.text.trim().isNotEmpty ? _motherSurnameCtrl.text.trim() : null,
       'husband_first_name': _husbandFirstCtrl.text.trim().isNotEmpty
-          ? _husbandFirstCtrl.text.trim() : null,
+          ? _husbandFirstCtrl.text.trim() : (ended ? "" : null),
       'husband_surname'   : _husbandSurnameCtrl.text.trim().isNotEmpty ? _husbandSurnameCtrl.text.trim() : null,
       'mother_contact'    : _motherPhoneCtrl.text.trim().isNotEmpty ? _motherPhoneCtrl.text.trim() : null,
       'husband_contact'   : _husbandPhoneCtrl.text.trim().isNotEmpty ? _husbandPhoneCtrl.text.trim() : null,
@@ -1098,14 +1149,16 @@ class _ScreeningFormState extends State<ScreeningForm>
           ? "Yes"
           : (_gestationKnownInWeeks == false ? "No" : null),
       'ga_source': _gestationKnownInWeeks == false ? (_gaSource) : null,
-      'gestation_weeks': weeks,
+      'gestation_weeks': weeks ?? (ended ? 0 : null),
       'gestation_days' : days  ?? 0,
       'gestation_method': gaMethod,
       'expected_delivery_date': _ddmmyyyyToIsoDate(_expectedDeliveryCtrl.text),
       'lmp_date'              : _ddmmyyyyToIsoDate(_lmpCtrl.text),
       // Omit until exclusions are answered — sending false early makes web
       // treat unanswered criteria as "No" when the draft is reopened.
-      'exclusion_present': _allExclusionsAnswered ? _exclusionPresent : null,
+      'exclusion_present': _allExclusionsAnswered
+          ? _exclusionPresent
+          : (ended ? false : null),
       // Use "" (not null) once answered so PUT clears a stale reasons string;
       // null is stripped by removeWhere and would leave old "Insufficient time".
       'exclusion_reasons': !_allExclusionsAnswered
@@ -1159,19 +1212,24 @@ class _ScreeningFormState extends State<ScreeningForm>
     };
   }
 
+  /// True when A2–A5 are hidden (out of 25+0–31+6, or GA undeterminable).
+  bool get _gaEndedParticipation =>
+      _isGestationOutOfRange() ||
+      (_gestationKnownInWeeks == false && _eddKnown == false);
+
   /// Draft/server sync only when required ScreeningCreate fields are real
   /// (avoids creating "DRAFT / Excluded" ghost patients on the home list).
+  /// Ineligible / undeterminable GA still POSTs so the row appears on web.
   bool _canSyncDraftToServer() {
+    if (_selectedSite.isEmpty || _siteMap[_selectedSite] == null) return false;
+    if (_gestationKnownInWeeks == false && _eddKnown == false) return true;
     final weeks = int.tryParse(_gestWeeksCtrl.text.trim());
-    return _selectedSite.isNotEmpty
-        && _siteMap[_selectedSite] != null
-        && _screenedByCtrl.text.trim().isNotEmpty
+    if (weeks == null || weeks < 10 || weeks > 45) return false;
+    if (_isGestationOutOfRange()) return true;
+    return _screenedByCtrl.text.trim().isNotEmpty
         && _screenedByCtrl.text != "Select"
         && _motherFirstCtrl.text.trim().isNotEmpty
-        && _husbandFirstCtrl.text.trim().isNotEmpty
-        && weeks != null
-        && weeks >= 18
-        && weeks <= 42;
+        && _husbandFirstCtrl.text.trim().isNotEmpty;
   }
 
   /// POSTs (create) or PUTs (update) the current form state to the real
@@ -1408,6 +1466,8 @@ class _ScreeningFormState extends State<ScreeningForm>
         });
       }
     }
+
+    await _loadSiteScreeners();
   }
 
   DateTime? _parseDdMmYyyy(String raw) {
@@ -1656,7 +1716,7 @@ class _ScreeningFormState extends State<ScreeningForm>
               style: TextStyle(color: c.danger, fontWeight: FontWeight.w800, fontSize: 15)),
         ]),
         content: Text(
-          "Gestational age cannot be determined.\n\nPlease do not proceed with screening. Your progress was saved as a draft.",
+          "Gestational age cannot be determined.\n\nPlease do not proceed with screening. Your progress was saved and will show on the web portal for this site.",
           style: TextStyle(color: c.textSecondary, fontSize: 13),
         ),
         actions: [
@@ -1692,7 +1752,7 @@ class _ScreeningFormState extends State<ScreeningForm>
               style: TextStyle(color: c.danger, fontWeight: FontWeight.w800, fontSize: 15)),
         ]),
         content: Text(
-          "Gestational age is outside the eligible range (25+0 to 31+6 weeks).\n\nScreening has been ended. Your progress was saved as a draft.",
+          "Gestational age is outside the eligible range (25+0 to 31+6 weeks).\n\nScreening has been ended. Your progress was saved and will show on the web portal for this site.",
           style: TextStyle(color: c.textSecondary, fontSize: 13),
         ),
         actions: [
@@ -1783,8 +1843,22 @@ class _ScreeningFormState extends State<ScreeningForm>
     // Firebase removed — data saved to PORTAL backend
   }
 
+  Future<void> _applySiteChange(String newSite) async {
+    setState(() {
+      _selectedSite = newSite;
+      _screenedByCtrl.text = "Select";
+      _consentTakenBy = "Select";
+      _siteScreeners = [];
+    });
+    await _loadSiteScreeners();
+  }
+
   Future<void> _onSiteChangedWithConfirm(String? newSite) async {
     if (newSite == null || newSite == _selectedSite) return;
+    if (_selectedSite.isEmpty) {
+      await _applySiteChange(newSite);
+      return;
+    }
     final c = AppTheme.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1808,7 +1882,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       ),
     );
     if (confirmed == true) {
-      setState(() { _selectedSite = newSite; });
+      await _applySiteChange(newSite);
     } else {
       setState(() {});
     }
@@ -1927,6 +2001,8 @@ class _ScreeningFormState extends State<ScreeningForm>
     required TextEditingController controller,
     required int min,
     required int max,
+    /// First +/- tap on an empty field snaps here (weeks: 25, the eligibility floor).
+    int? emptySnapTo,
     String? Function(String?)? validator,
     bool enabled = true,
   }) {
@@ -1945,9 +2021,10 @@ class _ScreeningFormState extends State<ScreeningForm>
               icon: Icon(Icons.remove_circle_outline_rounded, color: c.danger, size: 20),
               onPressed: () {
                 final parsed = int.tryParse(controller.text);
+                final snap = emptySnapTo ?? min;
                 setState(() {
                   if (parsed == null) {
-                    controller.text = "$min";
+                    controller.text = "$snap";
                   } else if (parsed > min) {
                     controller.text = "${parsed - 1}";
                   }
@@ -1971,9 +2048,10 @@ class _ScreeningFormState extends State<ScreeningForm>
               icon: Icon(Icons.add_circle_outline_rounded, color: c.success, size: 20),
               onPressed: () {
                 final parsed = int.tryParse(controller.text);
+                final snap = emptySnapTo ?? min;
                 setState(() {
                   if (parsed == null) {
-                    controller.text = "$min";
+                    controller.text = "$snap";
                   } else if (parsed < max) {
                     controller.text = "${parsed + 1}";
                   }
@@ -2108,6 +2186,12 @@ class _ScreeningFormState extends State<ScreeningForm>
               decoration: _requiredDecoration("Please specify…"),
               style: TextStyle(color: c.textPrimary),
               onChanged: (v) => _resuscitationOther = v,
+              validator: (v) {
+                if (_submitted &&
+                    _resuscitationReasons.contains("Other") &&
+                    (v == null || v.trim().isEmpty)) return "Required";
+                return null;
+              },
             ),
             if (_submitted && _resuscitationOther.trim().isEmpty)
               Text("Required", style: TextStyle(color: c.danger, fontSize: 12)),
@@ -2607,14 +2691,39 @@ class _ScreeningFormState extends State<ScreeningForm>
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text("Weeks", style: TextStyle(color: c.textTertiary, fontSize: 12)),
               const SizedBox(height: 6),
-              // Eligible window starts at 25+0 (matches study eligibility + web banner).
-              _numberStepper(controller: _gestWeeksCtrl, min: 25, max: 45),
+              // Web Q2: number input min 10 max 45 (eligibility banner is 25w0d–31w6d).
+              _numberStepper(
+                controller: _gestWeeksCtrl,
+                min: 10,
+                max: 45,
+                emptySnapTo: 25,
+                validator: (v) {
+                  if (!_submitted) return null;
+                  if (v == null || v.trim().isEmpty) return "Required";
+                  final n = int.tryParse(v);
+                  if (n == null || n < 10 || n > 45) {
+                    return "Must be between 10 and 45 weeks";
+                  }
+                  return null;
+                },
+              ),
             ])),
             const SizedBox(width: 12),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text("Days", style: TextStyle(color: c.textTertiary, fontSize: 12)),
               const SizedBox(height: 6),
-              _numberStepper(controller: _gestDaysCtrl, min: 0, max: 6),
+              _numberStepper(
+                controller: _gestDaysCtrl,
+                min: 0,
+                max: 6,
+                validator: (v) {
+                  if (!_submitted) return null;
+                  if (v == null || v.trim().isEmpty) return "Required";
+                  final n = int.tryParse(v);
+                  if (n == null || n < 0 || n > 6) return "Must be 0–6 days";
+                  return null;
+                },
+              ),
             ])),
           ]),
           const SizedBox(height: 14),
@@ -2757,7 +2866,7 @@ class _ScreeningFormState extends State<ScreeningForm>
                 final picked = await showModernDatePicker(
                   context: context,
                   initialDate: DateTime.now(),
-                  firstDate: DateTime.now(), lastDate: DateTime(2035),
+                  firstDate: DateTime(1900), lastDate: DateTime(2100),
                 );
                 if (picked != null) {
                   _expectedDeliveryCtrl.text =
@@ -2813,14 +2922,9 @@ class _ScreeningFormState extends State<ScreeningForm>
           _gestationKnownInWeeks = value;
           _gaSource = null;
           _eddKnown = null;
-          // Field 2 starts at eligible window: 25 weeks 0 days.
-          if (value == true) {
-            _gestWeeksCtrl.text = "25";
-            _gestDaysCtrl.text = "0";
-          } else {
-            _gestWeeksCtrl.text = "";
-            _gestDaysCtrl.text = "";
-          }
+          // Match web: do not pre-fill 25+0 — weeks/days stay empty until entered.
+          _gestWeeksCtrl.text = "";
+          _gestDaysCtrl.text = "";
           _gaAssessmentMethod = "Select";
           _lmpCtrl.clear();
           _expectedDeliveryCtrl.clear();
@@ -2954,15 +3058,19 @@ class _ScreeningFormState extends State<ScreeningForm>
         Row(children: [
           Expanded(
             child: DropdownButtonFormField<String>(
-              value: _selectedSite,
+              value: _siteMap.containsKey(_selectedSite) ? _selectedSite : null,
+              hint: Text("-- Select Site --",
+                  style: TextStyle(color: c.textTertiary)),
               dropdownColor: c.surface,
               decoration: _requiredDecoration("9. Site"),
               items: _siteMap.keys.map((s) =>
                   DropdownMenuItem(value: s,
                       child: Text(s, style: TextStyle(color: c.textPrimary)))).toList(),
-              onChanged: _userRole == "admin"
-                  ? (v) async => _onSiteChangedWithConfirm(v)
-                  : null,
+              onChanged: _siteLocked
+                  ? null
+                  : (v) async => _onSiteChangedWithConfirm(v),
+              validator: (v) =>
+                  _submitted && (v == null || v.isEmpty) ? "Required" : null,
               style: TextStyle(color: c.textPrimary),
             ),
           ),
@@ -2970,7 +3078,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           Expanded(
             child: TextFormField(
               readOnly: true,
-              controller: TextEditingController(text: _siteMap[_selectedSite]),
+              controller: TextEditingController(text: _siteMap[_selectedSite] ?? ""),
               decoration: _inputDecoration("10. Site ID (auto filled)"),
               style: TextStyle(color: c.textPrimary),
             ),
@@ -2990,7 +3098,7 @@ class _ScreeningFormState extends State<ScreeningForm>
             final pickedDate = await showModernDatePicker(
               context: context,
               initialDate: now,
-              firstDate: now.subtract(const Duration(days: 7)),
+              firstDate: DateTime(1900),
               lastDate: now,
             );
             if (pickedDate != null) {
@@ -3133,15 +3241,15 @@ class _ScreeningFormState extends State<ScreeningForm>
               TextFormField(
                 controller: _maternalUidCtrl,
                 focusNode: _maternalUidFocus,
-                keyboardType: _selectedSite == "AMC"
-                    ? TextInputType.text
-                    : TextInputType.number,
+                keyboardType: _selectedSite == "PGIMER"
+                    ? TextInputType.number
+                    : TextInputType.text,
                 inputFormatters: _maternalUidFormatters(),
                 decoration: _requiredDecoration(_maternalUidLabel())
                     .copyWith(counterText: ""),
                 validator: (v) => _submitted ? _maternalUidValidator(v) : null,
                 onChanged: (v) => setState(() {
-                  final max = _selectedSite == "AMC" ? 15 : 12;
+                  final max = _maternalUidMaxLen();
                   _maternalUidLimitReached = v.length >= max;
                   _maternalUidCount = v.length;
                 }),
@@ -3149,9 +3257,9 @@ class _ScreeningFormState extends State<ScreeningForm>
               ),
               if (_maternalUidFocus.hasFocus && _maternalUidLimitReached)
                 Padding(padding: const EdgeInsets.only(top: 3),
-                    child: Text(_selectedSite == "AMC"
-                            ? "Maximum length reached"
-                            : "Maximum 12 digits reached",
+                    child: Text(_selectedSite == "PGIMER"
+                            ? "Maximum 12 digits reached"
+                            : "Maximum length reached",
                         style: TextStyle(color: c.success,
                             fontSize: 11, fontWeight: FontWeight.w600))),
             ]),
@@ -3182,9 +3290,10 @@ class _ScreeningFormState extends State<ScreeningForm>
 
         TextFormField(
           controller: _hospitalNoCtrl,
-          keyboardType: _selectedSite == "AMC"
-              ? TextInputType.text
-              : TextInputType.number,
+          keyboardType: const {"PGIMER", "GMCH-A", "GMCH", "IOG"}
+                  .contains(_selectedSite)
+              ? TextInputType.number
+              : TextInputType.text,
           inputFormatters: _hospitalNoFormatters(),
           decoration: (_selectedSite == "PGIMER"
                   ? _requiredDecoration("16. Hospital Admission Number")
@@ -3422,6 +3531,12 @@ class _ScreeningFormState extends State<ScreeningForm>
               decoration: _inputDecoration("Please specify…"),
               style: TextStyle(color: c.textPrimary),
               onChanged: (v) => _notApproachedOtherText = v,
+              validator: (v) {
+                if (_consentStatus == "Not approached" &&
+                    _notApproachedReasons.contains("Other") &&
+                    (v == null || v.trim().isEmpty)) return "Required";
+                return null;
+              },
             ),
           ],
           const SizedBox(height: 14),
@@ -3535,10 +3650,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   // ── VALIDATORS ────────────────────────────────────────────────────────────
 
-  List<String> _consentNurseOptions() {
-    if (_siteScreeners.isNotEmpty) return _siteScreeners;
-    return _nursesBySite[_selectedSite] ?? const ["Research Nurse"];
-  }
+  List<String> _consentNurseOptions() => _siteScreeners;
 
   String? _maternalUidValidator(String? v) {
     final val = (v ?? "").trim();
@@ -3550,7 +3662,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (_selectedSite == "AMC") {
       if (val.isEmpty) return "Required";
       if (!RegExp(r'^\d+/\d{4}$').hasMatch(val)) {
-        return "Must be serial/year, e.g. 123/2026";
+        return "Must be in serial/year format, e.g. 123/2026";
       }
       return null;
     }
@@ -3566,8 +3678,8 @@ class _ScreeningFormState extends State<ScreeningForm>
       return null;
     }
     if (_selectedSite == "GMCH-A" && val.isNotEmpty &&
-        !RegExp(r'^\d{11}$').hasMatch(val)) {
-      return "Must be exactly 11 digits";
+        !RegExp(r'^\d{4,6}$').hasMatch(val)) {
+      return "Must be 4–6 digits";
     }
     if (_selectedSite == "GMCH" && val.isNotEmpty &&
         !RegExp(r'^\d{9,11}$').hasMatch(val)) {
@@ -3579,7 +3691,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     }
     if (_selectedSite == "AMC" && val.isNotEmpty &&
         !RegExp(r'^\d+/\d{4}$').hasMatch(val)) {
-      return "Must be serial/year, e.g. 123/2026";
+      return "Must be in serial/year format, e.g. 123/2026";
     }
     return null;
   }
@@ -3596,7 +3708,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   String _hospitalNoHint() {
     switch (_selectedSite) {
       case "GMCH-A":
-        return "11-digit admission number";
+        return "4–6 digit MRD number";
       case "AMC":
         return "e.g. 123/2026";
       case "GMCH":
@@ -3620,7 +3732,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   String? _phoneValidator(String? v) {
     if (v == null || v.trim().isEmpty) return "Required";
-    // Web save validate(): exactly 10 digits. Blur also checks 6–9 start.
+    // Match web save: exactly 10 digits and must start with 6–9.
     if (!RegExp(r'^\d{10}$').hasMatch(v.trim())) {
       return "Must be exactly 10 digits";
     }

@@ -21,6 +21,7 @@ import '../screens/helper_form3_infect_gi_hema.dart';
 import '../screens/helper_form4_metab_renal_vasc_eye.dart';
 import '../services/screening_api_service.dart';
 import '../utils/screening_status.dart';
+import '../widgets/shimmer_loader.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -36,6 +37,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
   bool _showDrafts = true;
   bool _showScreened = true;
   bool _isRefreshing = false;
+  bool _isInitialLoad = true; // true only until the very first _refresh() finishes
 
   String _searchQuery = "";
   String _filterStatus = "All";
@@ -100,7 +102,12 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
     setState(() => _isRefreshing = true);
     await _loadCrfs();
     await _loadDrafts();
-    if (mounted) setState(() => _isRefreshing = false);
+    if (mounted) {
+      setState(() {
+        _isRefreshing = false;
+        _isInitialLoad = false;
+      });
+    }
   }
 
   Future<void> _loadCrfs() async {
@@ -166,12 +173,20 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
         return CRF.fromJson(mapped);
       }).toList();
       if (!mounted) return;
-      setState(() => _crfList = list);
+      setState(() => _crfList = _ownSiteOnly(list));
       return;
     } catch (_) {}
     final list = await ApiService().loadAllCRFs();
     if (!mounted) return;
-    setState(() => _crfList = list.reversed.toList());
+    setState(() => _crfList = _ownSiteOnly(list.reversed.toList()));
+  }
+
+  List<CRF> _ownSiteOnly(List<CRF> list) {
+    final user = context.read<AuthProvider>().user;
+    if (user == null || user.role.isGlobal) return list;
+    final site = (user.siteName ?? '').trim();
+    if (site.isEmpty) return list;
+    return list.where((c) => c.site == site).toList();
   }
 
   Future<void> _loadDrafts() async {
@@ -354,9 +369,11 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
                 crossFadeState: _showScreened
                     ? CrossFadeState.showFirst
                     : CrossFadeState.showSecond,
-                firstChild: _filteredCrfs.isEmpty
-                    ? _emptyState()
-                    : Column(children: _filteredCrfs.map(_screenedCard).toList()),
+                firstChild: _isInitialLoad
+                    ? const SkeletonPatientList()
+                    : (_filteredCrfs.isEmpty
+                        ? _emptyState()
+                        : Column(children: _filteredCrfs.map(_screenedCard).toList())),
                 secondChild: const SizedBox.shrink(),
               ),
             ],
