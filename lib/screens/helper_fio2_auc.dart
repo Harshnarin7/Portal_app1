@@ -372,11 +372,13 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     });
   }
 
-  /// Listed days already have Helper 2 Supplemental O₂ = Yes (or saved FiO₂).
-  /// Each is independently editable — do not gate Day N on Day N−1.
-  bool _isDayLocked(int index) => false;
+  bool _isDayLocked(int index) {
+    if (index <= 0) return false;
+    return !_days[index - 1].isComplete;
+  }
 
   void _addRow(_FiO2Day day, bool isW1) {
+    if (_isDayLocked(_days.indexOf(day))) return;
     setState(() {
       final rows = isW1 ? day.w1 : day.w2;
       final last = rows.isNotEmpty ? rows.last : null;
@@ -695,9 +697,9 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
                     _kpiStrip(c),
                     const SizedBox(height: 14),
                     ...List.generate(_days.length, (i) {
-                      // All listed days (Helper 2 Supplemental O₂ = Yes, or
-                      // saved FiO₂) are independently editable.
-                      return _dayCard(c, _days[i], false);
+                      final day = _days[i];
+                      final locked = _isDayLocked(i);
+                      return _dayCard(c, day, locked);
                     }),
                     const SizedBox(height: 10),
                     _formulaInfo(c),
@@ -930,7 +932,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
                       final t = await showTimePicker(
                         context: context,
                         initialTime: _parseTod(day.start1) ??
-                            const TimeOfDay(hour: 8, minute: 0),
+                            const TimeOfDay(hour: 0, minute: 0),
                       );
                       _updateStart(day, true, t);
                     })),
@@ -943,7 +945,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
                       final t = await showTimePicker(
                         context: context,
                         initialTime: _parseTod(day.start2) ??
-                            const TimeOfDay(hour: 20, minute: 0),
+                            const TimeOfDay(hour: 0, minute: 0),
                       );
                       _updateStart(day, false, t);
                     })),

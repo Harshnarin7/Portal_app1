@@ -57,6 +57,10 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   bool _recordExists = false;
   bool _isEditing = true;
   bool _isSubmitted = false;
+  /// Site-monitor override expiry for the active day (mirrors web's
+  /// `overrideUntil` — reopens an otherwise-submitted/locked day for a
+  /// limited window). Parsed from `override_unlocked_until`.
+  DateTime? _overrideUntil;
   bool _dayLoadFailed = false;
   /// Guards against day-chip race: only the latest load may apply UI state.
   int _loadGen = 0;
@@ -212,22 +216,36 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   bool get _isFutureDay =>
       _day1Date != null && _activeDay > _todayNicuDay;
 
-  bool get _isPastLocked {
-    if (_day1Date == null) return false;
-    if (_activeDay >= _todayNicuDay) return false;
-    if (_activeDay == _todayNicuDay - 1 &&
-        DateTime.now().hour < _lateGraceHour) {
-      return false;
-    }
+  /// Informational only — a past day's calendar date no longer forces the
+  /// record read-only on its own. Locking is manual, via Submit & Lock
+  /// (mirrors web's `isPastActiveDay`).
+  bool get _isPastActiveDay =>
+      _day1Date != null && _activeDay < _todayNicuDay;
+
+  /// Site-monitor override reopens an otherwise-locked day for a limited
+  /// window (mirrors web's `isOverrideActiveDay`).
+  bool get _isOverrideActive =>
+      _overrideUntil != null && DateTime.now().toUtc().isBefore(_overrideUntil!);
+
+  bool get _isFieldEditable {
+    if (_isSubmitted && !_isOverrideActive) return false;
+    if (_isFutureDay) return false;
+    if (_recordExists && !_isEditing) return false;
     return true;
   }
 
-  bool get _isFieldEditable {
-    if (_isSubmitted) return false;
-    if (_isFutureDay) return false;
-    if (_isPastLocked) return false;
-    if (_recordExists && !_isEditing) return false;
-    return true;
+  /// Parses a backend timestamp as UTC even when it lacks an explicit
+  /// timezone suffix (matches web's `parseUtcTimestamp`).
+  static DateTime? _parseUtc(dynamic value) {
+    if (value == null) return null;
+    final s = value.toString();
+    if (s.isEmpty) return null;
+    final hasTz = RegExp(r'[Zz]|[+-]\d{2}:?\d{2}$').hasMatch(s);
+    try {
+      return DateTime.parse(hasTz ? s : '${s}Z').toUtc();
+    } catch (_) {
+      return null;
+    }
   }
 
   InfectGiHemaCompletion get _completion =>
@@ -235,9 +253,8 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
 
   bool get _canSubmit =>
       _completion.percent == 100 &&
-      !_isSubmitted &&
-      !_isFutureDay &&
-      !_isPastLocked;
+      (!_isSubmitted || _isOverrideActive) &&
+      !_isFutureDay;
 
   Future<void> _loadActiveDay() async {
     final eid = widget.enrollmentId.trim();
@@ -253,12 +270,14 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         _recordExists = false;
         _isEditing = true;
         _isSubmitted = false;
+        _overrideUntil = null;
         _dayLoadFailed = false;
       } else {
         _applyDay(InfectGiHemaDay.fromJson(raw));
         _recordExists = true;
         _isSubmitted = (raw['submission_status']?.toString() == 'submitted');
-        _isEditing = false;
+        _overrideUntil = _parseUtc(raw['override_unlocked_until']);
+        _isEditing = _isOverrideActive;
         _dayLoadFailed = false;
       }
     } catch (e) {
@@ -267,6 +286,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       _recordExists = false;
       _isEditing = false;
       _isSubmitted = false;
+      _overrideUntil = null;
       _dayLoadFailed = true;
       _banner =
           'Could not load Day $day — save disabled until reload succeeds: $e';
@@ -473,7 +493,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       return false;
     }
     if (!force && !_isFieldEditable && !_isEditing) return false;
-    if (_isFutureDay || _isSubmitted) return false;
+    if (_isFutureDay || (_isSubmitted && !_isOverrideActive)) return false;
     final eid = widget.enrollmentId.trim();
     if (eid.isEmpty) return false;
     if (_day1Date == null) {
@@ -575,6 +595,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       setState(() {
         _isSubmitted = true;
         _isEditing = false;
+        // Re-locking (even mid-override) ends the override immediately —
+        // mirrors backend clearing override_unlocked_until on submit.
+        _overrideUntil = null;
         _dayStatus[_activeDay] = 'submitted';
         _banner = 'Day $_activeDay submitted and locked';
         _bannerError = false;
@@ -637,14 +660,15 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                         children: [
                           _progressHeader(c),
-                          if (_isPastLocked && !_isSubmitted)
-                            _infoChip(c, 'Locked (Past Day)', c.warning),
-                          if (_isSubmitted)
+                          if (_isPastActiveDay && !_isSubmitted)
+                            _infoChip(c, 'Past day — still editable', c.warning),
+                          if (_isSubmitted && !_isOverrideActive)
                             _infoChip(c, 'Submitted — locked', c.success),
+                          if (_isSubmitted && _isOverrideActive)
+                            _infoChip(c, 'Locked — override active', c.warning),
                           if (_recordExists &&
                               !_isEditing &&
-                              !_isSubmitted &&
-                              !_isPastLocked)
+                              (!_isSubmitted || _isOverrideActive))
                             Padding(
                               padding: const EdgeInsets.only(bottom: 10),
                               child: OutlinedButton.icon(
@@ -1185,7 +1209,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
 
   Widget _bottomBar(AppColors c) {
     final canEdit = _isFieldEditable ||
-        (_recordExists && !_isSubmitted && !_isPastLocked && !_isFutureDay);
+        (_recordExists &&
+            (!_isSubmitted || _isOverrideActive) &&
+            !_isFutureDay);
     return SafeArea(
       child: Container(
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
@@ -1204,7 +1230,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
           children: [
             Expanded(
               child: OutlinedButton(
-                onPressed: (_saving || !canEdit || _isSubmitted)
+                onPressed: (_saving || !canEdit || (_isSubmitted && !_isOverrideActive))
                     ? null
                     : () {
                         setState(() => _isEditing = true);
@@ -1216,7 +1242,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
             const SizedBox(width: 8),
             Expanded(
               child: ElevatedButton(
-                onPressed: (_saving || !canEdit || _isSubmitted)
+                onPressed: (_saving || !canEdit || (_isSubmitted && !_isOverrideActive))
                     ? null
                     : () {
                         setState(() => _isEditing = true);

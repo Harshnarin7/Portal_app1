@@ -146,17 +146,19 @@ class FormsApiService {
   // MinimalMonitoringDayLog has real typed columns, mirrored in
   // models/minimal_monitoring.dart / MinimalMonitoringDayCreate on the
   // backend). One row per (enrollment_id, record_date); the "today" sheet
-  // clears automatically after 8am local time (server-side boundary_hour),
-  // matching MinimalMonitoringLog.jsx. GET never creates a row; PUT
-  // upserts it — same pattern as the web portal's persist().
+  // clears automatically after 11am local time (server-side boundary_hour,
+  // same NICU_DAY_GRACE_HOUR used everywhere else), matching
+  // MinimalMonitoringLog.jsx. GET never creates a row; PUT upserts it — same
+  // pattern as the web portal's persist().
+  static const _mmlBoundaryHour = 11;
 
   Future<Map<String, dynamic>> loadMinimalMonitoringToday(
     String enrollmentId,
   ) async {
-    // Match web MinimalMonitoringLog.jsx — before 08:00 local, "today"
+    // Match web MinimalMonitoringLog.jsx — before 11:00 local, "today"
     // is still the previous calendar date.
     return await ApiClient.instance.get(
-      '/minimal-monitoring/$enrollmentId/today?boundary_hour=8',
+      '/minimal-monitoring/$enrollmentId/today?boundary_hour=$_mmlBoundaryHour',
     );
   }
 
@@ -165,7 +167,7 @@ class FormsApiService {
     Map<String, dynamic> body,
   ) async {
     return await ApiClient.instance.put(
-      '/minimal-monitoring/$enrollmentId/today?boundary_hour=8',
+      '/minimal-monitoring/$enrollmentId/today?boundary_hour=$_mmlBoundaryHour',
       body: body,
     );
   }

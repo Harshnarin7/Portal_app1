@@ -28,7 +28,7 @@ class InfectGiHemaDay {
   bool? probiotic;
   bool? feedIntolerance;
   bool? necSuspected;
-  String? necConfirmedStage; // Stage I | Stage II | Stage III
+  String? necConfirmedStage; // modified Bell's staging: IA | IB | IIA | IIB | IIIA | IIIB
   bool? cholestasis;
 
   // Hema 23–30
@@ -49,7 +49,13 @@ class InfectGiHemaDay {
 
   static const feedTypeOptions = ['PDHM', 'EBM', 'FM'];
   static const meningitisTypeOptions = ['Probable', 'Proven'];
-  static const necStageOptions = ['Stage I', 'Stage II', 'Stage III'];
+  // Modified Bell's staging — must match web's PillSingle options exactly
+  // (RespCVNeuroLog... InfectGIHemaLog.jsx) and the backend's
+  // NEC_STAGE_ORDER keys (main.py), which computes "definite NEC" as
+  // stage >= IIA. The old coarse 'Stage I/II/III' set silently failed
+  // that backend check (unrecognized key defaults to 0) and was also
+  // invisible to web's picker, which only recognizes these six values.
+  static const necStageOptions = ['IA', 'IB', 'IIA', 'IIB', 'IIIA', 'IIIB'];
 
   static bool? _asBool(dynamic v) {
     if (v == null) return null;

@@ -1,7 +1,7 @@
 // Helper Form 5 — Minimal Monitoring Log
 // Parity with web MinimalMonitoringLog.jsx:
-//   multi-entry blocks + entries_json dual-write + boundary_hour=8
-//   Sheet date rolls at 08:00 local — form auto-refreshes to a new blank day.
+//   multi-entry blocks + entries_json dual-write + boundary_hour=11
+//   Sheet date rolls at 11:00 local — form auto-refreshes to a new blank day.
 
 import 'dart:async';
 
@@ -114,7 +114,7 @@ class _HelperForm5MinimalMonitoringState
     }
   }
 
-  /// Schedule reload at the next 08:00 local boundary (and each day after).
+  /// Schedule reload at the next 11:00 local boundary (and each day after).
   void _scheduleBoundaryRefresh() {
     _boundaryTimer?.cancel();
     final next = mmlNextBoundary();
@@ -145,7 +145,7 @@ class _HelperForm5MinimalMonitoringState
     if (showBanner) {
       setState(() {
         _banner =
-            "New day's sheet started — previous values cleared after 8:00 AM";
+            "New day's sheet started — previous values cleared after 11:00 AM";
         _bannerError = false;
       });
     }
@@ -406,7 +406,7 @@ class _HelperForm5MinimalMonitoringState
       });
       return;
     }
-    // If 8:00 AM already passed while the form stayed open, start a new day
+    // If 11:00 AM already passed while the form stayed open, start a new day
     // instead of writing into yesterday's sheet.
     final expected = mmlSheetDate();
     if (_sheetDate != null && _sheetDate != expected) {
@@ -821,8 +821,8 @@ class _HelperForm5MinimalMonitoringState
                       const SizedBox(height: 4),
                       Text(
                         _sheetDate != null && _sheetDate!.isNotEmpty
-                            ? "Today's sheet ($_sheetDate) — clears automatically after 8:00 AM"
-                            : "Today's sheet — clears automatically after 8:00 AM",
+                            ? "Today's sheet ($_sheetDate) — clears automatically after 11:00 AM"
+                            : "Today's sheet — clears automatically after 11:00 AM",
                         style: TextStyle(
                           color: c.primary,
                           fontSize: 12,

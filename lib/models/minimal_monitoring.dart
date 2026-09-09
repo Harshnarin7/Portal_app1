@@ -5,7 +5,7 @@
 
 import 'dart:convert';
 
-const kMmlBoundaryHour = 8;
+const kMmlBoundaryHour = 11;
 
 /// Same rule as backend `_mml_sheet_date` / web `MML_BOUNDARY_HOUR`:
 /// before [boundaryHour] local time, "today" is still yesterday's date.
