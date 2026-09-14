@@ -1,9 +1,16 @@
 // lib/screens/screening_form.dart
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/crf.dart';
 import '../services/api_service.dart';
@@ -19,13 +26,21 @@ import '../services/forms_api_service.dart';
 import '../services/api_client.dart';
 import '../utils/screening_status.dart';
 import 'dashboard_screen.dart';
-
-// ── Theme ──────────────────────────────────────────────────────────────────
 import '../theme/app_theme.dart';
 import '../widgets/modern_date_picker.dart';
 import '../theme/theme_notifier.dart';
 import '../widgets/theme_toggle_widget.dart';
 import '../widgets/required_asterisk.dart';
+import '../widgets/time_picker_24h.dart';
+import '../utils/clock_time_24.dart';
+
+/// Form A eligibility window (matches web ScreeningForm.jsx).
+const int _kEligibleGestMinTotalDays = 25 * 7;
+const int _kEligibleGestMaxTotalDays = 31 * 7 + 6;
+const int _kEligibleGestMinWeeks = 25;
+const int _kEligibleGestMaxWeeks = 31;
+
+// ── Theme ──────────────────────────────────────────────────────────────────
 
 String screeningCounterKey(String site) => "screening_counter_$site";
 const String draftIndexKey = "screening_draft_keys";
@@ -95,9 +110,28 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   String _consentTakenBy = "Select";
 
+  // ICF signature — drawn on-screen (finger/stylus), captured as a PNG and
+  // stored base64-encoded in the existing consent_obtained_by_signature
+  // column shared with web's schema. Per patient: loaded from the record
+  // on open, so a signature already taken for this patient/screening
+  // autofills instead of asking the nurse to re-draw it every time.
+  final GlobalKey _icfSignatureBoundaryKey = GlobalKey();
+  List<Offset?> _icfSignaturePoints = [];
+  String? _icfSignatureBase64;
+
   // ── Auto-save / draft durability (match web ~10s server autosave) ──
   Timer? _autoSaveTimer;
   Timer? _draftDebounce;
+  Timer? _gestationUiDebounce;
+  final ScrollController _formScrollController = ScrollController();
+  /// True while the nurse is drawing on a signature pad — parent scroll is frozen.
+  bool _icfSigningActive = false;
+
+  String _piName = "";
+  final GlobalKey _piSignatureBoundaryKey = GlobalKey();
+  List<Offset?> _piSignaturePoints = [];
+  String? _piSignatureBase64;
+  bool _piSigningActive = false;
 
   bool _idAssigned = false;
   // Derived from _exclusionAnswers — never store a separate bool that can
@@ -150,6 +184,16 @@ class _ScreeningFormState extends State<ScreeningForm>
         if (_relationshipToParticipant == "Other" &&
             _relationshipOtherText.trim().isEmpty) return false;
         if (_consentTakenBy == "Select") return false;
+        final needsSigs = _consentStatus == "Yes" ||
+            _consentStatus == "No" ||
+            _consentStatus == "Trial run";
+        if (needsSigs) {
+          final prepOk = (_icfSignatureBase64?.isNotEmpty ?? false) ||
+              _icfSignaturePoints.isNotEmpty;
+          final piOk = (_piSignatureBase64?.isNotEmpty ?? false) ||
+              _piSignaturePoints.isNotEmpty;
+          if (!prepOk || !piOk) return false;
+        }
       }
     }
     return true;
@@ -381,14 +425,17 @@ class _ScreeningFormState extends State<ScreeningForm>
     );
 
     _maternalUidCtrl.addListener(() {
-      setState(() => _maternalUidLimitReached =
-          _maternalUidCtrl.text.length >= _maternalUidMaxLen());
+      final next = _maternalUidCtrl.text.length >= _maternalUidMaxLen();
+      if (next != _maternalUidLimitReached && mounted) {
+        setState(() => _maternalUidLimitReached = next);
+      }
     });
 
     if (!widget.viewOnly) {
       _attachDraftListeners();
       // Match web ~10s autosave cadence
       _autoSaveTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+        if (_icfSigningActive || _piSigningActive) return;
         if (mounted && !_isFormCompletelyEmpty()) _saveDraft(silent: true);
       });
     }
@@ -425,6 +472,15 @@ class _ScreeningFormState extends State<ScreeningForm>
     final h = dt.hour.toString().padLeft(2, '0');
     final m = dt.minute.toString().padLeft(2, '0');
     return "${dt.day}/${dt.month}/${dt.year} $h:$m";
+  }
+
+  /// Ensures displayed screening time is 24-hour (e.g. 01:00 PM → 13:00).
+  String _normalizeScreeningDisplay24(String display) {
+    final t = display.trim();
+    if (t.isEmpty) return "";
+    final iso = ddMmYyyyHhMmToIso(t);
+    if (iso == null) return t;
+    return _isoToDdMmYyyyHHmm(iso);
   }
 
   String _unmapGestationMethod(String? v) {
@@ -518,8 +574,8 @@ class _ScreeningFormState extends State<ScreeningForm>
         _idAssigned = true;
         _serverConfirmedId = true;
         _selectedSite = (clinical['site_name'] ?? _selectedSite).toString();
-        _screeningDateTimeCtrl.text =
-            _isoToDdMmYyyyHHmm(clinical['screening_datetime']?.toString());
+        final scrDt = _isoToDdMmYyyyHHmm(clinical['screening_datetime']?.toString());
+        _screeningDateTimeCtrl.text = _normalizeScreeningDisplay24(scrDt);
         _screenedByCtrl.text = (clinical['screened_by'] ?? '').toString();
         _motherFirstCtrl.text =
             (pii?['mother_first_name'] ?? clinical['mother_first_name'] ?? '').toString();
@@ -598,6 +654,23 @@ class _ScreeningFormState extends State<ScreeningForm>
             (clinical['reason_not_approached_other'] ?? '').toString();
         final video = (clinical['video_pis_shown'] ?? '').toString();
         _videoPisShown = video.isNotEmpty ? video : "Select";
+        // Autofill: if this patient's record already has a signature, load it
+        // so the nurse sees it immediately instead of a blank pad.
+        final sigImg = (clinical['consent_signature_image'] ?? '').toString();
+        final sigLeg = (clinical['consent_obtained_by_signature'] ?? '').toString();
+        var sig = sigImg.isNotEmpty ? sigImg : sigLeg;
+        if (sig.startsWith('data:image') && sig.contains(',')) {
+          sig = sig.split(',').last;
+        }
+        _icfSignatureBase64 = sig.isNotEmpty ? sig : null;
+        _icfSignaturePoints = [];
+        final piRaw = (clinical['pi_signature_image'] ?? '').toString();
+        var piSig = piRaw;
+        if (piSig.startsWith('data:image') && piSig.contains(',')) {
+          piSig = piSig.split(',').last;
+        }
+        _piSignatureBase64 = piSig.isNotEmpty ? piSig : null;
+        _piSignaturePoints = [];
         _proceedToConsent = (exclusionAnswers.values.every((v) => v == "No") &&
                 !exclusionAnswers.values.contains(null)) ||
             _consentStatus != "Select";
@@ -652,6 +725,8 @@ class _ScreeningFormState extends State<ScreeningForm>
     WidgetsBinding.instance.removeObserver(this);
     _autoSaveTimer?.cancel();
     _draftDebounce?.cancel();
+    _gestationUiDebounce?.cancel();
+    _formScrollController.dispose();
     // Flush once more before controllers are disposed
     if (!widget.viewOnly && !_isFormCompletelyEmpty()) {
       // Fire-and-forget; dispose must stay sync
@@ -716,6 +791,23 @@ class _ScreeningFormState extends State<ScreeningForm>
     await _loadSiteScreeners();
   }
 
+  Future<void> _loadPiName() async {
+    if (_selectedSite.isEmpty) {
+      if (mounted) setState(() => _piName = "");
+      return;
+    }
+    try {
+      final res = await ApiClient.instance.request(
+        'GET',
+        '/sites/${Uri.encodeComponent(_selectedSite)}/pi-name',
+      );
+      if (!mounted) return;
+      setState(() => _piName = (res['pi_name'] ?? '').toString());
+    } catch (_) {
+      if (mounted) setState(() => _piName = "");
+    }
+  }
+
   Future<void> _loadSiteScreeners() async {
     if (_selectedSite.isEmpty) {
       if (mounted) setState(() => _siteScreeners = []);
@@ -746,6 +838,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       // No hardcoded nurse fallback — empty roster until the API succeeds.
       if (mounted) setState(() => _siteScreeners = []);
     }
+    await _loadPiName();
   }
 
   Future<void> _checkDuplicateMotherName() async {
@@ -831,6 +924,41 @@ class _ScreeningFormState extends State<ScreeningForm>
     setState(() => _setGestationFromEdd(edd));
   }
 
+  /// Direct GA entry (Q1 = Yes): keep weeks/days within 25+0–31+6 only.
+  void _normalizeDirectGestationEntry() {
+    if (_gestationKnownInWeeks != true) return;
+    final weeksStr = _gestWeeksCtrl.text.trim();
+    if (weeksStr.isEmpty) return;
+
+    var weeks = int.tryParse(weeksStr);
+    if (weeks == null) return;
+
+    var days = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
+
+    // Allow typing "2" on the way to "25"; clamp once two digits or already ≥25.
+    if (weeksStr.length >= 2 || weeks >= _kEligibleGestMinWeeks) {
+      if (weeks < _kEligibleGestMinWeeks) weeks = _kEligibleGestMinWeeks;
+      if (weeks > _kEligibleGestMaxWeeks) weeks = _kEligibleGestMaxWeeks;
+    } else {
+      return;
+    }
+
+    if (days < 0) days = 0;
+    if (days > 6) days = 6;
+
+    var t = weeks * 7 + days;
+    if (t < _kEligibleGestMinTotalDays) {
+      weeks = _kEligibleGestMinWeeks;
+      days = 0;
+    } else if (t > _kEligibleGestMaxTotalDays) {
+      weeks = _kEligibleGestMaxWeeks;
+      days = 6;
+    }
+
+    _gestWeeksCtrl.text = weeks.toString();
+    _gestDaysCtrl.text = days.toString();
+  }
+
   // Eligibility range matches web ScreeningForm.jsx getEligibilityStatus():
   // eligible = 25w0d .. 31w6d inclusive (t < 25*7 => low, t > 31*7+6 => high)
   bool _isGestationOutOfRange() {
@@ -838,8 +966,8 @@ class _ScreeningFormState extends State<ScreeningForm>
     final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
     final t = weeks * 7 + days;
     if (_gestWeeksCtrl.text.trim().isEmpty) return false;
-    if (t < 25 * 7) return true;
-    if (t > 31 * 7 + 6) return true;
+    if (t < _kEligibleGestMinTotalDays) return true;
+    if (t > _kEligibleGestMaxTotalDays) return true;
     return false;
   }
 
@@ -852,8 +980,8 @@ class _ScreeningFormState extends State<ScreeningForm>
     final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
     final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
     final t = weeks * 7 + days;
-    if (t < 25 * 7) return false;
-    if (t > 31 * 7 + 6) return false;
+    if (t < _kEligibleGestMinTotalDays) return false;
+    if (t > _kEligibleGestMaxTotalDays) return false;
     return true;
   }
 
@@ -1019,6 +1147,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     // never invent "DRAFT" placeholder patients.
     if (_canSyncDraftToServer()) {
       try {
+        await _captureAttestationSignaturesIfDrawn();
         final resp = await _syncToBackend(isDraft: true);
         final sid = resp?['screening_id']?.toString();
         if (sid != null && sid.isNotEmpty) {
@@ -1062,19 +1191,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     return "$y-$m-$d";
   }
 
-  String? _ddmmyyyyHHmmToIso(String? s) {
-    if (s == null || s.trim().isEmpty) return null;
-    final segs = s.trim().split(RegExp(r'\s+'));
-    if (segs.isEmpty) return null;
-    final datePart = segs[0];
-    final timePart = segs.length > 1 ? segs[1] : "00:00";
-    final parts = datePart.split('/');
-    if (parts.length != 3) return null;
-    final d = parts[0].padLeft(2, '0');
-    final m = parts[1].padLeft(2, '0');
-    final y = parts[2];
-    return "$y-$m-${d}T$timePart:00";
-  }
+  String? _ddmmyyyyHHmmToIso(String? s) => ddMmYyyyHhMmToIso(s);
 
   /// Maps the mobile "Method of Gestation Assessment" dropdown labels to the
   /// exact values the webform/backend use.
@@ -1098,6 +1215,142 @@ class _ScreeningFormState extends State<ScreeningForm>
       case "INSUFFICIENT":   return "Insufficient time";
       case "IUFD":            return "IUFD";
       default:                return key;
+    }
+  }
+
+  Future<Uint8List?> _exportIcfSignaturePng() async {
+    try {
+      final boundary = _icfSignatureBoundaryKey.currentContext
+          ?.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null) return null;
+      final image = await boundary.toImage(pixelRatio: 2.0);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      return byteData?.buffer.asUint8List();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Encodes a freshly-drawn (not-yet-saved) signature into
+  /// _icfSignatureBase64. No-op if nothing new was drawn (e.g. the loaded
+  /// signature is still showing, untouched).
+  Future<void> _captureIcfSignatureIfDrawn() async {
+    if (_icfSignaturePoints.isEmpty) return;
+    final bytes = await _exportIcfSignaturePng();
+    if (bytes != null) {
+      _icfSignatureBase64 = base64Encode(bytes);
+    }
+  }
+
+  Future<Uint8List?> _exportPiSignaturePng() async {
+    try {
+      final boundary = _piSignatureBoundaryKey.currentContext
+          ?.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null) return null;
+      final img = await boundary.toImage(pixelRatio: 2.0);
+      final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+      return byteData?.buffer.asUint8List();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _capturePiSignatureIfDrawn() async {
+    if (_piSignaturePoints.isEmpty) return;
+    final bytes = await _exportPiSignaturePng();
+    if (bytes != null) {
+      _piSignatureBase64 = base64Encode(bytes);
+    }
+  }
+
+  Future<void> _captureAttestationSignaturesIfDrawn() async {
+    await _captureIcfSignatureIfDrawn();
+    await _capturePiSignatureIfDrawn();
+  }
+
+  String _preparedByDisplayName() {
+    try {
+      final userName = context.read<AuthProvider>().user?.fullName.trim() ?? "";
+      if (userName.isNotEmpty) return userName;
+    } catch (_) {}
+    final screened = _screenedByCtrl.text.trim();
+    if (screened.isNotEmpty && screened != "Select") return screened;
+    return "";
+  }
+
+  String _attestationDateLabel() {
+    DateTime dt;
+    if (_consentDateTimeIso != null) {
+      try {
+        dt = DateTime.parse(_consentDateTimeIso!);
+      } catch (_) {
+        dt = DateTime.now();
+      }
+    } else {
+      dt = DateTime.now();
+    }
+    const months = [
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    return "${dt.day.toString().padLeft(2, "0")} ${months[dt.month - 1]} ${dt.year}";
+  }
+
+  /// Web app origin for static PIS PDFs (same files as portaltrial.in/documents/).
+  String get _pisDocumentsWebBase {
+    const webBase = String.fromEnvironment('WEB_BASE', defaultValue: '');
+    if (webBase.isNotEmpty) return webBase.replaceAll(RegExp(r'/+$'), '');
+    const apiBase = String.fromEnvironment('API_BASE', defaultValue: '');
+    if (apiBase.contains('api.portaltrial.in')) return 'https://portaltrial.in';
+    if (apiBase.contains('portaltrial.in')) return 'https://portaltrial.in';
+    return 'https://portaltrial.in';
+  }
+
+  Future<void> _openPisDocument(String langSuffix, String label) async {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      Uint8List? bytes;
+      var ext = 'pdf';
+      final remotePdf =
+          Uri.parse('$_pisDocumentsWebBase/documents/PIS_ICF_$langSuffix.pdf');
+      try {
+        final r = await http.get(remotePdf).timeout(const Duration(seconds: 25));
+        if (r.statusCode == 200 && r.bodyBytes.isNotEmpty) {
+          bytes = r.bodyBytes;
+        }
+      } catch (_) {}
+
+      if (bytes == null) {
+        for (final name in ['PIS_ICF_$langSuffix.pdf', 'PIS_ICF_$langSuffix.docx']) {
+          try {
+            final data = await rootBundle.load('assets/documents/$name');
+            bytes = data.buffer.asUint8List();
+            ext = name.endsWith('.pdf') ? 'pdf' : 'docx';
+            break;
+          } catch (_) {}
+        }
+      }
+
+      if (bytes == null) {
+        throw Exception('Document not available');
+      }
+
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/PIS_ICF_$langSuffix.$ext');
+      await file.writeAsBytes(bytes, flush: true);
+      final result = await OpenFilex.open(file.path);
+      if (result.type != ResultType.done && mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Could not open $label (${result.message})')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Could not open $label: $e')),
+        );
+      }
     }
   }
 
@@ -1202,10 +1455,50 @@ class _ScreeningFormState extends State<ScreeningForm>
       'reason_not_approached'      : _notApproachedReasons.isNotEmpty ? _notApproachedReasons.join(", ") : null,
       'reason_not_approached_other': _notApproachedOtherText.trim().isNotEmpty ? _notApproachedOtherText.trim() : null,
       'video_pis_shown': _videoPisShown != "Select" ? _videoPisShown : null,
+      'consent_obtained_by_signature': (_icfSignatureBase64 != null &&
+              _icfSignatureBase64!.isNotEmpty &&
+              (_consentStatus == "Yes" ||
+                  _consentStatus == "No" ||
+                  _consentStatus == "Trial run"))
+          ? _icfSignatureBase64
+          : null,
+      if (_icfSignatureBase64 != null &&
+          _icfSignatureBase64!.isNotEmpty &&
+          (_consentStatus == "Yes" ||
+              _consentStatus == "No" ||
+              _consentStatus == "Trial run"))
+        'consent_signature_image':
+            'data:image/png;base64,$_icfSignatureBase64',
+      if (_icfSignatureBase64 != null &&
+          _icfSignatureBase64!.isNotEmpty &&
+          (_consentStatus == "Yes" ||
+              _consentStatus == "No" ||
+              _consentStatus == "Trial run"))
+        'consent_signature_captured_at': () {
+          _consentDateTimeIso ??= DateTime.now().toIso8601String();
+          return _consentDateTimeIso;
+        }(),
       'consent_form_version': 'v1.0',
       'consent_language': 'English',
-      if (_consentStatus == "Yes" || _consentStatus == "Trial run")
+      if (_consentStatus == "Yes" ||
+          _consentStatus == "No" ||
+          _consentStatus == "Trial run")
         'consent_datetime': () {
+          _consentDateTimeIso ??= DateTime.now().toIso8601String();
+          return _consentDateTimeIso;
+        }(),
+      if (_piSignatureBase64 != null &&
+          _piSignatureBase64!.isNotEmpty &&
+          (_consentStatus == "Yes" ||
+              _consentStatus == "No" ||
+              _consentStatus == "Trial run"))
+        'pi_signature_image': 'data:image/png;base64,$_piSignatureBase64',
+      if (_piSignatureBase64 != null &&
+          _piSignatureBase64!.isNotEmpty &&
+          (_consentStatus == "Yes" ||
+              _consentStatus == "No" ||
+              _consentStatus == "Trial run"))
+        'pi_signature_captured_at': () {
           _consentDateTimeIso ??= DateTime.now().toIso8601String();
           return _consentDateTimeIso;
         }(),
@@ -1224,7 +1517,11 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (_selectedSite.isEmpty || _siteMap[_selectedSite] == null) return false;
     if (_gestationKnownInWeeks == false && _eddKnown == false) return true;
     final weeks = int.tryParse(_gestWeeksCtrl.text.trim());
-    if (weeks == null || weeks < 10 || weeks > 45) return false;
+    if (weeks == null ||
+        weeks < _kEligibleGestMinWeeks ||
+        weeks > _kEligibleGestMaxWeeks) {
+      return false;
+    }
     if (_isGestationOutOfRange()) return true;
     return _screenedByCtrl.text.trim().isNotEmpty
         && _screenedByCtrl.text != "Select"
@@ -1292,6 +1589,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     // local SharedPreferences draft below still keeps the data safe.
     Map<String, dynamic>? syncResp;
     try {
+      await _captureAttestationSignaturesIfDrawn();
       syncResp = await _syncToBackend(isDraft: true);
     } catch (_) {
       syncResp = null;
@@ -1532,6 +1830,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
     try {
       // Sync to shared backend FIRST so web + mobile stay aligned.
+      await _captureAttestationSignaturesIfDrawn();
       final syncResp = await _syncToBackend(isDraft: false);
       final serverStatus = syncResp?['screening_status']?.toString();
       final eligibility = (serverStatus != null && serverStatus.isNotEmpty)
@@ -1622,8 +1921,8 @@ class _ScreeningFormState extends State<ScreeningForm>
   if (weeks != null && days != null) {
     final totalDays = (weeks * 7) + days;
 
-    if (totalDays < (25 * 7) ||
-        totalDays > (31 * 7) + 6) {
+    if (totalDays < _kEligibleGestMinTotalDays ||
+        totalDays > _kEligibleGestMaxTotalDays) {
       _showGestationOutOfRangePopup();
       return;
     }
@@ -1829,13 +2128,151 @@ class _ScreeningFormState extends State<ScreeningForm>
   }
 
   void _scrollToFirstError() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final ctx = _formKey.currentContext;
-      if (ctx == null) return;
-      Scrollable.ensureVisible(ctx,
-          duration: const Duration(milliseconds: 400),
-          curve: Curves.easeInOut, alignment: 0.1);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("Please fix the highlighted fields above"),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _scheduleGestationUiRefresh() {
+    _gestationUiDebounce?.cancel();
+    _gestationUiDebounce = Timer(const Duration(milliseconds: 100), () {
+      if (mounted) setState(() {});
     });
+  }
+
+  void _icfSignaturePointerDown(PointerDownEvent e) {
+    if (widget.viewOnly) return;
+    setState(() {
+      _icfSigningActive = true;
+      _icfSignaturePoints.add(e.localPosition);
+    });
+  }
+
+  void _icfSignaturePointerMove(PointerMoveEvent e) {
+    if (!_icfSigningActive || widget.viewOnly) return;
+    setState(() => _icfSignaturePoints.add(e.localPosition));
+  }
+
+  void _icfSignaturePointerEnd() {
+    if (!_icfSigningActive) return;
+    setState(() {
+      _icfSigningActive = false;
+      _icfSignaturePoints.add(null);
+    });
+  }
+
+  void _piSignaturePointerDown(PointerDownEvent e) {
+    if (widget.viewOnly) return;
+    setState(() {
+      _piSigningActive = true;
+      _piSignaturePoints.add(e.localPosition);
+    });
+  }
+
+  void _piSignaturePointerMove(PointerMoveEvent e) {
+    if (!_piSigningActive || widget.viewOnly) return;
+    setState(() => _piSignaturePoints.add(e.localPosition));
+  }
+
+  void _piSignaturePointerEnd() {
+    if (!_piSigningActive) return;
+    setState(() {
+      _piSigningActive = false;
+      _piSignaturePoints.add(null);
+    });
+  }
+
+  Widget _attestationSignaturePad({
+    required AppColors c,
+    required String title,
+    required GlobalKey boundaryKey,
+    required List<Offset?> points,
+    required String? savedBase64,
+    required bool showRequiredError,
+    required void Function(PointerDownEvent) onDown,
+    required void Function(PointerMoveEvent) onMove,
+    required VoidCallback onEnd,
+    required VoidCallback onClear,
+  }) {
+    final hasSaved = (savedBase64 ?? '').isNotEmpty && points.isEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        requiredLabel(
+          title,
+          style: TextStyle(fontWeight: FontWeight.w600, color: c.textPrimary),
+          required: true,
+        ),
+        const SizedBox(height: 6),
+        if (hasSaved) ...[
+          Container(
+            height: 160,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              border: Border.all(color: c.border),
+              borderRadius: BorderRadius.circular(8),
+              color: Colors.white,
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.memory(base64Decode(savedBase64!), fit: BoxFit.contain),
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: onClear,
+              icon: const Icon(Icons.edit, size: 16),
+              label: const Text("Re-sign"),
+            ),
+          ),
+        ] else ...[
+          RepaintBoundary(
+            key: boundaryKey,
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: onDown,
+              onPointerMove: onMove,
+              onPointerUp: (_) => onEnd(),
+              onPointerCancel: (_) => onEnd(),
+              child: Container(
+                height: 160,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: showRequiredError ? c.danger : c.border,
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                  color: Colors.white,
+                ),
+                child: CustomPaint(
+                  painter: _IcfSignaturePainter(points),
+                  size: Size.infinite,
+                ),
+              ),
+            ),
+          ),
+          if (showRequiredError)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text("Required", style: TextStyle(color: c.danger, fontSize: 12)),
+            ),
+          if (points.isNotEmpty)
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: onClear,
+                icon: const Icon(Icons.clear, size: 16),
+                label: const Text("Clear"),
+              ),
+            ),
+        ],
+      ],
+    );
   }
 
   Future<void> saveFormAToFirebase(Map<String, dynamic> data) async {
@@ -2005,6 +2442,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     int? emptySnapTo,
     String? Function(String?)? validator,
     bool enabled = true,
+    VoidCallback? afterChange,
   }) {
     final c = AppTheme.of(context);
     return Opacity(
@@ -2028,6 +2466,7 @@ class _ScreeningFormState extends State<ScreeningForm>
                   } else if (parsed > min) {
                     controller.text = "${parsed - 1}";
                   }
+                  afterChange?.call();
                 });
               },
             ),
@@ -2038,7 +2477,10 @@ class _ScreeningFormState extends State<ScreeningForm>
                 textAlign: TextAlign.center,
                 readOnly: !enabled,
                 validator: validator,
-                onChanged: (_) => setState(() {}),
+                onChanged: (_) {
+                  afterChange?.call();
+                  _scheduleGestationUiRefresh();
+                },
                 style: TextStyle(color: c.textPrimary,
                     fontWeight: FontWeight.w700, fontSize: 16),
                 decoration: const InputDecoration(border: InputBorder.none),
@@ -2055,6 +2497,7 @@ class _ScreeningFormState extends State<ScreeningForm>
                   } else if (parsed < max) {
                     controller.text = "${parsed + 1}";
                   }
+                  afterChange?.call();
                 });
               },
             ),
@@ -2305,7 +2748,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (_gestationKnownInWeeks != null) activeStep = 1;
     if (_isEligibleGestation && activeStep >= 1) activeStep = 2;
     if (_allExclusionsAnswered && activeStep >= 2) activeStep = 3;
-    if (_proceedToConsent) activeStep = 4;
+    if (_proceedToConsent) activeStep = 3;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
@@ -2406,6 +2849,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
       child: Scaffold(
         backgroundColor: c.bg,
+        resizeToAvoidBottomInset: true,
         appBar: _buildAppBar(c),
         bottomNavigationBar: widget.viewOnly ? null : _buildBottomBar(c),
         body: _loadingExisting
@@ -2419,6 +2863,11 @@ class _ScreeningFormState extends State<ScreeningForm>
           ),
           child: SafeArea(
             child: SingleChildScrollView(
+              controller: _formScrollController,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              physics: _icfSigningActive
+                  ? const NeverScrollableScrollPhysics()
+                  : const ClampingScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
               child: AbsorbPointer(
                 absorbing: widget.viewOnly,
@@ -2669,7 +3118,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Widget _buildGestationSection(AppColors c) {
     return _sectionCard(
-      title: "A1 · Screening",
+      title: "Inclusion Criteria",
       icon: Icons.pregnant_woman_rounded,
       accentColor: c.primary,
       children: [
@@ -2691,18 +3140,27 @@ class _ScreeningFormState extends State<ScreeningForm>
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text("Weeks", style: TextStyle(color: c.textTertiary, fontSize: 12)),
               const SizedBox(height: 6),
-              // Web Q2: number input min 10 max 45 (eligibility banner is 25w0d–31w6d).
+              // Eligibility window: 25+0 through 31+6 weeks only.
               _numberStepper(
                 controller: _gestWeeksCtrl,
-                min: 10,
-                max: 45,
-                emptySnapTo: 25,
+                min: _kEligibleGestMinWeeks,
+                max: _kEligibleGestMaxWeeks,
+                emptySnapTo: _kEligibleGestMinWeeks,
+                afterChange: _normalizeDirectGestationEntry,
                 validator: (v) {
                   if (!_submitted) return null;
                   if (v == null || v.trim().isEmpty) return "Required";
                   final n = int.tryParse(v);
-                  if (n == null || n < 10 || n > 45) {
-                    return "Must be between 10 and 45 weeks";
+                  if (n == null ||
+                      n < _kEligibleGestMinWeeks ||
+                      n > _kEligibleGestMaxWeeks) {
+                    return "Must be $_kEligibleGestMinWeeks–$_kEligibleGestMaxWeeks weeks";
+                  }
+                  final d = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
+                  final t = n * 7 + d;
+                  if (t < _kEligibleGestMinTotalDays ||
+                      t > _kEligibleGestMaxTotalDays) {
+                    return "Must be 25w0d to 31w6d";
                   }
                   return null;
                 },
@@ -2716,11 +3174,20 @@ class _ScreeningFormState extends State<ScreeningForm>
                 controller: _gestDaysCtrl,
                 min: 0,
                 max: 6,
+                afterChange: _normalizeDirectGestationEntry,
                 validator: (v) {
                   if (!_submitted) return null;
                   if (v == null || v.trim().isEmpty) return "Required";
                   final n = int.tryParse(v);
                   if (n == null || n < 0 || n > 6) return "Must be 0–6 days";
+                  final w = int.tryParse(_gestWeeksCtrl.text.trim());
+                  if (w != null) {
+                    final t = w * 7 + n;
+                    if (t < _kEligibleGestMinTotalDays ||
+                        t > _kEligibleGestMaxTotalDays) {
+                      return "Must be 25w0d to 31w6d";
+                    }
+                  }
                   return null;
                 },
               ),
@@ -2778,10 +3245,10 @@ class _ScreeningFormState extends State<ScreeningForm>
             ),
           ],
 
-          // Field 7 comes after method (3.) — same order as web Form A.
+          // Eligibility banner only (web: no "calculated" label on direct GA entry).
           if (_gestWeeksCtrl.text.trim().isNotEmpty) ...[
             const SizedBox(height: 14),
-            _gestationResultBanner(c),
+            _gestationResultBanner(c, directEntry: true),
           ],
         ],
 
@@ -2840,7 +3307,7 @@ class _ScreeningFormState extends State<ScreeningForm>
             const SizedBox(height: 12),
             InputDecorator(
               decoration: _inputDecoration(
-                  "7. Calculated gestational age (auto calculated in app)"),
+                  "Calculated gestational age (auto calculated in app)"),
               child: Text(
                 _gestWeeksCtrl.text.trim().isEmpty
                     ? "____ weeks ; ____ days"
@@ -2879,7 +3346,7 @@ class _ScreeningFormState extends State<ScreeningForm>
             const SizedBox(height: 12),
             InputDecorator(
               decoration: _inputDecoration(
-                  "7. Calculated gestational age (auto calculated in app)"),
+                  "Calculated gestational age (auto calculated in app)"),
               child: Text(
                 _gestWeeksCtrl.text.trim().isEmpty
                     ? "____ weeks ; ____ days"
@@ -2897,7 +3364,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           if ((_gaSource == "LMP" || _gaSource == "EDD") &&
               _gestWeeksCtrl.text.trim().isNotEmpty) ...[
             const SizedBox(height: 16),
-            _gestationResultBanner(c),
+            _gestationResultBanner(c, directEntry: false),
           ],
 
           if (_gaSource == "Neither") ...[
@@ -2957,18 +3424,26 @@ class _ScreeningFormState extends State<ScreeningForm>
     );
   }
 
-  Widget _gestationResultBanner(AppColors c) {
+  /// [directEntry] true when Q1=Yes and weeks/days were entered manually (web
+  /// `isDirectGaEntry`). false when GA was derived from LMP/EDD (Q1=No).
+  Widget _gestationResultBanner(AppColors c, {required bool directEntry}) {
     final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
     final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
     final inRange = (() {
       final t = weeks * 7 + days;
-      return t >= 25 * 7 && t <= 31 * 7 + 6;
+      return t >= _kEligibleGestMinTotalDays && t <= _kEligibleGestMaxTotalDays;
     })();
-    final tooHigh = weeks * 7 + days > 31 * 7 + 6;
+    final tooHigh = weeks * 7 + days > _kEligibleGestMaxTotalDays;
     final color   = inRange ? c.success : c.danger;
     final soft    = inRange ? c.successSoft : c.dangerSoft;
     final weeksText = _gestWeeksCtrl.text.trim().isEmpty ? "____" : _gestWeeksCtrl.text;
     final daysText = _gestDaysCtrl.text.trim().isEmpty ? "____" : _gestDaysCtrl.text;
+    final headline = directEntry
+        ? "Gestational age"
+        : "Calculated gestational age (auto calculated in app)";
+    final eligibilityLine = inRange
+        ? "Participant is eligible for the study."
+        : "Participant is not eligible for the study.";
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2981,16 +3456,14 @@ class _ScreeningFormState extends State<ScreeningForm>
             border: Border.all(color: color.withOpacity(0.3)),
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text("7. Calculated gestational age (auto calculated in app)",
+            Text(headline,
                 style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 13)),
             const SizedBox(height: 8),
             Text("$weeksText weeks ; $daysText days",
                 style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.w800)),
             const SizedBox(height: 6),
             Text(
-              inRange
-                  ? "Participant is eligible for the study."
-                  : "Participant is not eligible for the study.",
+              eligibilityLine,
               style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
             ),
           ]),
@@ -3088,7 +3561,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
         TextFormField(
           controller: _screeningDateTimeCtrl, readOnly: true,
-          decoration: _requiredDecoration("11. Screening Date & Time", hint: "Tap to choose").copyWith(
+          decoration: _requiredDecoration("11. Screening Date & Time", hint: "Tap — 24-hour HH:mm").copyWith(
             suffixIcon: Icon(Icons.access_time_rounded, color: c.textTertiary, size: 18),
           ),
           style: TextStyle(color: c.textPrimary),
@@ -3102,8 +3575,10 @@ class _ScreeningFormState extends State<ScreeningForm>
               lastDate: now,
             );
             if (pickedDate != null) {
-              final pickedTime = await showTimePicker(
-                  context: context, initialTime: TimeOfDay.now());
+              final pickedTime = await showTimePicker24h(
+                context: context,
+                initialTime: TimeOfDay.now(),
+              );
               if (pickedTime != null) {
                 _screeningDateTimeCtrl.text =
                     "${pickedDate.day.toString().padLeft(2, '0')}/"
@@ -3390,17 +3865,24 @@ class _ScreeningFormState extends State<ScreeningForm>
         _exclusionYesNo("INSUFFICIENT", "23. Insufficient time for consent"),
         _exclusionYesNo("IUFD", "25. IUFD"),
 
-        if (_allExclusionsAnswered) ...[
+        if (_exclusionPresent && _allExclusionsAnswered) ...[
           const SizedBox(height: 4),
           _infoBanner(
-            icon: _exclusionPresent
-                ? Icons.cancel_rounded
-                : Icons.check_circle_rounded,
-            text: _exclusionPresent
-                ? "Exclusion criteria present — participant is not fit for consent. End participation."
-                : "All options No — Proceed for consent",
-            color:    _exclusionPresent ? c.danger   : c.success,
-            softColor: _exclusionPresent ? c.dangerSoft : c.successSoft,
+            icon: Icons.cancel_rounded,
+            text:
+                "Exclusion criteria present — participant is not fit for consent. End participation.",
+            color: c.danger,
+            softColor: c.dangerSoft,
+            c: c,
+          ),
+        ],
+        if (_allExclusionsNo) ...[
+          const SizedBox(height: 4),
+          _infoBanner(
+            icon: Icons.check_circle_rounded,
+            text: "Exclusion Criteria Absent - Proceed to Consent",
+            color: c.success,
+            softColor: c.successSoft,
             c: c,
           ),
         ],
@@ -3412,7 +3894,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Widget _buildConsentSection(AppColors c) {
     return _sectionCard(
-      title: "A5 · Proceed for Consent",
+      title: "Consent Process",
       icon: Icons.verified_rounded,
       accentColor: c.success,
       children: [
@@ -3429,7 +3911,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           onChanged: (v) {
             setState(() {
               _consentStatus = v!;
-              if (v == "Yes" || v == "Trial run") {
+              if (v == "Yes" || v == "Trial run" || v == "No") {
                 _consentDateTimeIso ??= DateTime.now().toIso8601String();
               } else {
                 _consentDateTimeIso = null;
@@ -3574,6 +4056,134 @@ class _ScreeningFormState extends State<ScreeningForm>
             validator: (v) =>
                 _submitted && (v == null || v == "Select") ? "Required" : null,
             style: TextStyle(color: c.textPrimary),
+          ),
+          const SizedBox(height: 14),
+        ],
+
+        // Form attestation — prepared by + PI signatures (matches web Form A)
+        if (_consentStatus == "Yes" ||
+            _consentStatus == "No" ||
+            _consentStatus == "Trial run") ...[
+          Text(
+            "Form attestation",
+            style: TextStyle(fontWeight: FontWeight.w700, color: c.textPrimary),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("Prepared by", style: TextStyle(color: c.textSecondary, fontSize: 12)),
+                    const SizedBox(height: 4),
+                    Text(
+                      _preparedByDisplayName().isNotEmpty
+                          ? _preparedByDisplayName()
+                          : "—",
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: c.textPrimary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text("Date", style: TextStyle(color: c.textSecondary, fontSize: 12)),
+                    const SizedBox(height: 4),
+                    Text(
+                      _attestationDateLabel(),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: c.textPrimary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          _attestationSignaturePad(
+            c: c,
+            title: "Prepared by — Signature",
+            boundaryKey: _icfSignatureBoundaryKey,
+            points: _icfSignaturePoints,
+            savedBase64: _icfSignatureBase64,
+            showRequiredError: _submitted &&
+                (_icfSignatureBase64 == null || _icfSignatureBase64!.isEmpty) &&
+                _icfSignaturePoints.isEmpty,
+            onDown: _icfSignaturePointerDown,
+            onMove: _icfSignaturePointerMove,
+            onEnd: _icfSignaturePointerEnd,
+            onClear: () => setState(() {
+              _icfSignatureBase64 = null;
+              _icfSignaturePoints = [];
+            }),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            _piName.isNotEmpty ? "Principal Investigator — $_piName" : "Principal Investigator",
+            style: TextStyle(fontWeight: FontWeight.w600, color: c.textPrimary),
+          ),
+          const SizedBox(height: 8),
+          _attestationSignaturePad(
+            c: c,
+            title: "Principal Investigator — Signature",
+            boundaryKey: _piSignatureBoundaryKey,
+            points: _piSignaturePoints,
+            savedBase64: _piSignatureBase64,
+            showRequiredError: _submitted &&
+                (_piSignatureBase64 == null || _piSignatureBase64!.isEmpty) &&
+                _piSignaturePoints.isEmpty,
+            onDown: _piSignaturePointerDown,
+            onMove: _piSignaturePointerMove,
+            onEnd: _piSignaturePointerEnd,
+            onClear: () => setState(() {
+              _piSignatureBase64 = null;
+              _piSignaturePoints = [];
+            }),
+          ),
+        ],
+
+        // PIS documents (PDF) — below Video PIS / ICF signature
+        if (_consentStatus != "Select") ...[
+          const SizedBox(height: 8),
+          Text(
+            "PIS Document",
+            style: TextStyle(fontWeight: FontWeight.w600, color: c.textPrimary),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => _openPisDocument('English', 'PIS Document (English)'),
+                icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
+                label: const Text("PIS Document (English)"),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: c.textPrimary,
+                  side: BorderSide(color: c.border),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => _openPisDocument('Hindi', 'PIS Document (Hindi)'),
+                icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
+                label: const Text("PIS Document (Hindi)"),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: c.textPrimary,
+                  side: BorderSide(color: c.border),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                ),
+              ),
+            ],
           ),
         ],
       ],
@@ -3741,4 +4351,25 @@ class _ScreeningFormState extends State<ScreeningForm>
     }
     return null;
   }
+}
+
+class _IcfSignaturePainter extends CustomPainter {
+  final List<Offset?> points;
+  _IcfSignaturePainter(this.points);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.black
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 2.4;
+    for (int i = 0; i < points.length - 1; i++) {
+      final p1 = points[i];
+      final p2 = points[i + 1];
+      if (p1 != null && p2 != null) {
+        canvas.drawLine(p1, p2, paint);
+      }
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _IcfSignaturePainter oldDelegate) => true;
 }

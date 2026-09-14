@@ -107,6 +107,7 @@ class _FormCResuscitationDetailsState
   String? _phLiveError;
   String? _sbeLiveError;
   String? _pco2LiveError;
+  String? _cordClampTimeError;
 
   // ── Timeline ──────────────────────────────────────────────────────────────
   final List<int>    _timelineMins = [1, 5, 10, 15, 20];
@@ -236,6 +237,7 @@ class _FormCResuscitationDetailsState
           _clockTimeToSeconds(_cordClampedAtDisplay);
     }
     setText(_cordClampTimeCtrl, existing.cordClampTime);
+    _normalizeCordClampTimeCtrlText();
     if (_cordClampTimeCtrl.text.trim().isEmpty &&
         _cordClampedAtDisplay.isNotEmpty) {
       _recalcCordClampTime();
@@ -357,7 +359,7 @@ class _FormCResuscitationDetailsState
       _cordClampedAtDisplay = (d.cordClampTimestamp ?? "").trim();
       _cordClampedAtTotalSeconds = _clockTimeToSeconds(_cordClampedAtDisplay);
       if (d.cordClampTime != null) {
-        _cordClampTimeCtrl.text = "${d.cordClampTime} sec";
+        _cordClampTimeCtrl.text = '${d.cordClampTime}';
       } else if (_cordClampedAtDisplay.isNotEmpty) {
         _recalcCordClampTime();
       }
@@ -531,6 +533,47 @@ class _FormCResuscitationDetailsState
     } catch (_) {}
   }
 
+  /// Birth clock + elapsed seconds → clamp clock HH:MM:SS (web clampTimestampFromElapsed).
+  String? _clampTimestampFromElapsed(String timeOfBirth, int elapsedSeconds) {
+    final birth = _clockTimeToSeconds(timeOfBirth);
+    if (birth == null || elapsedSeconds < 0) return null;
+    var total = (birth + elapsedSeconds) % 86400;
+    if (total < 0) total += 86400;
+    final hh = total ~/ 3600;
+    final mm = (total % 3600) ~/ 60;
+    final ss = total % 60;
+    return '${hh.toString().padLeft(2, '0')}:'
+        '${mm.toString().padLeft(2, '0')}:'
+        '${ss.toString().padLeft(2, '0')}';
+  }
+
+  void _normalizeCordClampTimeCtrlText() {
+    final parsed = _parseCordClampSecondsField(_cordClampTimeCtrl.text);
+    if (parsed != null) {
+      _cordClampTimeCtrl.text = '$parsed';
+    } else if (_cordClampTimeCtrl.text.trim().isNotEmpty &&
+        !_cordClampTimeCtrl.text.trim().contains(RegExp(r'^\d+$'))) {
+      _cordClampTimeCtrl.clear();
+    }
+  }
+
+  /// Parses field 44 — plain seconds or legacy "NN sec" drafts.
+  int? _parseCordClampSecondsField(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return null;
+    final legacy = RegExp(r'^(\d+)\s*sec', caseSensitive: false).firstMatch(t);
+    if (legacy != null) {
+      final n = int.tryParse(legacy.group(1)!);
+      if (n == null || n < 0 || n > 300) return null;
+      return n;
+    }
+    if (!RegExp(r'^\d+$').hasMatch(t)) return null;
+    final n = int.tryParse(t);
+    if (n == null || n < 0 || n > 300) return null;
+    return n;
+  }
+
+  /// 43 → 44 (web handleTimeChange + cord-clamp useEffect).
   void _recalcCordClampTime() {
     final clampSec = _cordClampedAtTotalSeconds ??
         _clockTimeToSeconds(_cordClampedAtDisplay);
@@ -539,18 +582,47 @@ class _FormCResuscitationDetailsState
 
     final birthSec = _clockTimeToSeconds(_timeOfBirth);
     if (birthSec == null) {
-      _cordClampTimeCtrl.text = _timeOfBirth.trim().isEmpty
-          ? "Enter Time of Birth in Form B1 first"
-          : "—";
+      if (_timeOfBirth.trim().isEmpty) {
+        _cordClampTimeCtrl.clear();
+        _cordClampTimeError = null;
+      }
       return;
     }
     var elapsed = clampSec - birthSec;
-    if (elapsed < 0) elapsed += 86400; // wrap past midnight (same as web)
+    if (elapsed < 0) elapsed += 86400;
     if (elapsed > 300) {
-      _cordClampTimeCtrl.text = "Must be ≤ 300 sec";
+      _cordClampTimeCtrl.clear();
+      _cordClampTimeError = 'Must be ≤ 300 sec';
       return;
     }
-    _cordClampTimeCtrl.text = "$elapsed sec";
+    _cordClampTimeError = null;
+    _cordClampTimeCtrl.text = '$elapsed';
+  }
+
+  /// 44 → 43 (web cord_clamp_time onChange).
+  void _handleCordClampTimeInput(String v) {
+    if (!RegExp(r'^\d{0,3}$').hasMatch(v)) return;
+    if (v.isNotEmpty && (int.tryParse(v) ?? 0) > 300) return;
+
+    setState(() {
+      if (_timeOfBirth.trim().isNotEmpty && v.isNotEmpty) {
+        final elapsed = int.parse(v);
+        final derived = _clampTimestampFromElapsed(_timeOfBirth, elapsed);
+        if (derived != null) {
+          _cordClampedAtDisplay = derived;
+          _cordClampedAtTotalSeconds = _clockTimeToSeconds(derived);
+          _cordClampTimeError = null;
+          return;
+        }
+      }
+      if (v.isEmpty) {
+        _cordClampTimeError = null;
+      } else {
+        final n = int.tryParse(v);
+        _cordClampTimeError =
+            (n != null && n > 300) ? 'Must be ≤ 300 sec' : null;
+      }
+    });
   }
 
   // ── HH:MM:SS spinner picker ───────────────────────────────────────────────
@@ -932,6 +1004,7 @@ class _FormCResuscitationDetailsState
                                                                 "Please select transfusion method (42.)"],
       [_cordClampedAtTotalSeconds == null,
                                                                 "Please select cord clamped time (43.)"],
+      [_cordClampTimeError != null,                            _cordClampTimeError!],
       [_cordBloodDone == null,                                  "Please select cord blood status (51.)"],
       [_cordBloodDone == false && _cordBloodWithin1hr == null,  "Please answer within 1hr of birth (52.)"],
       [_cordBloodDone == false && _cordBloodWithin1hr == true && _cordBloodSource == null,
@@ -1108,13 +1181,8 @@ class _FormCResuscitationDetailsState
 
   /// Elapsed cord-clamp seconds (0–300), matching web `cord_clamp_time`.
   int? _elapsedCordClampSeconds() {
-    final t = _cordClampTimeCtrl.text.trim();
-    final m = RegExp(r'^(\d+)\s*sec', caseSensitive: false).firstMatch(t);
-    if (m != null) {
-      final n = int.tryParse(m.group(1)!);
-      if (n == null || n < 0 || n > 300) return null;
-      return n;
-    }
+    final fromField = _parseCordClampSecondsField(_cordClampTimeCtrl.text);
+    if (fromField != null) return fromField;
     final clampSec = _cordClampedAtTotalSeconds ??
         _clockTimeToSeconds(_cordClampedAtDisplay);
     final birthSec = _clockTimeToSeconds(_timeOfBirth);
@@ -1407,7 +1475,8 @@ class _FormCResuscitationDetailsState
     final showError = _submitted && !filled;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       requiredLabel(
-        "Cord clamped at (HH:MM:SS) *",
+        "43. Cord clamped at (HH:MM:SS)",
+        required: true,
         style: TextStyle(
             color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
       ),
@@ -1453,7 +1522,7 @@ class _FormCResuscitationDetailsState
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                filled ? _cordClampedAtDisplay : "43. Cord clamped at (HH:MM:SS)",
+                filled ? _cordClampedAtDisplay : "Select time (HH:MM:SS)",
                 style: TextStyle(
                     color: filled ? c.textPrimary : c.textTertiary,
                     fontSize: 13,
@@ -1557,51 +1626,69 @@ class _FormCResuscitationDetailsState
     ]);
   }
 
-  Widget _autoField(
-    String label,
-    TextEditingController ctrl,
-    AppColors c, {
-    String? note,
-  }) {
+  Widget _cordClampTimeField(AppColors c) {
+    final needTob = _timeOfBirth.trim().isEmpty &&
+        (_cordClampedAtDisplay.isNotEmpty ||
+            _cordClampTimeCtrl.text.trim().isNotEmpty);
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(children: [
-        Expanded(child: Text(label, style: TextStyle(color: c.textSecondary,
-            fontSize: 13, fontWeight: FontWeight.w600))),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-          decoration: BoxDecoration(
-              color: c.successSoft,
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: c.success.withOpacity(0.3))),
-          child: Text("Auto-calculated", style: TextStyle(
-              color: c.success, fontSize: 10, fontWeight: FontWeight.w700)),
-        ),
-      ]),
-      if (note != null && note.isNotEmpty) ...[
-        const SizedBox(height: 4),
-        Text(note,
-            style: TextStyle(color: c.textTertiary, fontSize: 11)),
-      ],
-      const SizedBox(height: 6),
-      Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-        decoration: BoxDecoration(
-          color: c.successSoft,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: c.success.withOpacity(0.25)),
-        ),
-        child: Row(children: [
-          Icon(Icons.calculate_outlined, color: c.success, size: 16),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(ctrl.text.isEmpty ? "—" : ctrl.text,
-                style: TextStyle(
-                    color: ctrl.text.isEmpty ? c.textTertiary : c.textPrimary,
-                    fontSize: 14, fontWeight: FontWeight.w600)),
-          ),
-        ]),
+      Text(
+        "44. Cord clamping time from birth (sec)",
+        style: TextStyle(
+            color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
       ),
+      const SizedBox(height: 4),
+      Text(
+        _timeOfBirth.trim().isEmpty
+            ? "Enter 9. Time of Birth in Form B1 first to auto-calculate."
+            : "Auto from Time of Birth + 43. Cord clamped at — or type seconds here to auto-fill 43",
+        style: TextStyle(color: c.textTertiary, fontSize: 11, height: 1.3),
+      ),
+      const SizedBox(height: 6),
+      TextFormField(
+        controller: _cordClampTimeCtrl,
+        keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'\d{0,3}'))],
+        onChanged: _handleCordClampTimeInput,
+        decoration: InputDecoration(
+          hintText: '0–300',
+          filled: true,
+          fillColor: c.surfaceAlt,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(
+              color: _cordClampTimeError != null ? c.danger : c.border,
+              width: 1.5,
+            ),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(
+              color: _cordClampTimeError != null ? c.danger : c.border,
+              width: 1.5,
+            ),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: c.primary, width: 1.5),
+          ),
+        ),
+        style: TextStyle(
+            color: c.textPrimary, fontSize: 14, fontWeight: FontWeight.w600),
+      ),
+      if (_cordClampTimeError != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(_cordClampTimeError!,
+              style: TextStyle(color: c.danger, fontSize: 11)),
+        ),
+      if (needTob)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            "Enter 9. Time of Birth first to auto-calculate.",
+            style: TextStyle(color: c.danger, fontSize: 11),
+          ),
+        ),
       const SizedBox(height: 14),
     ]);
   }
@@ -2143,14 +2230,7 @@ class _FormCResuscitationDetailsState
               (v) => setState(() => _placentalMethod = v), c,
               showError: _submitted && _placentalMethod == null),
         _cordClampTile(c),
-        _autoField(
-          "44. Cord clamping time from birth (sec)",
-          _cordClampTimeCtrl,
-          c,
-          note: _timeOfBirth.trim().isEmpty
-              ? "Needs 9. Time of Birth from Form B1"
-              : "Auto from Time of Birth + Cord clamped at",
-        ),
+        _cordClampTimeField(c),
 
         _durationTile(
           label   : "45. Time to spontaneous respiratory efforts (HH:MM:SS)",

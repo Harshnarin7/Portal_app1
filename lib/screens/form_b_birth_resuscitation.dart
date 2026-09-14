@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'form_c_resuscitation.dart';
@@ -11,6 +13,8 @@ import '../theme/app_theme.dart';
 import '../widgets/modern_date_picker.dart';
 import '../widgets/theme_toggle_widget.dart';
 import '../widgets/required_asterisk.dart';
+import '../utils/clock_time_24.dart';
+import '../data/form_b_indications.dart';
 
 // ─── SITE-SPECIFIC RULES for Baby Admission No. / Baby Annual No. ─────────────
 // Mirrors BirthResuscitationForm.jsx BABY_ADMISSION_RULES / BABY_ANNUAL_RULES
@@ -75,6 +79,17 @@ const Map<String, String> _kSiteCodeToName = {
   "05": "GMCH-A",
   "06": "AMC",
 };
+
+String _normalizeSiteKey(String raw) {
+  final t = raw.trim();
+  if (t.isEmpty) return "";
+  if (t.toUpperCase().startsWith("PGIMER")) return "PGIMER";
+  if (_kBabyAdmissionRules.containsKey(t) || _kBabyAnnualRules.containsKey(t)) {
+    return t;
+  }
+  if (_kSiteCodeToName.containsValue(t)) return t;
+  return _kSiteCodeToName[t] ?? t;
+}
 
 /// Enrollment ID format: `{site}-{A|B|C|D}-{###}` e.g. `01-A-001`.
 String _formatEnrollmentId(String raw, String siteCode) {
@@ -191,6 +206,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   // ── Inline validation flags ────────────────────────────────────────────────
   bool _submitted         = false;
   bool _babyUidMaxReached = false;
+  String _babyUidDuplicateMsg = '';
+  Timer? _babyUidCheckTimer;
+  String _enrollmentDuplicateMsg = '';
 
   // ── Randomization ─────────────────────────────────────────────────────────
   bool? _randomized;
@@ -250,13 +268,50 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     );
   }
 
+  /// Validates combined DOB + TOB (web Form B save / handleTimeOfBirthChange rules).
+  String? _birthDateTimeValidationMessage({
+    int? hour,
+    int? minute,
+    int? second,
+  }) {
+    final dob = _parseDobText(_dobController.text);
+    if (dob == null) return null;
+    final dobDay = _dateOnly(dob);
+    if (dobDay.isAfter(_todayDateOnly)) {
+      return 'Date of Birth cannot be in the future';
+    }
+    final DateTime? birth;
+    if (hour != null) {
+      birth = DateTime(
+        dob.year,
+        dob.month,
+        dob.day,
+        hour,
+        minute ?? 0,
+        second ?? 0,
+      );
+    } else {
+      if (_timeController.text.trim().isEmpty) return null;
+      birth = _birthDateTime;
+    }
+    if (birth == null) return null;
+    if (birth.isAfter(DateTime.now())) {
+      return 'Time of Birth cannot be in the future';
+    }
+    final screening = _parseScreeningDateTime(_screeningDateTime);
+    if (screening != null && birth.isBefore(screening)) {
+      return 'Cannot be before the Screening Date & Time (Form A)';
+    }
+    return null;
+  }
+
   /// Live check (same as web BirthResuscitationForm birthBeforeScreening).
   bool get _birthBeforeScreening {
-    final birth = _birthDateTime;
-    final screening = _parseScreeningDateTime(_screeningDateTime);
-    if (birth == null || screening == null) return false;
-    return birth.isBefore(screening);
+    final msg = _birthDateTimeValidationMessage();
+    return msg != null && msg.contains('Screening');
   }
+
+  String? get _birthDateTimeBannerMessage => _birthDateTimeValidationMessage();
 
   String get _gestationRandDisplay {
     final rand = _gestationAtRandomization;
@@ -266,16 +321,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   // ── Site-specific rules for Baby Admission No. / Baby Annual No. ──────────
   // Web keys by site name ("PGIMER"); callers may pass name OR site code ("01").
-  String get _siteName {
-    final raw = widget.siteId.trim();
-    if (raw.isEmpty) return "";
-    if (_kBabyAdmissionRules.containsKey(raw) ||
-        _kBabyAnnualRules.containsKey(raw) ||
-        _kSiteCodeToName.containsValue(raw)) {
-      return raw;
-    }
-    return _kSiteCodeToName[raw] ?? raw;
-  }
+  String get _siteName => _normalizeSiteKey(widget.siteId);
 
   /// Two-digit site code for Enrollment ID prefix (e.g. "01").
   String get _siteCode {
@@ -321,6 +367,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       _babyUidCtrl.addListener(_syncBabyAdmissionFromUid);
       _syncBabyAdmissionFromUid();
     }
+    _babyUidCtrl.addListener(_scheduleBabyUidDuplicateCheck);
+    _enrollmentIdCtrl.addListener(_scheduleEnrollmentDuplicateCheck);
     _birthWeightCtrl.addListener(_onAutoCentileInputsChanged);
     _dobController.addListener(_onAutoCentileInputsChanged);
     _bootstrapFormB();
@@ -346,6 +394,110 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     if (_babyAdmissionCtrl.text != _babyUidCtrl.text) {
       _babyAdmissionCtrl.text = _babyUidCtrl.text;
     }
+  }
+
+  String _enrollmentIdForBabyUidCheck() {
+    final e = _enrollmentIdCtrl.text.trim();
+    if (e.length >= 5 && e.contains('-')) return e;
+    if (_randomized == false || _requiredResuscitation == false) {
+      return 'NR-${widget.screeningId}';
+    }
+    return e;
+  }
+
+  void _scheduleBabyUidDuplicateCheck() {
+    _babyUidCheckTimer?.cancel();
+    final uid = _babyUidCtrl.text.trim();
+    if (uid.isEmpty || !RegExp(r'^\d{1,12}$').hasMatch(uid)) {
+      if (_babyUidDuplicateMsg.isNotEmpty) {
+        setState(() => _babyUidDuplicateMsg = '');
+      }
+      return;
+    }
+    _babyUidCheckTimer = Timer(const Duration(milliseconds: 50), () async {
+      try {
+        final eid = _enrollmentIdForBabyUidCheck();
+        final res = await FormsApiService.instance.checkBabyUidDuplicate(
+          babyUid: uid,
+          screeningId: widget.screeningId,
+          enrollmentId: eid.isEmpty ? null : eid,
+        );
+        if (!mounted) return;
+        if (res['duplicate'] == true) {
+          setState(() {
+            _babyUidDuplicateMsg = (res['message'] ??
+                    'This Baby UID is already used at this site.')
+                .toString();
+          });
+        } else if (_babyUidDuplicateMsg.isNotEmpty) {
+          setState(() => _babyUidDuplicateMsg = '');
+        }
+      } catch (_) {
+        if (mounted && _babyUidDuplicateMsg.isNotEmpty) {
+          setState(() => _babyUidDuplicateMsg = '');
+        }
+      }
+    });
+  }
+
+  Future<void> _scheduleEnrollmentDuplicateCheck() async {
+    final eid = _enrollmentIdCtrl.text.trim().toUpperCase();
+    if (!_isCompleteEnrollmentId(eid)) {
+      if (_enrollmentDuplicateMsg.isNotEmpty) {
+        setState(() => _enrollmentDuplicateMsg = '');
+      }
+      _scheduleBabyUidDuplicateCheck();
+      return;
+    }
+    try {
+      final res = await FormsApiService.instance.checkEnrollmentIdDuplicate(
+        enrollmentId: eid,
+        screeningId: widget.screeningId,
+      );
+      if (!mounted) return;
+      if (res['duplicate'] == true) {
+        setState(() {
+          _enrollmentDuplicateMsg = (res['message'] ??
+                  'This Enrollment ID is already used by another patient.')
+              .toString();
+        });
+      } else if (_enrollmentDuplicateMsg.isNotEmpty) {
+        setState(() => _enrollmentDuplicateMsg = '');
+      }
+    } catch (_) {
+      if (mounted && _enrollmentDuplicateMsg.isNotEmpty) {
+        setState(() => _enrollmentDuplicateMsg = '');
+      }
+    }
+    _scheduleBabyUidDuplicateCheck();
+  }
+
+  /// Q19 Normal, Q20 Normal, Q21 No (HR not below 100) — Q22 hidden (web birthConditionAllNormal).
+  bool get _birthConditionAllNormal =>
+      _poorRespiratoryEffort == false &&
+      _poorMuscleTone == false &&
+      _hrAbove100 == true;
+
+  /// Web: alert when birthConditionAllNormal || required_resuscitation === "No".
+  /// Web endParticipation (hide B4+) uses required_resuscitation === "No" (auto-set when all normal).
+  bool get _showEndParticipationBanner =>
+      _birthConditionAllNormal || _requiredResuscitation == false;
+
+  bool get _endParticipation => _showEndParticipationBanner;
+
+  void _applyAllNormalBirthCondition() {
+    _initialStepsRequired = false;
+    _requiredResuscitation = false;
+    _clearRandomizationFields();
+  }
+
+  void _onBirthConditionFieldChanged(void Function() apply) {
+    setState(() {
+      apply();
+      if (_birthConditionAllNormal) {
+        _applyAllNormalBirthCondition();
+      }
+    });
   }
 
   void _clearRandomizationFields() {
@@ -381,8 +533,11 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       _lastAutoCentile = null;
       return;
     }
-    final autoValue = "${result.lowerPoint}";
+    final autoValue = result.lowerPoint == 0
+        ? result.label
+        : '${result.lowerPoint}';
     if (wasUntouchedOrAuto && current != autoValue) {
+      // Direct controller update — bypasses digits-only inputFormatters (manual entry).
       _growthCentileCtrl.text = autoValue;
     }
     _lastAutoCentile = autoValue;
@@ -425,6 +580,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       ApiService().saveFormB(_snapshotFormB(enrollmentId: eid));
     }
     _babyUidCtrl.removeListener(_syncBabyAdmissionFromUid);
+    _babyUidCtrl.removeListener(_scheduleBabyUidDuplicateCheck);
+    _enrollmentIdCtrl.removeListener(_scheduleEnrollmentDuplicateCheck);
+    _babyUidCheckTimer?.cancel();
     _birthWeightCtrl.removeListener(_onAutoCentileInputsChanged);
     _dobController.removeListener(_onAutoCentileInputsChanged);
     _babyUidCtrl.dispose();
@@ -462,11 +620,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     if (!overlayOnly || existing.indication.trim().isNotEmpty) {
       _indications = existing.indication.trim().isEmpty
           ? (overlayOnly ? _indications : [])
-          : existing.indication
-              .split(",")
-              .map((e) => e.trim())
-              .where((e) => e.isNotEmpty)
-              .toList();
+          : normalizeFormBIndicationsFromCsv(existing.indication);
     }
     setText(_indicationOtherCtrl, existing.indicationOther);
     if (!overlayOnly || existing.delivery.isNotEmpty) {
@@ -518,11 +672,17 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           : existing.notRandomizedReason;
     }
     setText(_notRandomizedOtherCtrl, existing.notRandomizedOther);
+    if (_birthConditionAllNormal) {
+      _applyAllNormalBirthCondition();
+    }
   }
 
   void _applyServerBirthData(BirthResuscitationData d) {
     if ((d.babyUid ?? "").trim().isNotEmpty) {
       _babyUidCtrl.text = d.babyUid!.trim();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scheduleBabyUidDuplicateCheck();
+      });
     }
     if ((d.babyAdmissionNo ?? "").trim().isNotEmpty) {
       _babyAdmissionCtrl.text = d.babyAdmissionNo!.trim();
@@ -544,7 +704,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       _timeController.text = _normalizeHms(d.timeOfBirth!);
     }
     if (d.indicationForDelivery.isNotEmpty) {
-      _indications = List<String>.from(d.indicationForDelivery);
+      _indications = normalizeFormBIndications(d.indicationForDelivery);
     }
     if ((d.indicationForDeliveryOther ?? "").trim().isNotEmpty) {
       _indicationOtherCtrl.text = d.indicationForDeliveryOther!.trim();
@@ -571,6 +731,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       // Keep nurse-facing enrollment id; hide synthetic NR- keys in the field.
       if (!eid.startsWith("NR-")) {
         _enrollmentIdCtrl.text = _formatEnrollmentId(eid, _siteCode);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scheduleEnrollmentDuplicateCheck();
+        });
       }
     }
     if ((d.randomisationDate ?? "").trim().isNotEmpty) {
@@ -584,6 +747,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     if ((d.enrollmentReasonNotRandomizedOther ?? "").trim().isNotEmpty) {
       _notRandomizedOtherCtrl.text =
           d.enrollmentReasonNotRandomizedOther!.trim();
+    }
+    if (_birthConditionAllNormal) {
+      _applyAllNormalBirthCondition();
     }
   }
 
@@ -666,7 +832,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   String _resolveEnrollmentIdForSync() {
     final typed = _enrollmentIdCtrl.text.trim();
     if (typed.isNotEmpty) return typed;
-    if (_randomized == false || _requiredResuscitation == false) {
+    if (_endParticipation || _randomized == false) {
       return "NR-${widget.screeningId}";
     }
     return "";
@@ -756,10 +922,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     if (_timeController.text.trim().isNotEmpty) {
       _timeController.text = _normalizeHms(_timeController.text);
     }
-    if (_birthBeforeScreening) {
-      _showMsg(
-        "Date & Time of Birth cannot be before the Screening Date & Time recorded in Form A",
-      );
+    final birthIssue = _birthDateTimeValidationMessage();
+    if (birthIssue != null) {
+      _showMsg(birthIssue);
       return;
     }
     final eid = _resolveEnrollmentIdForSync();
@@ -788,14 +953,26 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   Future<void> _onSaveContinue() async {
     setState(() => _submitted = true);
 
+    if (_enrollmentDuplicateMsg.isNotEmpty) {
+      _showMsg(_enrollmentDuplicateMsg);
+      return;
+    }
+    if (_babyUidCtrl.text.trim().isNotEmpty && _babyUidDuplicateMsg.isNotEmpty) {
+      _showMsg(_babyUidDuplicateMsg);
+      return;
+    }
     if (_dobController.text.isEmpty) { _showMsg("Please select Date of Birth"); return; }
     if (_timeController.text.isEmpty) { _showMsg("Please select Time of Birth"); return; }
     // Persist as HH:MM:SS (web Form B1 / ModernTimeInput).
     _timeController.text = _normalizeHms(_timeController.text);
-    if (_birthBeforeScreening) {
-      _showMsg(
-        "Date & Time of Birth cannot be before the Screening Date & Time recorded in Form A",
-      );
+    final dob = _parseDobText(_dobController.text);
+    if (dob != null && _dateOnly(dob).isAfter(_todayDateOnly)) {
+      _showMsg('Date of Birth cannot be in the future');
+      return;
+    }
+    final birthIssue = _birthDateTimeValidationMessage();
+    if (birthIssue != null) {
+      _showMsg(birthIssue);
       return;
     }
     if (_indications.isEmpty) { _showMsg("Please select at least one indication"); return; }
@@ -816,11 +993,13 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     }
     if (_poorMuscleTone == null) { _showMsg("Please select muscle tone status"); return; }
     if (_hrAbove100 == null) { _showMsg("Please select HR < 100 status"); return; }
-    if (_initialStepsRequired == null) {
+    if (!_birthConditionAllNormal && _initialStepsRequired == null) {
       _showMsg("Please select initial steps status"); return;
     }
     // Q23 only when initial steps = Required
-    if (_initialStepsRequired == true && _requiredResuscitation == null) {
+    if (!_birthConditionAllNormal &&
+        _initialStepsRequired == true &&
+        _requiredResuscitation == null) {
       _showMsg("Please select whether baby requires ventilation (PPV)"); return;
     }
 
@@ -829,7 +1008,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     if (_requiredResuscitation == true && _randomized == null) {
       _showMsg("Please select randomization status"); return;
     }
-    if (_randomized == false && _notRandomizedReason == null) {
+    if (!_endParticipation &&
+        _randomized == false &&
+        _notRandomizedReason == null) {
       _showMsg("Please select reason for not randomizing"); return;
     }
     if (_notRandomizedReason == "Other" && _notRandomizedOtherCtrl.text.trim().isEmpty) {
@@ -867,8 +1048,21 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       return;
     }
 
-    if (_requiredResuscitation == false) {
-      _showParticipationEndedDialog();
+    if (_endParticipation) {
+      if (_birthConditionAllNormal) {
+        _applyAllNormalBirthCondition();
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text(
+          "Form B1 saved. PPV not required — complete Forms A–C only; "
+          "Forms D and later stay locked.",
+        ),
+        backgroundColor: AppTheme.of(context).success,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 5),
+      ));
+      Navigator.of(context).pop(true);
       return;
     }
 
@@ -931,6 +1125,23 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       "${d.day.toString().padLeft(2, '0')}-"
       "${d.month.toString().padLeft(2, '0')}-"
       "${d.year}";
+
+  DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
+  DateTime get _todayDateOnly {
+    final n = DateTime.now();
+    return DateTime(n.year, n.month, n.day);
+  }
+
+  /// Earliest DOB selectable — screening calendar day when Form A has it (web minDate).
+  DateTime _dobPickerFirstDate() {
+    final screening = _calendarDateFromRaw(_screeningDateTime);
+    if (screening != null) return _dateOnly(screening);
+    return DateTime(2000, 1, 1);
+  }
+
+  /// Latest DOB selectable — end of today (web todayEnd / maxDate).
+  DateTime _dobPickerLastDate() => _todayDateOnly;
 
   /// Calendar date from Form A screening datetime (ISO prefix or DD/MM/YYYY).
   /// Ignores clock time and timezone so Q12 matches web's date-only elapsed days.
@@ -1013,30 +1224,17 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         '${d.toString().padLeft(2, '0')}';
   }
 
-  /// Normalize clock time to HH:MM:SS (web Form B1). HH:MM → HH:MM:00.
-  String _normalizeHms(String value) {
-    final m = RegExp(r'^(\d{1,2}):(\d{2})(?::(\d{2}))?$')
-        .firstMatch(value.trim());
-    if (m == null) return value.trim();
-    final hh = m.group(1)!.padLeft(2, '0');
-    final mm = m.group(2)!;
-    final ss = (m.group(3) ?? '00').padLeft(2, '0');
-    return '$hh:$mm:$ss';
-  }
+  /// Normalize clock time to HH:MM:SS (24h; accepts "01:00 PM" → 13:00:00).
+  String _normalizeHms(String value) => normalizeClockTimeHms(value);
 
-  /// Parse HH:MM[:SS] into hour/minute/second; falls back to now.
+  /// Parse HH:MM[:SS] or 12h AM/PM into hour/minute/second; falls back to now.
   ({int hour, int minute, int second}) _parseHms(String value) {
     final now = TimeOfDay.now();
-    final m = RegExp(r'^(\d{1,2}):(\d{2})(?::(\d{2}))?$')
-        .firstMatch(value.trim());
-    if (m == null) {
+    final parsed = parseClockTimeHms(value);
+    if (parsed == null) {
       return (hour: now.hour, minute: now.minute, second: 0);
     }
-    return (
-      hour: int.tryParse(m.group(1)!) ?? now.hour,
-      minute: int.tryParse(m.group(2)!) ?? now.minute,
-      second: int.tryParse(m.group(3) ?? '0') ?? 0,
-    );
+    return parsed;
   }
 
   /// Clock-time picker with seconds (matches web ModernTimeInput HH:MM:SS).
@@ -1077,7 +1275,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
             Row(children: [
               Expanded(
                   child: Center(
-                      child: Text("Hours",
+                      child: Text("HH (24h)",
                           style: TextStyle(
                               color: c.textTertiary,
                               fontSize: 11,
@@ -1242,41 +1440,6 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
               style: TextStyle(color: c.textPrimary, fontSize: 13))),
         ]),
         duration: const Duration(seconds: 3),
-      ),
-    );
-  }
-
-  void _showParticipationEndedDialog() {
-    final c = AppTheme.of(context);
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: c.surface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: Row(children: [
-          Icon(Icons.cancel_rounded, color: c.danger, size: 22),
-          const SizedBox(width: 10),
-          Text("Participation Ended",
-              style: TextStyle(
-                  color: c.danger, fontWeight: FontWeight.w800, fontSize: 16)),
-        ]),
-        content: Text(
-          "No resuscitation beyond initial steps was required.\n\nTrial participation ends here.",
-          style: TextStyle(color: c.textSecondary, fontSize: 13),
-        ),
-        actions: [
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-                backgroundColor: c.danger,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-            onPressed: () {
-              Navigator.pop(context);
-              Navigator.pop(context);
-            },
-            child: const Text("OK"),
-          ),
-        ],
       ),
     );
   }
@@ -1707,6 +1870,10 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                     ]),
                   ),
                 ],
+                if (_showEndParticipationBanner) ...[
+                  _buildEndParticipationBanner(c),
+                  const SizedBox(height: 14),
+                ],
                 _buildIdentificationSection(c),
               _buildBirthDetailsSection(c),
               _buildConditionSection(c),
@@ -1871,15 +2038,29 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 fontSize: 11),
           ),
           style: TextStyle(color: c.textPrimary),
-          onChanged: (v) =>
-              setState(() => _babyUidMaxReached = v.length == 12),
+          onChanged: (v) {
+            setState(() => _babyUidMaxReached = v.length == 12);
+            _scheduleBabyUidDuplicateCheck();
+          },
           validator: (v) {
             if (v == null || v.trim().isEmpty) return null;
             if (!RegExp(r'^\d+$').hasMatch(v)) return "Digits only";
             if (v.length > 12) return "Baby UID cannot exceed 12 digits";
+            if (_babyUidDuplicateMsg.isNotEmpty) return _babyUidDuplicateMsg;
             return null;
           },
         ),
+        if (_babyUidDuplicateMsg.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(
+            _babyUidDuplicateMsg,
+            style: TextStyle(
+              color: c.warning,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
         const SizedBox(height: 12),
 
         // 5. Mobile numbers (same number on web for both)
@@ -1930,9 +2111,12 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 ? TextInputType.number
                 : TextInputType.text,
             inputFormatters: [
-              if (_babyAnnualRule!.numeric)
+              if (_babyAnnualRule!.numeric && _babyAnnualRule!.max == 4)
+                FilteringTextInputFormatter.allow(RegExp(r'^\d{0,4}$')),
+              if (_babyAnnualRule!.numeric && _babyAnnualRule!.max != 4)
                 FilteringTextInputFormatter.digitsOnly,
-              LengthLimitingTextInputFormatter(_babyAnnualRule!.max),
+              if (!(_babyAnnualRule!.numeric && _babyAnnualRule!.max == 4))
+                LengthLimitingTextInputFormatter(_babyAnnualRule!.max),
             ],
             decoration: _input(_babyAnnualRule!.label, c)
                 .copyWith(hintText: _babyAnnualRule!.placeholder),
@@ -1974,18 +2158,28 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           icon      : Icons.calendar_today_rounded,
           c         : c,
           onTap     : () async {
-            final screening = _calendarDateFromRaw(_screeningDateTime);
-            final first = screening ?? DateTime(2000);
-            final now = DateTime.now();
-            final initial = _parseDobText(_dobController.text) ??
-                (first.isAfter(now) ? now : now);
+            final first = _dobPickerFirstDate();
+            final last = _dobPickerLastDate();
+            var initial = _parseDobText(_dobController.text) ?? last;
+            if (initial.isBefore(first)) initial = first;
+            if (initial.isAfter(last)) initial = last;
             final picked = await showModernDatePicker(
               context    : context,
-              initialDate: initial.isBefore(first) ? first : initial,
+              initialDate: initial,
               firstDate  : first,
-              lastDate   : now.isBefore(first) ? first : now,
+              lastDate   : last.isBefore(first) ? first : last,
             );
             if (picked != null) {
+              final pickedDay = _dateOnly(picked);
+              final screeningDay = _calendarDateFromRaw(_screeningDateTime);
+              if (screeningDay != null &&
+                  pickedDay.isBefore(_dateOnly(screeningDay))) {
+                return; // reject — cannot predate screening (web DatePicker)
+              }
+              if (pickedDay.isAfter(_todayDateOnly)) {
+                _showMsg('Date of Birth cannot be in the future');
+                return;
+              }
               setState(() {
                 _dobController.text = _formatDobDisplay(picked);
               });
@@ -2002,11 +2196,24 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           icon      : Icons.access_time_rounded,
           c         : c,
           onTap     : () async {
+            if (_dobController.text.trim().isEmpty) {
+              _showMsg('Please select Date of Birth first');
+              return;
+            }
             final picked = await _pickTimeHms(
               context,
               initial: _parseHms(_timeController.text),
             );
             if (picked != null) {
+              final issue = _birthDateTimeValidationMessage(
+                hour: picked.hour,
+                minute: picked.minute,
+                second: picked.second,
+              );
+              if (issue != null) {
+                _showMsg(issue);
+                return;
+              }
               setState(() {
                 _timeController.text =
                     "${picked.hour.toString().padLeft(2, '0')}:"
@@ -2016,7 +2223,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
             }
           },
         ),
-        if (_birthBeforeScreening) ...[
+        if (_birthDateTimeBannerMessage != null) ...[
           const SizedBox(height: 10),
           Container(
             width: double.infinity,
@@ -2033,7 +2240,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    "Date & Time of Birth cannot be before the Screening Date & Time recorded in Form A.",
+                    _birthBeforeScreening
+                        ? "Date & Time of Birth cannot be before the Screening Date & Time recorded in Form A."
+                        : _birthDateTimeBannerMessage!,
                     style: TextStyle(
                       color: c.danger,
                       fontSize: 12.5,
@@ -2138,8 +2347,10 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           },
           validator: (v) {
             if (v != null && v.trim().isNotEmpty) {
-              final val = double.tryParse(v);
-              if (val == null)          return "Enter a valid number";
+              final trimmed = v.trim();
+              if (trimmed == igVpBelowThirdCentileValue) return null;
+              final val = double.tryParse(trimmed);
+              if (val == null) return "Enter a valid number";
               if (val < 0 || val > 100) return "Centile must be 0–100";
             }
             return null;
@@ -2196,15 +2407,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                   fontSize: 12,
                   fontWeight: FontWeight.w500)),
         ),
-        ...[
-          "pPROM",
-          "PTL",
-          "APH",
-          "Placenta Previa",
-          "PIH",
-          "PE/Imminent Eclampsia",
-          "Other",
-        ].map((opt) {
+        ...kFormBIndicationOptions.map((opt) {
           final sel = _indications.contains(opt);
           return GestureDetector(
             onTap: () {
@@ -2318,15 +2521,15 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
             padding:
                 const EdgeInsets.symmetric(horizontal: 10, vertical: 6)),
       ),
-      children: _conditionExpanded
-          ? [
+      children: [
+        if (_conditionExpanded) ...[
               _boolChoiceChip(
                 title     : "19. Respiratory effort *",
                 trueLabel : "Absent/poor",
                 falseLabel: "Normal",
                 value     : _poorRespiratoryEffort,
-                onChanged : (v) =>
-                    setState(() => _poorRespiratoryEffort = v),
+                onChanged : (v) => _onBirthConditionFieldChanged(
+                    () => _poorRespiratoryEffort = v),
                 trueColor : c.danger,
                 falseColor: c.success,
                 c         : c,
@@ -2336,7 +2539,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 trueLabel : "Limp/poor",
                 falseLabel: "Normal",
                 value     : _poorMuscleTone,
-                onChanged : (v) => setState(() => _poorMuscleTone = v),
+                onChanged : (v) => _onBirthConditionFieldChanged(
+                    () => _poorMuscleTone = v),
                 trueColor : c.danger,
                 falseColor: c.success,
                 c         : c,
@@ -2347,31 +2551,33 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 trueLabel : "YES",
                 falseLabel: "NO",
                 value     : _hrAbove100 == null ? null : !_hrAbove100!,
-                onChanged : (v) => setState(() => _hrAbove100 = !v),
+                onChanged : (v) => _onBirthConditionFieldChanged(
+                    () => _hrAbove100 = !v),
                 trueColor : c.danger,
                 falseColor: c.success,
                 c         : c,
               ),
-              _boolChoiceChip(
-                title     : "22. Initial steps *",
-                trueLabel : "Required",
-                falseLabel: "Not required",
-                value     : _initialStepsRequired,
-                onChanged : (v) => setState(() {
-                  _initialStepsRequired = v;
-                  // Q23 only applies when initial steps are required.
-                  if (v) {
-                    _requiredResuscitation = null;
-                  } else {
-                    _requiredResuscitation = false;
-                    _clearRandomizationFields();
-                  }
-                }),
-                trueColor : c.danger,
-                falseColor: c.success,
-                c         : c,
-              ),
-              if (_initialStepsRequired == true)
+              if (!_birthConditionAllNormal)
+                _boolChoiceChip(
+                  title     : "22. Initial steps *",
+                  trueLabel : "Required",
+                  falseLabel: "Not required",
+                  value     : _initialStepsRequired,
+                  onChanged : (v) => setState(() {
+                    _initialStepsRequired = v;
+                    // Q23 only applies when initial steps are required.
+                    if (v) {
+                      _requiredResuscitation = null;
+                    } else {
+                      _requiredResuscitation = false;
+                      _clearRandomizationFields();
+                    }
+                  }),
+                  trueColor : c.danger,
+                  falseColor: c.success,
+                  c         : c,
+                ),
+              if (!_birthConditionAllNormal && _initialStepsRequired == true)
                 _boolChoiceChip(
                   title     : "23. Does baby require ventilation (PPV)? *",
                   trueLabel : "Required",
@@ -2385,13 +2591,10 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                   falseColor: c.success,
                   c         : c,
                 ),
-              if (_requiredResuscitation == false) ...[
-                const SizedBox(height: 8),
-                _buildEndParticipationBanner(c),
-              ],
-              if (_requiredResuscitation == true) ..._randomizationFields(c),
-            ]
-          : [],
+        ],
+        if (_conditionExpanded && _requiredResuscitation == true)
+          ..._randomizationFields(c),
+      ],
     );
   }
 
@@ -2486,6 +2689,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                     _EnrollmentIdInputFormatter(_siteCode),
                   ],
                   onTap: _ensureEnrollmentIdPrefix,
+                  onChanged: (_) => _scheduleEnrollmentDuplicateCheck(),
                   validator: (v) {
                     if (_randomized != true) return null;
                     final t = (v ?? "").trim();
@@ -2495,9 +2699,23 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                     if (!_isCompleteEnrollmentId(t)) {
                       return "Format: $_siteCode-A-001";
                     }
+                    if (_enrollmentDuplicateMsg.isNotEmpty) {
+                      return _enrollmentDuplicateMsg;
+                    }
                     return null;
                   },
                 ),
+                if (_enrollmentDuplicateMsg.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    _enrollmentDuplicateMsg,
+                    style: TextStyle(
+                      color: c.warning,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 _strataBanner(c),
               ],

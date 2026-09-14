@@ -12,6 +12,8 @@
 // Numbering in comments (B1./B2./.../64.) matches the numbering shown in
 // BirthResuscitationForm.jsx on the web portal.
 
+import '../data/form_b_indications.dart';
+
 class BirthResuscitationData {
   // ── Keys ──────────────────────────────────────────────────────────────
   String? screeningId;             // screening_id
@@ -269,12 +271,9 @@ class BirthResuscitationData {
     d.deliveryMode = json['delivery_mode'];
     d.vaginalDeliveryType = json['vaginal_delivery_type'];
     d.lscsType = json['lscs_type'];
-    d.indicationForDelivery = (json['indication_for_delivery'] as String?)
-            ?.split(',')
-            .map((e) => e.trim())
-            .where((e) => e.isNotEmpty)
-            .toList() ??
-        [];
+    d.indicationForDelivery = normalizeFormBIndicationsFromCsv(
+      json['indication_for_delivery'] as String?,
+    );
     d.indicationEdfDetail = json['indication_edf_detail'];
     d.fetalIndicationDetail = json['fetal_indication_detail'];
     d.obstetricIndicationDetail = json['obstetric_indication_detail'];

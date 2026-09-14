@@ -6,6 +6,9 @@ const igVpCentilePoints = [3, 5, 10, 50, 90, 95, 97];
 const igVpMinWeeks = 24;
 const igVpMaxWeeks = 32;
 
+/// Persisted in Form B `intrauterine_centile` when weight is below the 3rd centile.
+const String igVpBelowThirdCentileValue = '<3rd centile';
+
 const igVpBoysKg = <List<double>>[
   <double>[0.44,0.46,0.50,0.64,0.82,0.88,0.92],
   <double>[0.45,0.47,0.51,0.65,0.83,0.89,0.93],
@@ -169,7 +172,8 @@ IgVpCentileResult? classifyVeryPretermCentile(
   final row = table[idx];
 
   if (weightKg < row[0]) {
-    return IgVpCentileResult(lowerPoint: 0, label: '<3rd centile', row: row);
+    return IgVpCentileResult(
+        lowerPoint: 0, label: igVpBelowThirdCentileValue, row: row);
   }
   for (var i = igVpCentilePoints.length - 1; i >= 0; i--) {
     if (weightKg >= row[i]) {
@@ -184,5 +188,6 @@ IgVpCentileResult? classifyVeryPretermCentile(
       );
     }
   }
-  return IgVpCentileResult(lowerPoint: 0, label: '<3rd centile', row: row);
+  return IgVpCentileResult(
+      lowerPoint: 0, label: igVpBelowThirdCentileValue, row: row);
 }

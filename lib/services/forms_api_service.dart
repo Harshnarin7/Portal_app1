@@ -39,11 +39,49 @@ class FormsApiService {
         .put('/birth-resuscitation/$enrollmentId', body: body);
   }
 
+  /// Same-site Baby UID duplicate check (Form B Q4).
+  Future<Map<String, dynamic>> checkEnrollmentIdDuplicate({
+    required String enrollmentId,
+    required String screeningId,
+  }) async {
+    final q = Uri(queryParameters: {
+      'enrollment_id': enrollmentId.trim().toUpperCase(),
+      'screening_id': screeningId,
+    }).query;
+    return await ApiClient.instance
+        .get('/birth-resuscitation/check-enrollment-id?$q');
+  }
+
+  Future<Map<String, dynamic>> checkBabyUidDuplicate({
+    required String babyUid,
+    required String screeningId,
+    String? enrollmentId,
+  }) async {
+    final q = Uri(queryParameters: {
+      'baby_uid': babyUid,
+      'screening_id': screeningId,
+      if (enrollmentId != null && enrollmentId.trim().isNotEmpty)
+        'enrollment_id': enrollmentId.trim(),
+    }).query;
+    return await ApiClient.instance
+        .get('/birth-resuscitation/check-baby-uid?$q');
+  }
+
   Future<Map<String, dynamic>?> loadBirthResuscitation(
     String enrollmentId,
   ) async {
     try {
       return await ApiClient.instance.get('/birth-resuscitation/$enrollmentId');
+    } on ApiException catch (e) {
+      if (e.statusCode == 404) return null;
+      rethrow;
+    }
+  }
+
+  /// Web sidebar / FormLayout `no_ppv` — same source as `/enrollment-status/{id}`.
+  Future<Map<String, dynamic>?> getEnrollmentStatus(String enrollmentId) async {
+    try {
+      return await ApiClient.instance.get('/enrollment-status/$enrollmentId');
     } on ApiException catch (e) {
       if (e.statusCode == 404) return null;
       rethrow;

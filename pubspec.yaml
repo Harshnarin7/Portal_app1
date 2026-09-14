@@ -40,6 +40,7 @@ flutter:
     - assets/splash/
     - assets/app_icon/
     - assets/images/
+    - assets/documents/
 
   fonts:
     - family: Manrope

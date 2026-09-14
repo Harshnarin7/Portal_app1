@@ -38,6 +38,75 @@ const _kText3   = Color(0xFF8A95B0);
 const _kSuccess = Color(0xFF0F9D58);
 const _kWarning = Color(0xFFF59E0B);
 const _kDanger  = Color(0xFFE53935);
+const _kDangerSoft = Color(0xFFFFEBEE);
+
+/// Web Form B alert when PPV / resuscitation is not required (Forms A–C only).
+Widget buildNoPpvResuscitationBanner({EdgeInsetsGeometry? margin}) {
+  return Container(
+    width: double.infinity,
+    margin: margin ?? const EdgeInsets.fromLTRB(16, 0, 16, 12),
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: _kDangerSoft,
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(color: _kDanger.withOpacity(0.45)),
+    ),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Icon(Icons.warning_amber_rounded, color: _kDanger, size: 20),
+        const SizedBox(width: 10),
+        const Expanded(
+          child: Text(
+            'Resuscitation (PPV) not required — Forms D and later stay locked. '
+            'Complete Forms A–C only, then stop.',
+            style: TextStyle(
+              color: _kDanger,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              height: 1.35,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+Future<bool> patientNoPpvPath(FormB? formB, CRF c) async {
+  if (formB != null && formB.requiredResuscitation == false) return true;
+
+  final candidates = <String>{};
+  final fromB = (formB?.enrollmentId ?? '').trim();
+  final fromCrf = c.enrollmentId.trim();
+  final sid = c.screeningId.trim();
+  if (fromB.isNotEmpty) candidates.add(fromB);
+  if (fromCrf.isNotEmpty) candidates.add(fromCrf);
+  if (sid.isNotEmpty) {
+    candidates.add('NR-$sid');
+    try {
+      final scr = await ScreeningApiService.instance.getScreening(sid);
+      final linked = (scr?['enrollment_id'] ?? '').toString().trim();
+      if (linked.isNotEmpty) candidates.add(linked);
+    } catch (_) {}
+  }
+
+  for (final eid in candidates) {
+    try {
+      final status =
+          await FormsApiService.instance.getEnrollmentStatus(eid);
+      if (status != null && status['no_ppv'] == true) return true;
+    } catch (_) {}
+    try {
+      final remote =
+          await FormsApiService.instance.loadBirthResuscitation(eid);
+      if (remote != null && remote['required_resuscitation'] == false) {
+        return true;
+      }
+    } catch (_) {}
+  }
+  return false;
+}
 
 // ── ADMIN DASHBOARD ──────────────────────────────────────────────────────────
 class AdminDashboard extends StatelessWidget {
@@ -498,6 +567,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
 
   final formBDone = formB != null;
   final formCDone = formC != null;
+  final noPpvPath = await patientNoPpvPath(formB, c);
   final needsFormC = formBDone &&
       formB!.requiredResuscitation == true &&
       formB.randomized == true;
@@ -536,6 +606,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                 ]),
               ),
               const Divider(height: 20),
+              if (noPpvPath) buildNoPpvResuscitationBanner(),
               _buildActionTile(ctx, 'Export PDF', Icons.picture_as_pdf_rounded, true,
                 () => exportPatientPdf(context, c)),
               _buildActionTile(
@@ -655,13 +726,17 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
                 child: Text(
-                  !formBDone
-                      ? 'Complete Form B1 first — other forms stay locked.'
-                      : (needsFormC && !formCDone)
-                          ? 'Form B1 saved — open Form B2 next. Other forms stay locked until Form B2 is submitted.'
-                          : formCDone
-                              ? 'Form B2 submitted — helper forms 1–5 are unlocked.'
-                              : 'Form B1 complete — no Form B2 required for this case.',
+                  noPpvPath
+                      ? (formBDone
+                          ? 'PPV not required — complete Maternal Form C on web. Form B2 and later forms stay locked.'
+                          : 'PPV not required for this baby. Complete Form B1 if needed, then Maternal Form C on web.')
+                      : !formBDone
+                          ? 'Complete Form B1 first — other forms stay locked.'
+                          : (needsFormC && !formCDone)
+                              ? 'Form B1 saved — open Form B2 next. Other forms stay locked until Form B2 is submitted.'
+                              : formCDone
+                                  ? 'Form B2 submitted — helper forms 1–5 are unlocked.'
+                                  : 'Form B1 complete — no Form B2 required for this case.',
                   style: const TextStyle(color: _kText3, fontSize: 11),
                 ),
               ),
@@ -727,6 +802,7 @@ Future<void> showFilledFormsSheet(
   final formADone = c.screeningId.trim().isNotEmpty;
   final formBDone = formB != null;
   final formCDone = formC != null;
+  final noPpvPath = await patientNoPpvPath(formB, c);
   if (!formADone && !formBDone && !formCDone) {
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -754,6 +830,7 @@ Future<void> showFilledFormsSheet(
             ),
           ),
           const Divider(height: 20),
+          if (noPpvPath) buildNoPpvResuscitationBanner(),
           if (formADone)
             ListTile(
               leading: const Icon(Icons.assignment_rounded, color: _kPrimary),
