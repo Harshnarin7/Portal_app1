@@ -765,11 +765,36 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   }
 
   Future<void> _loadExistingFormB() async {
+    debugPrint(
+      '[FORMB_DEBUG] _loadExistingFormB start — '
+      'widget.screeningId=${widget.screeningId} '
+      'widget.maternalUid=${widget.maternalUid} '
+      'widget.motherName=${widget.motherName}',
+    );
+
     final existing = await ApiService().loadFormB(widget.screeningId);
 
+    if (existing == null) {
+      debugPrint('[FORMB_DEBUG] local draft existing=null');
+    } else {
+      debugPrint(
+        '[FORMB_DEBUG] local draft existing: '
+        'screeningId=${existing.screeningId} '
+        'enrollmentId=${existing.enrollmentId}',
+      );
+    }
+
     // Prefer server row when we have an enrollment id (local or NR- fallback).
-    String eid = (existing?.enrollmentId ?? "").trim();
+    final draftEid = (existing?.enrollmentId ?? "").trim();
+    String eid = draftEid;
+    final eidSource = eid.isNotEmpty
+        ? 'existing.enrollmentId'
+        : 'NR-fallback(NR-${widget.screeningId})';
     if (eid.isEmpty) eid = "NR-${widget.screeningId}";
+    debugPrint(
+      '[FORMB_DEBUG] resolved eid="$eid" '
+      '(draft enrollmentId="$draftEid", source=$eidSource)',
+    );
 
     BirthResuscitationData? remote;
     try {
@@ -779,6 +804,18 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         remote = BirthResuscitationData.fromJson(json);
       }
     } catch (_) {}
+
+    if (remote == null) {
+      debugPrint('[FORMB_DEBUG] remote=null (GET birth-resuscitation for eid="$eid")');
+    } else {
+      debugPrint(
+        '[FORMB_DEBUG] remote loaded: '
+        'enrollmentId=${remote.enrollmentId} '
+        'screeningId=${remote.screeningId} '
+        'babyUid=${remote.babyUid} '
+        'birthWeight=${remote.birthWeight}',
+      );
+    }
 
     if (!mounted) return;
     setState(() {
@@ -1081,6 +1118,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       context,
       MaterialPageRoute(
         builder: (_) => FormCResuscitationDetails(
+          key: ValueKey('form-c-${widget.screeningId}'),
           screeningId: widget.screeningId,
           gestation  : widget.gestDays == 0
               ? "${widget.gestWeeks} weeks"

@@ -623,6 +623,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                 Icons.child_care_rounded,
                 formBOpen,
                 () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => FormBBirthResuscitation(
+                      key: ValueKey('form-b-${c.screeningId}'),
                       screeningId: c.screeningId,
                       maternalUid: c.maternalUid,
                       motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
@@ -655,6 +656,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                   }
                   if (!context.mounted) return;
                   Navigator.push(context, MaterialPageRoute(builder: (_) => FormCResuscitationDetails(
+                        key: ValueKey('form-c-${c.screeningId}'),
                         screeningId: c.screeningId,
                         gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                         motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
@@ -667,62 +669,82 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                 },
                 completed: formCDone,
               ),
-              _buildActionTile(ctx, 'Helper Form 1 — FiO₂ AUC', Icons.air_rounded, helpersEnabled,
-                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperFiO2AUC(
-                      enrollmentId: c.enrollmentId.isNotEmpty
-                          ? c.enrollmentId
-                          : (formB?.enrollmentId ?? ''),
-                      gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
-                      motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
-                      babyUid: formB?.babyUid.isNotEmpty == true
-                          ? formB!.babyUid
-                          : c.maternalUid,
-                    )))),
-              _buildActionTile(ctx, 'Helper Form 2 — Resp/CV/Neuro', Icons.favorite_rounded, helpersEnabled,
-                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm2RespCvNeuro(
-                      enrollmentId: c.enrollmentId.isNotEmpty
-                          ? c.enrollmentId
-                          : (formB?.enrollmentId ?? ''),
+              _buildActionTile(ctx, 'Helper Form 1 — Resp/CV/Neuro', Icons.favorite_rounded, helpersEnabled,
+                () {
+                  final eid = c.enrollmentId.isNotEmpty
+                      ? c.enrollmentId
+                      : (formB?.enrollmentId ?? '');
+                  Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm2RespCvNeuro(
+                      key: ValueKey('rcn-$eid-${c.screeningId}'),
+                      enrollmentId: eid,
                       gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                       motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
                       babyUid: formB?.babyUid.isNotEmpty == true
                           ? formB!.babyUid
                           : c.maternalUid,
                       site: c.site.isNotEmpty ? c.site : 'PGIMER',
-                    )))),
+                    )));
+                }),
+              _buildActionTile(ctx, 'Helper Form 2 — FiO₂ AUC', Icons.air_rounded, helpersEnabled,
+                () {
+                  final eid = c.enrollmentId.isNotEmpty
+                      ? c.enrollmentId
+                      : (formB?.enrollmentId ?? '');
+                  Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperFiO2AUC(
+                      key: ValueKey('fio2-$eid-${c.screeningId}'),
+                      enrollmentId: eid,
+                      gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
+                      motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
+                      babyUid: formB?.babyUid.isNotEmpty == true
+                          ? formB!.babyUid
+                          : c.maternalUid,
+                    )));
+                }),
               _buildActionTile(ctx, 'Helper Form 3 — Infection/GI/Hema', Icons.bloodtype_rounded, helpersEnabled,
-                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm3InfectGIHema(
-                      enrollmentId: c.enrollmentId.isNotEmpty
-                          ? c.enrollmentId
-                          : (formB?.enrollmentId ?? ''),
+                () {
+                  final eid = c.enrollmentId.isNotEmpty
+                      ? c.enrollmentId
+                      : (formB?.enrollmentId ?? '');
+                  Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm3InfectGIHema(
+                      key: ValueKey('igh-$eid-${c.screeningId}'),
+                      enrollmentId: eid,
                       gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                       motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
                       babyUid: formB?.babyUid.isNotEmpty == true
                           ? formB!.babyUid
                           : c.maternalUid,
-                    )))),
+                    )));
+                }),
               _buildActionTile(ctx, 'Helper Form 4 — Metab/Renal/Vasc/Eye', Icons.visibility_rounded, helpersEnabled,
-                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm4MetabRenalVascEye(
-                      enrollmentId: c.enrollmentId.isNotEmpty
-                          ? c.enrollmentId
-                          : (formB?.enrollmentId ?? ''),
+                () {
+                  final eid = c.enrollmentId.isNotEmpty
+                      ? c.enrollmentId
+                      : (formB?.enrollmentId ?? '');
+                  Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm4MetabRenalVascEye(
+                      key: ValueKey('mrve-$eid-${c.screeningId}'),
+                      enrollmentId: eid,
                       gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                       motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
                       babyUid: formB?.babyUid.isNotEmpty == true
                           ? formB!.babyUid
                           : c.maternalUid,
-                    )))),
+                    )));
+                }),
               _buildActionTile(ctx, 'Helper Form 5 — Minimal Monitoring', Icons.monitor_heart_outlined, helpersEnabled,
-                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm5MinimalMonitoring(
-                      enrollmentId: c.enrollmentId.isNotEmpty
-                          ? c.enrollmentId
-                          : (formB?.enrollmentId ?? ''),
+                () {
+                  final eid = c.enrollmentId.isNotEmpty
+                      ? c.enrollmentId
+                      : (formB?.enrollmentId ?? '');
+                  Navigator.push(ctx, MaterialPageRoute(builder: (_) => HelperForm5MinimalMonitoring(
+                      key: ValueKey('mm-$eid-${c.screeningId}'),
+                      enrollmentId: eid,
                       gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                       motherName: '${c.motherFirstName} ${c.motherSurname}'.trim(),
                       babyUid: formB?.babyUid.isNotEmpty == true
                           ? formB!.babyUid
                           : c.maternalUid,
-                    )))),
+                    )));
+                }),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
                 child: Text(
@@ -846,6 +868,7 @@ Future<void> showFilledFormsSheet(
                     context,
                     MaterialPageRoute(
                       builder: (_) => ScreeningForm(
+                        key: ValueKey('form-a-view-${c.screeningId}'),
                         viewOnly: true,
                         existingScreeningId: c.screeningId,
                       ),
@@ -869,6 +892,7 @@ Future<void> showFilledFormsSheet(
                     context,
                     MaterialPageRoute(
                       builder: (_) => FormBBirthResuscitation(
+                        key: ValueKey('form-b-view-${c.screeningId}'),
                         screeningId: c.screeningId,
                         maternalUid: c.maternalUid,
                         motherName:
@@ -901,6 +925,7 @@ Future<void> showFilledFormsSheet(
                     context,
                     MaterialPageRoute(
                       builder: (_) => FormCResuscitationDetails(
+                        key: ValueKey('form-c-view-${c.screeningId}'),
                         screeningId: c.screeningId,
                         gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
                         motherName:
@@ -1793,7 +1818,7 @@ class DEODashboard extends StatelessWidget {
       pages:[_SD(user:user,title:'DEO Dashboard',
         subtitle:'Data entry queue for your site',
         color:_kWarning,
-        actions:['Form A (Priority)','Helper Form 2',
+        actions:['Form A (Priority)','Helper Form 1',
                  'Form B1','Form B2 (Fix required)']),
         _ph('Queue'), _ph('Done')],
       navItems:const[

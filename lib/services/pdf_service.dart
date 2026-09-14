@@ -486,7 +486,12 @@ class PdfService {
     final epiDil = _firstNonEmpty(
         [formC?.adrenalineDilution, birth?.adrenalineDilution]);
     final epiRoute =
-        _firstNonEmpty([formC?.adrenalineRoute, birth?.adrenalineRoute]);
+        _firstNonEmpty([
+          formC?.adrenalineRoute,
+          birth?.adrenalineRoute.isNotEmpty == true
+              ? birth!.adrenalineRoute.join(", ")
+              : null,
+        ]);
     final fluid = _ynBool(formC?.fluidBolus ?? birth?.fluidBolus);
     final fluidDoses = _firstNonEmpty([
       formC?.fluidBolusDoses,

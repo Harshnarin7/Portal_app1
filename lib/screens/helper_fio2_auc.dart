@@ -8,7 +8,7 @@ import '../theme/app_theme.dart';
 import '../widgets/theme_toggle_widget.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Helper Form 1 — FiO₂ AUC
+// Helper Form 2 — FiO₂ AUC
 // Parity with web frontend-app/src/FiO2AUC.jsx
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -138,8 +138,15 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
   }
 
   Future<void> _bootstrap() async {
+    debugPrint(
+      '[FIO2_DEBUG] _bootstrap start — '
+      'widget.enrollmentId=${widget.enrollmentId} '
+      'widget.motherName=${widget.motherName} '
+      'widget.babyUid=${widget.babyUid} '
+      'widget.gestation=${widget.gestation}',
+    );
     setState(() => _loading = true);
-    await _syncDaysFromHelper2(preserveLocal: false, showToast: false);
+    await _syncDaysFromHelper2(preserveLocal: true, showToast: false);
     if (mounted) setState(() => _loading = false);
   }
 
@@ -148,7 +155,13 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     bool showToast = false,
   }) async {
     final eid = widget.enrollmentId.trim();
+    debugPrint(
+      '[FIO2_DEBUG] _syncDaysFromHelper2 start — '
+      'widget.enrollmentId=${widget.enrollmentId} '
+      'trimmed eid="$eid" preserveLocal=$preserveLocal',
+    );
     if (eid.isEmpty) {
+      debugPrint('[FIO2_DEBUG] eid empty — skipping load');
       if (mounted) setState(() => _days = []);
       return;
     }
@@ -156,7 +169,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
 
     try {
       final summary = await _api.loadRespCvNeuroSummary(eid);
-      // FiO₂ AUC days = Helper Form 2 days with Supplemental O₂ = Yes
+      // FiO₂ AUC days = Helper Form 1 days with Supplemental O₂ = Yes
       // (not Surfactant — that was the incorrect gate).
       final oxygenDays = summary
           .where((s) => _isTruthyFlag(s['supp_o2']))
@@ -167,6 +180,33 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
 
       // Never treat GET failure as "empty record" — that enabled wipe-on-autosave.
       final record = await _api.loadFiO2(eid);
+      if (record == null) {
+        debugPrint('[FIO2_DEBUG] remote FiO2 record=null for eid="$eid"');
+      } else {
+        final logs = record['fio2_logs'];
+        final logCount = logs is List ? logs.length : 0;
+        debugPrint(
+          '[FIO2_DEBUG] remote FiO2 loaded: '
+          'enrollment_id=${record['enrollment_id']} '
+          'total_auc=${record['total_auc']} '
+          'fio2_logs_count=$logCount',
+        );
+      }
+
+      final localLogs = await _loadLocalLogs(eid);
+      debugPrint(
+        '[FIO2_DEBUG] local FiO2 draft: '
+        '${localLogs.isEmpty ? "empty" : "${localLogs.length} block(s)"} '
+        'for eid="$eid"',
+      );
+      if (localLogs.isNotEmpty) {
+        final first = localLogs.first;
+        debugPrint(
+          '[FIO2_DEBUG] local draft sample: '
+          'day=${first['day']} block=${first['block']}',
+        );
+      }
+
       final serverLogs = (record?['fio2_logs'] as List?)
               ?.map((e) => Map<String, dynamic>.from(e as Map))
               .toList() ??
@@ -178,7 +218,6 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
 
       // Merge local draft under server: fill empty server stubs from local;
       // keep server when it already has FiO₂ values (web is source of truth).
-      final localLogs = await _loadLocalLogs(eid);
       final mergedLogs = <Map<String, dynamic>>[
         ...serverLogs.map((e) => Map<String, dynamic>.from(e)),
       ];
@@ -196,7 +235,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         }
       }
 
-      // Union: Helper 2 Supplemental O₂=Yes days + any day that already has
+      // Union: Helper 1 Supplemental O₂=Yes days + any day that already has
       // FiO₂ values (so flipping O₂ to No never hides/drops entered AUC).
       final dayNums = <int>{...oxygenDays};
       for (final l in mergedLogs) {
@@ -240,7 +279,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         if (showToast) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(sortedDays.isEmpty
-                ? 'No Supplemental O₂ days in Helper Form 2 yet'
+                ? 'No Supplemental O₂ days in Helper Form 1 yet'
                 : 'Synced ${sortedDays.length} day'
                     '${sortedDays.length == 1 ? '' : 's'} for FiO₂ AUC'),
             behavior: SnackBarBehavior.floating,
@@ -253,7 +292,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         setState(() => _refreshing = false);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(
-              'Could not load FiO₂ / Helper 2 data — server save disabled until refresh succeeds: $e'),
+              'Could not load FiO₂ / Helper 1 data — server save disabled until refresh succeeds: $e'),
           backgroundColor: AppTheme.of(context).danger,
           behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 5),
@@ -649,7 +688,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-            Text('Helper Form 1 — FiO₂ AUC',
+            Text('Helper Form 2 — FiO₂ AUC',
                 style: TextStyle(
                     color: c.textPrimary,
                     fontWeight: FontWeight.w800,
@@ -664,7 +703,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       ),
       actions: [
           IconButton(
-            tooltip: 'Refresh from Helper 2',
+            tooltip: 'Refresh from Helper 1',
             onPressed: _refreshing
                 ? null
                 : () => _syncDaysFromHelper2(
@@ -722,8 +761,8 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
                   fontSize: 16)),
           const SizedBox(height: 8),
           Text(
-            'FiO₂ AUC days come from Helper Form 2 days where Supplemental O₂ = Yes.\n'
-            'Complete those days in Helper Form 2, then tap Refresh.',
+            'FiO₂ AUC days come from Helper Form 1 days where Supplemental O₂ = Yes.\n'
+            'Complete those days in Helper Form 1, then tap Refresh.',
             textAlign: TextAlign.center,
             style: TextStyle(color: c.textSecondary, fontSize: 13, height: 1.4),
           ),
@@ -732,7 +771,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
             onPressed: () =>
                 _syncDaysFromHelper2(preserveLocal: true, showToast: true),
             icon: const Icon(Icons.refresh_rounded, size: 18),
-            label: const Text('Refresh from Helper 2'),
+            label: const Text('Refresh from Helper 1'),
               ),
             ]),
       ),

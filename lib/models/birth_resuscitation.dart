@@ -71,7 +71,7 @@ class BirthResuscitationData {
   int? ccDuration;                 // cc_duration   seconds (34.)
   bool? adrenaline;                // adrenaline              (35.)
   String? adrenalineDilution;      // adrenaline_dilution    (36.)
-  String? adrenalineRoute;         // adrenaline_route       (37.)
+  List<String> adrenalineRoute = [];   // adrenaline_route  (37., multi-select)
   int? medDoses;                   // med_doses              (39.)
   double? adrenalineCumulative;    // adrenaline_cumulative  (40.)
   bool? fluidBolus;                // fluid_bolus             (41.)
@@ -176,7 +176,7 @@ class BirthResuscitationData {
       'cc_duration': ccDuration,
       'adrenaline': adrenaline,
       'adrenaline_dilution': adrenalineDilution,
-      'adrenaline_route': adrenalineRoute,
+      'adrenaline_route': adrenalineRoute.isEmpty ? null : adrenalineRoute.join(", "),
       'med_doses': medDoses,
       'adrenaline_cumulative': adrenalineCumulative,
       'fluid_bolus': fluidBolus,
@@ -304,7 +304,15 @@ class BirthResuscitationData {
     d.ccDuration = json['cc_duration'];
     d.adrenaline = json['adrenaline'];
     d.adrenalineDilution = json['adrenaline_dilution'];
-    d.adrenalineRoute = json['adrenaline_route'];
+    d.adrenalineRoute = json['adrenaline_route'] is String
+        ? (json['adrenaline_route'] as String)
+            .split(',')
+            .map((s) => s.trim())
+            .where((s) => s.isNotEmpty)
+            .toList()
+        : (json['adrenaline_route'] is List
+            ? List<String>.from(json['adrenaline_route'])
+            : <String>[]);
     d.medDoses = json['med_doses'];
     d.adrenalineCumulative = (json['adrenaline_cumulative'] as num?)?.toDouble();
     d.fluidBolus = json['fluid_bolus'];

@@ -3,12 +3,14 @@
 // Helper Form 4 — Metab / Renal / Vasc / Eye Daily Log
 // Parity with web MetabRenalVascEyeLog.jsx + Form 2 day-shell UX.
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
 import '../models/metab_renal_vasc_eye_day.dart';
 import '../services/forms_api_service.dart';
+import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
 import '../widgets/modern_date_picker.dart';
@@ -72,6 +74,8 @@ Map<String, String> _computeGlucoseAutofill(List<double> readings) {
 
 bool _isEmptyGlucoseField(String? v) =>
     v == null || v.trim().isEmpty;
+
+const _kMrveDraftKey = 'metab_renal_vasc_eye';
 
 class HelperForm4MetabRenalVascEye extends StatefulWidget {
   final String enrollmentId;
@@ -169,6 +173,7 @@ class _HelperForm4MetabRenalVascEyeState
 
   @override
   void dispose() {
+    unawaited(_stashCurrentDayDraft());
     for (final c in [
       _lowGlucoseCtrl,
       _hypoEpisodesCtrl,
@@ -430,12 +435,20 @@ class _HelperForm4MetabRenalVascEyeState
       final raw = await _api.loadMetabRenalVascEyeDay(eid, day);
       if (!mounted || gen != _loadGen || day != _activeDay) return;
       if (raw == null) {
-        _clearForm();
-        _recordExists = false;
-        _isEditing = true;
-        _isSubmitted = false;
-        _overrideUntil = null;
-        _dayLoadFailed = false;
+        if (!await _applyLocalDraftIfAny(day)) {
+          _clearForm();
+          _recordExists = false;
+          _isEditing = true;
+          _isSubmitted = false;
+          _overrideUntil = null;
+          _dayLoadFailed = false;
+        } else {
+          _recordExists = false;
+          _isEditing = true;
+          _isSubmitted = false;
+          _overrideUntil = null;
+          _dayLoadFailed = false;
+        }
         if (_isActiveDayToday && _glucoseAutoDoneDay != day) {
           _glucoseAutoDoneDay = day;
           await _applyGlucoseAutofill(force: false);
@@ -454,18 +467,56 @@ class _HelperForm4MetabRenalVascEyeState
       }
     } catch (e) {
       if (!mounted || gen != _loadGen || day != _activeDay) return;
-      _clearForm();
-      _recordExists = false;
-      _isEditing = false;
-      _isSubmitted = false;
-      _overrideUntil = null;
-      _dayLoadFailed = true;
-      _banner =
-          'Could not load Day $day — save disabled until reload succeeds: $e';
-      _bannerError = true;
+      if (await _applyLocalDraftIfAny(day)) {
+        _recordExists = false;
+        _isEditing = true;
+        _isSubmitted = false;
+        _overrideUntil = null;
+        _dayLoadFailed = true;
+        _banner =
+            'Could not reach server — showing on-device draft for Day $day. Save when online.';
+        _bannerError = true;
+      } else {
+        _clearForm();
+        _recordExists = false;
+        _isEditing = false;
+        _isSubmitted = false;
+        _overrideUntil = null;
+        _dayLoadFailed = true;
+        _banner =
+            'Could not load Day $day — save disabled until reload succeeds: $e';
+        _bannerError = true;
+      }
     } finally {
       if (mounted && gen == _loadGen) setState(() => _dayLoading = false);
     }
+  }
+
+  Future<void> _stashCurrentDayDraft() async {
+    if (_day1Date == null || _isFutureDay) return;
+    if (_completion.percent == 0) return;
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) return;
+    final model = _buildModel();
+    _applyClearGating(model);
+    model.recomputeDerived();
+    final body = model.toJson(
+      submissionStatus: 'draft',
+      savedAt: DateTime.now().toUtc().toIso8601String(),
+      savedBy: 'local-draft',
+    );
+    await HelperDayDraftStorage.save(_kMrveDraftKey, eid, _activeDay, body);
+  }
+
+  Future<bool> _applyLocalDraftIfAny(int day) async {
+    final raw = await HelperDayDraftStorage.load(
+      _kMrveDraftKey,
+      widget.enrollmentId.trim(),
+      day,
+    );
+    if (raw == null) return false;
+    _applyDay(MetabRenalVascEyeDay.fromJson(raw));
+    return true;
   }
 
   void _clearForm() {
@@ -645,6 +696,7 @@ class _HelperForm4MetabRenalVascEyeState
       _toast('Day $day is not available yet');
       return;
     }
+    await _stashCurrentDayDraft();
     setState(() => _activeDay = day);
     await _loadActiveDay();
   }
@@ -705,6 +757,7 @@ class _HelperForm4MetabRenalVascEyeState
         savedBy: name,
       );
       await _api.saveMetabRenalVascEyeDay(body, alreadyExists: _recordExists);
+      await HelperDayDraftStorage.clear(_kMrveDraftKey, eid, _activeDay);
       final pct = _completion.percent;
       setState(() {
         _recordExists = true;

@@ -4,13 +4,18 @@
 // Parity with web InfectGIHemaLog.jsx: fields 1–30, same sequence,
 // same validations, same /infect-gi-hema/ API (NICU day, not calendar blob).
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../models/infect_gi_hema_day.dart';
 import '../services/forms_api_service.dart';
+import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
 import '../widgets/modern_date_picker.dart';
 import '../widgets/theme_toggle_widget.dart';
+
+const _kIghDraftKey = 'infect_gi_hema';
 
 class HelperForm3InfectGIHema extends StatefulWidget {
   final String enrollmentId;
@@ -123,6 +128,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
 
   @override
   void dispose() {
+    unawaited(_stashCurrentDayDraft());
     for (final c in [
       _cumulativeFeedCtrl,
       _feedVolumeCtrl,
@@ -270,12 +276,20 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       final raw = await _api.loadInfectGiHemaDay(eid, day);
       if (!mounted || gen != _loadGen || day != _activeDay) return;
       if (raw == null) {
-        _clearForm();
-        _recordExists = false;
-        _isEditing = true;
-        _isSubmitted = false;
-        _overrideUntil = null;
-        _dayLoadFailed = false;
+        if (!await _applyLocalDraftIfAny(day)) {
+          _clearForm();
+          _recordExists = false;
+          _isEditing = true;
+          _isSubmitted = false;
+          _overrideUntil = null;
+          _dayLoadFailed = false;
+        } else {
+          _recordExists = false;
+          _isEditing = true;
+          _isSubmitted = false;
+          _overrideUntil = null;
+          _dayLoadFailed = false;
+        }
       } else {
         _applyDay(InfectGiHemaDay.fromJson(raw));
         _recordExists = true;
@@ -286,18 +300,53 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       }
     } catch (e) {
       if (!mounted || gen != _loadGen || day != _activeDay) return;
-      _clearForm();
-      _recordExists = false;
-      _isEditing = false;
-      _isSubmitted = false;
-      _overrideUntil = null;
-      _dayLoadFailed = true;
-      _banner =
-          'Could not load Day $day — save disabled until reload succeeds: $e';
-      _bannerError = true;
+      if (await _applyLocalDraftIfAny(day)) {
+        _recordExists = false;
+        _isEditing = true;
+        _isSubmitted = false;
+        _overrideUntil = null;
+        _dayLoadFailed = true;
+        _banner =
+            'Could not reach server — showing on-device draft for Day $day. Save when online.';
+        _bannerError = true;
+      } else {
+        _clearForm();
+        _recordExists = false;
+        _isEditing = false;
+        _isSubmitted = false;
+        _overrideUntil = null;
+        _dayLoadFailed = true;
+        _banner =
+            'Could not load Day $day — save disabled until reload succeeds: $e';
+        _bannerError = true;
+      }
     } finally {
       if (mounted && gen == _loadGen) setState(() => _dayLoading = false);
     }
+  }
+
+  Future<void> _stashCurrentDayDraft() async {
+    if (_day1Date == null || _isFutureDay) return;
+    if (_completion.percent == 0) return;
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) return;
+    final body = _buildModel().toJson(
+      submissionStatus: 'draft',
+      savedAt: DateTime.now().toUtc().toIso8601String(),
+      savedBy: 'local-draft',
+    );
+    await HelperDayDraftStorage.save(_kIghDraftKey, eid, _activeDay, body);
+  }
+
+  Future<bool> _applyLocalDraftIfAny(int day) async {
+    final raw = await HelperDayDraftStorage.load(
+      _kIghDraftKey,
+      widget.enrollmentId.trim(),
+      day,
+    );
+    if (raw == null) return false;
+    _applyDay(InfectGiHemaDay.fromJson(raw));
+    return true;
   }
 
   void _clearForm() {
@@ -471,6 +520,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       _toast('Day $day is not available yet');
       return;
     }
+    await _stashCurrentDayDraft();
     setState(() => _activeDay = day);
     await _loadActiveDay();
   }
@@ -543,6 +593,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         savedBy: name,
       );
       await _api.saveInfectGiHemaDay(body, alreadyExists: _recordExists);
+      await HelperDayDraftStorage.clear(_kIghDraftKey, eid, _activeDay);
       final pct = _completion.percent;
       setState(() {
         _applyDay(model);

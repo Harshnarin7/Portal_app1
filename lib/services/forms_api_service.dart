@@ -109,7 +109,7 @@ class FormsApiService {
 
   // ── Helper Forms (2, 3, 4) ────────────────────────────────────────────────
   // form_type values:
-  //   'resp_cv_neuro'         → Helper Form 2
+  //   'resp_cv_neuro'         → Helper Form 1
   //   'infect_gi_hema'        → Helper Form 3
   //   'metab_renal_vasc_eye'  → Helper Form 4
 
@@ -224,7 +224,7 @@ class FormsApiService {
     }
   }
 
-  /// Helper Form 2 day summary — FiO₂ AUC builds days from supp_o2=Yes rows
+  /// Helper Form 1 day summary — FiO₂ AUC builds days from supp_o2=Yes rows
   /// (same as web FiO2AUC.jsx syncDaysFromHelper2).
   Future<List<Map<String, dynamic>>> loadRespCvNeuroSummary(
     String enrollmentId,
@@ -241,7 +241,7 @@ class FormsApiService {
     }
   }
 
-  // ── Helper Form 2 — Resp / CV / Neuro (NICU day log) ─────────────────────
+  // ── Helper Form 1 — Resp / CV / Neuro (NICU day log) ─────────────────────
   // Real endpoints match RespCVNeuroLog.jsx — NOT the dead /forms/helper blob.
 
   Future<Map<String, dynamic>?> loadRespCvNeuroDay(

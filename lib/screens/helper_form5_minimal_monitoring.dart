@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 
 import '../models/minimal_monitoring.dart';
 import '../services/forms_api_service.dart';
+import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
 import '../widgets/modern_date_picker.dart';
@@ -36,6 +37,8 @@ class HelperForm5MinimalMonitoring extends StatefulWidget {
 
 class _HelperForm5MinimalMonitoringState
     extends State<HelperForm5MinimalMonitoring> with WidgetsBindingObserver {
+  static const _kMmDraftKey = 'mm5';
+
   final _api = FormsApiService.instance;
 
   bool _loading = true;
@@ -101,6 +104,7 @@ class _HelperForm5MinimalMonitoringState
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _boundaryTimer?.cancel();
+    unawaited(_stashMmDraft());
     for (final c in _ctrls.values) {
       c.dispose();
     }
@@ -354,7 +358,48 @@ class _HelperForm5MinimalMonitoringState
 
   // ── Load / Save ─────────────────────────────────────────────────────────
 
+  Future<void> _stashMmDraft() async {
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) return;
+    final date = _sheetDate ?? mmlSheetDate();
+    await HelperDayDraftStorage.saveBySheetDate(
+      _kMmDraftKey,
+      eid,
+      date,
+      {
+        'record_date': date,
+        'sheet': _sheet.toJson(savedBy: 'local-draft'),
+      },
+    );
+  }
+
+  Future<bool> _tryRestoreMmDraft(String sheetDate) async {
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) return false;
+    final raw = await HelperDayDraftStorage.loadBySheetDate(
+      _kMmDraftKey,
+      eid,
+      sheetDate,
+    );
+    if (raw == null) return false;
+    final sheetMap = raw['sheet'];
+    if (sheetMap is! Map) return false;
+    for (final c in _ctrls.values) {
+      c.dispose();
+    }
+    _ctrls.clear();
+    _sheet = MinimalMonitoringSheet.fromJson({
+      ...Map<String, dynamic>.from(sheetMap),
+      'enrollment_id': eid,
+    });
+    _sheetDate = raw['record_date']?.toString() ?? sheetDate;
+    return true;
+  }
+
   Future<void> _loadToday({bool quiet = false}) async {
+    if (!_loading && (_sheetDate != null || _ctrls.isNotEmpty)) {
+      await _stashMmDraft();
+    }
     setState(() {
       _loading = true;
       _loadFailed = false;
@@ -383,6 +428,17 @@ class _HelperForm5MinimalMonitoringState
       });
     } catch (_) {
       if (!mounted) return;
+      final expected = mmlSheetDate();
+      if (await _tryRestoreMmDraft(expected)) {
+        setState(() {
+          _loadFailed = false;
+          _loading = false;
+          _banner =
+              'Restored unsaved draft (could not reach server). Tap Save when online.';
+          _bannerError = false;
+        });
+        return;
+      }
       for (final c in _ctrls.values) {
         c.dispose();
       }
@@ -433,8 +489,16 @@ class _HelperForm5MinimalMonitoringState
         _sheet.toJson(savedBy: by),
       );
       if (!mounted) return;
+      final savedDate =
+          result['record_date']?.toString() ?? _sheetDate ?? mmlSheetDate();
+      await HelperDayDraftStorage.clearBySheetDate(
+        _kMmDraftKey,
+        widget.enrollmentId.trim(),
+        savedDate,
+      );
+      if (!mounted) return;
       setState(() {
-        _sheetDate = result['record_date']?.toString() ?? _sheetDate;
+        _sheetDate = savedDate;
         _banner = "Today's sheet saved";
         _bannerError = false;
       });

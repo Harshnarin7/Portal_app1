@@ -1,6 +1,6 @@
 // lib/models/resp_cv_neuro_day.dart
 //
-// Helper Form 2 — Resp / CV / Neuro Daily Log.
+// Helper Form 1 — Resp / CV / Neuro Daily Log.
 // Mirrors web RespCVNeuroLog.jsx + backend RespCVNeuroDayCreate 1:1.
 // Numbering: 2.1 Weight, then 1–37 (same as web).
 

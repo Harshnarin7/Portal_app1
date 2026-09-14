@@ -1033,6 +1033,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
                 onTap: () => Navigator.push(context,
                     MaterialPageRoute(
                         builder: (_) => FormBBirthResuscitation(
+                          key: ValueKey('form-b-${crf.screeningId}'),
                           screeningId: crf.screeningId,
                           maternalUid: crf.maternalUid,
                           motherName: "${crf.motherFirstName} ${crf.motherSurname}",
@@ -1162,12 +1163,12 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
           const SizedBox(height: 16),
           const Divider(color: _borderLight),
           const SizedBox(height: 8),
-          _helperTile("fio2", Icons.air_rounded,
-              "Helper Form 1 — FiO₂ AUC", "Supplemental O₂ days from Helper Form 2",
-              const Color(0xFF0284C7), crf),
           _helperTile("resp", Icons.favorite_outline_rounded,
-              "Helper Form 2 — Resp / CV / Neuro", "Respiratory, cardiac & neurological",
+              "Helper Form 1 — Resp / CV / Neuro", "Respiratory, cardiac & neurological",
               _success, crf),
+          _helperTile("fio2", Icons.air_rounded,
+              "Helper Form 2 — FiO₂ AUC", "Supplemental O₂ days from Helper Form 1",
+              const Color(0xFF0284C7), crf),
           _helperTile("infect", Icons.biotech_outlined,
               "Helper Form 3 — Infect / GI / Hema", "Infection, feeds & haematology",
               _danger, crf),
@@ -1242,20 +1243,45 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
     Widget? screen;
     switch (value) {
       case "fio2":
-        screen = HelperFiO2AUC(enrollmentId: enrollment, gestation: gestation,
-            motherName: motherName, babyUid: babyUid); break;
+        screen = HelperFiO2AUC(
+            key: ValueKey('fio2-$enrollment-${crf.screeningId}'),
+            enrollmentId: enrollment,
+            gestation: gestation,
+            motherName: motherName,
+            babyUid: babyUid);
+        break;
       case "resp":
-        screen = HelperForm2RespCvNeuro(enrollmentId: enrollment, gestation: gestation,
-            motherName: motherName, babyUid: babyUid); break;
+        screen = HelperForm2RespCvNeuro(
+            key: ValueKey('rcn-$enrollment-${crf.screeningId}'),
+            enrollmentId: enrollment,
+            gestation: gestation,
+            motherName: motherName,
+            babyUid: babyUid);
+        break;
       case "infect":
-        screen = HelperForm3InfectGIHema(enrollmentId: enrollment, gestation: gestation,
-            motherName: motherName, babyUid: babyUid); break;
+        screen = HelperForm3InfectGIHema(
+            key: ValueKey('igh-$enrollment-${crf.screeningId}'),
+            enrollmentId: enrollment,
+            gestation: gestation,
+            motherName: motherName,
+            babyUid: babyUid);
+        break;
       case "metab":
-        screen = HelperForm4MetabRenalVascEye(enrollmentId: enrollment, gestation: gestation,
-            motherName: motherName, babyUid: babyUid); break;
+        screen = HelperForm4MetabRenalVascEye(
+            key: ValueKey('mrve-$enrollment-${crf.screeningId}'),
+            enrollmentId: enrollment,
+            gestation: gestation,
+            motherName: motherName,
+            babyUid: babyUid);
+        break;
       case "minimal_monitoring":
-        screen = HelperForm5MinimalMonitoring(enrollmentId: enrollment, gestation: gestation,
-            motherName: motherName, babyUid: babyUid); break;
+        screen = HelperForm5MinimalMonitoring(
+            key: ValueKey('mm-$enrollment-${crf.screeningId}'),
+            enrollmentId: enrollment,
+            gestation: gestation,
+            motherName: motherName,
+            babyUid: babyUid);
+        break;
     }
     if (screen != null) {
       Navigator.push(context, MaterialPageRoute(builder: (_) => screen!));

@@ -88,7 +88,7 @@ class _FormCResuscitationDetailsState
   bool?   _chestCompression;
   bool?   _epinephrine;
   String? _adrenalineDilution;  // 36.
-  String? _adrenalineRoute;     // 37.
+  List<String> _adrenalineRoute = [];     // 37. (multi-select)
   bool?   _fluidBolus;
   bool?   _placentalTransfusion;
   String? _placentalMethod;
@@ -168,6 +168,15 @@ class _FormCResuscitationDetailsState
     setState(() => _applyLocalFormC(existing, overlayOnly: true));
   }
 
+  List<String> _adrenalineRouteFromLegacy(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return [];
+    return raw
+        .split(',')
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+  }
+
   void _applyLocalFormC(FormC existing, {bool overlayOnly = false}) {
     void setText(TextEditingController c, String v) {
       if (!overlayOnly || v.trim().isNotEmpty) c.text = v;
@@ -210,10 +219,10 @@ class _FormCResuscitationDetailsState
       _adrenalineDilution =
           existing.adrenalineDilution ?? _adrenalineDilution;
     }
-    if (!overlayOnly ||
-        (existing.adrenalineRoute != null &&
-            existing.adrenalineRoute!.isNotEmpty)) {
-      _adrenalineRoute = existing.adrenalineRoute ?? _adrenalineRoute;
+    final routeFromLocal = _adrenalineRouteFromLegacy(existing.adrenalineRoute);
+    if (!overlayOnly || routeFromLocal.isNotEmpty) {
+      _adrenalineRoute =
+          routeFromLocal.isNotEmpty ? routeFromLocal : _adrenalineRoute;
     }
     if (!overlayOnly || existing.fluidBolus != null) {
       _fluidBolus = existing.fluidBolus ?? _fluidBolus;
@@ -804,7 +813,9 @@ class _FormCResuscitationDetailsState
       epinephrine: _epinephrine,
       epinephrineDoses: "",
       adrenalineDilution: _adrenalineDilution,
-      adrenalineRoute: _adrenalineRoute,
+      adrenalineRoute: _epinephrine == true && _adrenalineRoute.isNotEmpty
+          ? _adrenalineRoute.join(", ")
+          : null,
       fluidBolus: _fluidBolus,
       fluidBolusDoses: _fluidBolusDosesCtrl.text.trim(),
       fluidBolusCumulative: _fluidBolusCumCtrl.text.trim(),
@@ -885,7 +896,7 @@ class _FormCResuscitationDetailsState
         data.adrenalineDilution =
             _epinephrine == true ? _adrenalineDilution : null;
         data.adrenalineRoute =
-            _epinephrine == true ? _adrenalineRoute : null;
+            _epinephrine == true ? _adrenalineRoute : [];
         data.fluidBolus = _fluidBolus;
         data.fluidBolusDoses =
             int.tryParse(_fluidBolusDosesCtrl.text.trim());
@@ -997,7 +1008,7 @@ class _FormCResuscitationDetailsState
       [_chestCompression == null,                               "Please select chest compression (33.)"],
       [_epinephrine == null,                                    "Please select epinephrine (35.)"],
       [_epinephrine == true && _adrenalineDilution == null,     "Please select epinephrine dilution (36.)"],
-      [_epinephrine == true && _adrenalineRoute == null,        "Please select epinephrine route (37.)"],
+      [_epinephrine == true && _adrenalineRoute.isEmpty,        "Please select epinephrine route (37.)"],
       [_fluidBolus == null,                                     "Please select fluid bolus (38.)"],
       [_placentalTransfusion == null,                           "Please select placental transfusion (41.)"],
       [_placentalTransfusion == true && _placentalMethod == null,
@@ -1075,7 +1086,7 @@ class _FormCResuscitationDetailsState
       ..ccDuration          = int.tryParse(_ccDurationCtrl.text.trim())
       ..adrenaline          = _epinephrine
       ..adrenalineDilution  = _epinephrine == true ? _adrenalineDilution : null
-      ..adrenalineRoute     = _epinephrine == true ? _adrenalineRoute : null
+      ..adrenalineRoute     = _epinephrine == true ? _adrenalineRoute : []
       ..fluidBolus          = _fluidBolus
       ..fluidBolusDoses     = int.tryParse(_fluidBolusDosesCtrl.text.trim())
       ..fluidBolusCumulative= double.tryParse(_fluidBolusCumCtrl.text.trim())
@@ -1445,6 +1456,48 @@ class _FormCResuscitationDetailsState
         final sel = value == opt;
         return GestureDetector(
           onTap: enabled ? () => setState(() => onChanged(opt)) : null,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 140),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: sel ? c.primary : c.surfaceAlt,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: sel ? c.primary : c.border, width: 1.5),
+              boxShadow: sel ? [BoxShadow(color: c.primary.withOpacity(0.2),
+                  blurRadius: 6, offset: const Offset(0, 2))] : [],
+            ),
+            child: Text(opt, style: TextStyle(
+                color: sel ? Colors.white : c.textSecondary,
+                fontWeight: FontWeight.w600, fontSize: 12)),
+          ),
+        );
+      }).toList()),
+      if (showError)
+        Padding(padding: const EdgeInsets.only(top: 4),
+            child: Text("Required",
+                style: TextStyle(color: c.danger, fontSize: 11))),
+      const SizedBox(height: 14),
+    ]);
+  }
+
+  Widget _pillMultiRadio(String title, List<String> options, List<String> selected,
+      void Function(List<String>) onChanged, AppColors c,
+      {bool showError = false, bool enabled = true}) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      requiredLabel(
+        title,
+        style: TextStyle(
+            color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: 8),
+      Wrap(spacing: 8, runSpacing: 8, children: options.map((opt) {
+        final sel = selected.contains(opt);
+        return GestureDetector(
+          onTap: enabled ? () => setState(() {
+            final next = List<String>.from(selected);
+            sel ? next.remove(opt) : next.add(opt);
+            onChanged(next);
+          }) : null,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 140),
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -2203,11 +2256,11 @@ class _FormCResuscitationDetailsState
               _adrenalineDilution,
               (v) => setState(() => _adrenalineDilution = v), c,
               showError: _submitted && _adrenalineDilution == null),
-          _pillRadio("37. Route *",
+          _pillMultiRadio("37. Route *",
               ["Umbilical vein", "Peripheral vein", "Intratracheal"],
               _adrenalineRoute,
               (v) => setState(() => _adrenalineRoute = v), c,
-              showError: _submitted && _adrenalineRoute == null),
+              showError: _submitted && _adrenalineRoute.isEmpty),
         ],
 
         _yesNo("38. Fluid bolus", _fluidBolus, (v) => _fluidBolus = v, c),

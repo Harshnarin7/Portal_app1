@@ -1,16 +1,21 @@
 // lib/screens/helper_form2_resp_cv_neuro.dart
 //
-// Helper Form 2 — Resp / CV / Neuro Daily Log
+// Helper Form 1 — Resp / CV / Neuro Daily Log
 // Parity with web RespCVNeuroLog.jsx: fields 2.1 + 1–37, same sequence,
 // same validations, same /resp-cv-neuro/ API (NICU day, not calendar blob).
+
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import '../models/resp_cv_neuro_day.dart';
 import '../services/forms_api_service.dart';
+import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
 import '../widgets/modern_date_picker.dart';
 import '../widgets/theme_toggle_widget.dart';
+
+const _kRespCvDraftKey = 'resp_cv_neuro';
 
 class HelperForm2RespCvNeuro extends StatefulWidget {
   final String enrollmentId;
@@ -142,6 +147,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
 
   @override
   void dispose() {
+    unawaited(_stashCurrentDayDraft());
     for (final c in [
       _weightCtrl,
       _mapCpapCtrl,
@@ -343,12 +349,20 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       final raw = await _api.loadRespCvNeuroDay(eid, day);
       if (!mounted || gen != _loadGen || day != _activeDay) return;
       if (raw == null) {
-        _clearForm();
-        _recordExists = false;
-        _isEditing = true;
-        _isSubmitted = false;
-        _overrideUntil = null;
-        _dayLoadFailed = false;
+        if (!await _applyLocalDraftIfAny(day)) {
+          _clearForm();
+          _recordExists = false;
+          _isEditing = true;
+          _isSubmitted = false;
+          _overrideUntil = null;
+          _dayLoadFailed = false;
+        } else {
+          _recordExists = false;
+          _isEditing = true;
+          _isSubmitted = false;
+          _overrideUntil = null;
+          _dayLoadFailed = false;
+        }
       } else {
         _applyDay(RespCvNeuroDay.fromJson(raw));
         _recordExists = true;
@@ -361,19 +375,53 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       }
     } catch (e) {
       if (!mounted || gen != _loadGen || day != _activeDay) return;
-      // Never keep previous day's values in the form on a failed load.
-      _clearForm();
-      _recordExists = false;
-      _isEditing = false;
-      _isSubmitted = false;
-      _overrideUntil = null;
-      _dayLoadFailed = true;
-      _banner =
-          'Could not load Day $day — save disabled until reload succeeds: $e';
-      _bannerError = true;
+      if (await _applyLocalDraftIfAny(day)) {
+        _recordExists = false;
+        _isEditing = true;
+        _isSubmitted = false;
+        _overrideUntil = null;
+        _dayLoadFailed = true;
+        _banner =
+            'Could not reach server — showing on-device draft for Day $day. Save when online.';
+        _bannerError = true;
+      } else {
+        _clearForm();
+        _recordExists = false;
+        _isEditing = false;
+        _isSubmitted = false;
+        _overrideUntil = null;
+        _dayLoadFailed = true;
+        _banner =
+            'Could not load Day $day — save disabled until reload succeeds: $e';
+        _bannerError = true;
+      }
     } finally {
       if (mounted && gen == _loadGen) setState(() => _dayLoading = false);
     }
+  }
+
+  Future<void> _stashCurrentDayDraft() async {
+    if (_day1Date == null || _isFutureDay) return;
+    if (_completion.percent == 0) return;
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty) return;
+    final body = _buildModel().toJson(
+      submissionStatus: 'draft',
+      savedAt: DateTime.now().toUtc().toIso8601String(),
+      savedBy: 'local-draft',
+    );
+    await HelperDayDraftStorage.save(_kRespCvDraftKey, eid, _activeDay, body);
+  }
+
+  Future<bool> _applyLocalDraftIfAny(int day) async {
+    final raw = await HelperDayDraftStorage.load(
+      _kRespCvDraftKey,
+      widget.enrollmentId.trim(),
+      day,
+    );
+    if (raw == null) return false;
+    _applyDay(RespCvNeuroDay.fromJson(raw));
+    return true;
   }
 
   void _clearForm() {
@@ -563,6 +611,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       _toast('Day $day is not available yet');
       return;
     }
+    await _stashCurrentDayDraft();
     setState(() => _activeDay = day);
     await _loadActiveDay();
   }
@@ -647,6 +696,11 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         savedBy: name,
       );
       await _api.saveRespCvNeuroDay(body, alreadyExists: _recordExists);
+      await HelperDayDraftStorage.clear(
+        _kRespCvDraftKey,
+        eid,
+        _activeDay,
+      );
       final pct = _completion.percent;
       setState(() {
         _recordExists = true;
@@ -851,7 +905,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            widget.babyUid.isEmpty ? 'HELPER FORM 2' : widget.babyUid,
+            widget.babyUid.isEmpty ? 'HELPER FORM 1' : widget.babyUid,
             style: TextStyle(
               color: c.primary,
               fontSize: 13,
