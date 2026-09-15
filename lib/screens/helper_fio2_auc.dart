@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/forms_api_service.dart';
 import '../theme/app_theme.dart';
+import '../navigation/helper_forms_navigation.dart';
 import '../widgets/theme_toggle_widget.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -702,6 +703,15 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         ],
       ),
       actions: [
+          HelperFormSwitcherButton(
+            current: HelperFormKind.fio2Auc,
+            patient: HelperFormPatientContext(
+              enrollmentId: widget.enrollmentId,
+              gestation: widget.gestation,
+              motherName: widget.motherName,
+              babyUid: widget.babyUid,
+            ),
+          ),
           IconButton(
             tooltip: 'Refresh from Helper 1',
             onPressed: _refreshing

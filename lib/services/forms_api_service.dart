@@ -39,6 +39,15 @@ class FormsApiService {
         .put('/birth-resuscitation/$enrollmentId', body: body);
   }
 
+  /// Form B B2 — partial PUT (exclude_unset on server); helpers use when DOB is corrected.
+  Future<void> patchBirthDateOfBirth(String enrollmentId, String ymd) async {
+    final eid = enrollmentId.trim();
+    if (eid.isEmpty || ymd.length < 10) return;
+    await updateBirthResuscitation(eid, {
+      'date_of_birth': ymd.substring(0, 10),
+    });
+  }
+
   /// Same-site Baby UID duplicate check (Form B Q4).
   Future<Map<String, dynamic>> checkEnrollmentIdDuplicate({
     required String enrollmentId,
@@ -197,6 +206,16 @@ class FormsApiService {
     // is still the previous calendar date.
     return await ApiClient.instance.get(
       '/minimal-monitoring/$enrollmentId/today?boundary_hour=$_mmlBoundaryHour',
+    );
+  }
+
+  /// MM sheet for a specific calendar date (YYYY-MM-DD). Does not create a row.
+  Future<Map<String, dynamic>> loadMinimalMonitoringOnDate(
+    String enrollmentId,
+    String onDate,
+  ) async {
+    return await ApiClient.instance.get(
+      '/minimal-monitoring/$enrollmentId/on/$onDate',
     );
   }
 

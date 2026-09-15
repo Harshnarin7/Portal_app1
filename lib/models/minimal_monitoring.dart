@@ -145,6 +145,14 @@ class MmlEntry {
     );
   }
 
+  /// True when at least one clinical field is filled (ignores id/date/time).
+  bool hasClinicalData() {
+    for (final v in fields.values) {
+      if (_mmlValueAnswered(v)) return true;
+    }
+    return false;
+  }
+
   MmlEntry copy() => MmlEntry(
         id: id,
         date: date,
@@ -154,6 +162,13 @@ class MmlEntry {
           return MapEntry(k, v);
         })),
       );
+}
+
+bool _mmlValueAnswered(dynamic v) {
+  if (v == null) return false;
+  if (v is bool) return true;
+  if (v is List) return v.isNotEmpty;
+  return v.toString().trim().isNotEmpty;
 }
 
 class MinimalMonitoringSheet {
@@ -176,7 +191,6 @@ class MinimalMonitoringSheet {
   static Map<String, List<MmlEntry>> emptyEntries() => {
         'cv_a': [
           fresh({
-            'shift': '',
             'axillary_temp': '',
             'sbp': '',
             'dbp': '',
@@ -205,7 +219,6 @@ class MinimalMonitoringSheet {
         'resp_b': [fresh({'ph': '', 'pao2': '', 'paco2': ''})],
         'resp_c': [
           fresh({
-            'shift': '',
             'apnea_episodes': '',
             'desaturation_episodes': '',
             'severe_desaturation_episodes': '',

@@ -43,6 +43,9 @@ class RespCvNeuroDay {
   bool? shock;
   bool? vasoactiveSupport;
   List<String> vasoactiveDrugs = [];
+  /// #29 Yes/No (web `fluid_bolus_given`). Legacy free-text `fluid_bolus` is
+  /// read-only fallback when loading old rows.
+  bool? fluidBolusGiven;
   String? fluidBolus;
 
   // Neurological 30–37
@@ -152,7 +155,16 @@ class RespCvNeuroDay {
     d.shock = _asBool(json['shock']);
     d.vasoactiveSupport = _asBool(json['vasoactive_support']);
     d.vasoactiveDrugs = _splitCsv(json['vasoactive_drugs']);
-    d.fluidBolus = json['fluid_bolus']?.toString();
+    d.fluidBolusGiven = _asBool(json['fluid_bolus_given']);
+    if (d.fluidBolusGiven == null) {
+      final legacy = json['fluid_bolus']?.toString().trim();
+      if (legacy != null && legacy.isNotEmpty) {
+        d.fluidBolusGiven = true;
+        d.fluidBolus = legacy;
+      }
+    } else {
+      d.fluidBolus = json['fluid_bolus']?.toString();
+    }
     d.cranialUsg = _asBool(json['cranial_usg']);
     d.ivh = _asBool(json['ivh']);
     d.ivhGrade = json['ivh_grade']?.toString();
@@ -202,6 +214,7 @@ class RespCvNeuroDay {
     shock = src.shock;
     vasoactiveSupport = src.vasoactiveSupport;
     vasoactiveDrugs = List.of(src.vasoactiveDrugs);
+    fluidBolusGiven = src.fluidBolusGiven;
     fluidBolus = src.fluidBolus;
     cranialUsg = src.cranialUsg;
     ivh = src.ivh;
@@ -245,6 +258,7 @@ class RespCvNeuroDay {
     shock = null;
     vasoactiveSupport = null;
     vasoactiveDrugs = [];
+    fluidBolusGiven = null;
     fluidBolus = null;
     cranialUsg = null;
     ivh = null;
@@ -306,6 +320,7 @@ class RespCvNeuroDay {
       'vasoactive_support': vasoactiveSupport,
       'vasoactive_drugs':
           vasoactiveDrugs.isEmpty ? null : vasoactiveDrugs.join(', '),
+      'fluid_bolus_given': fluidBolusGiven,
       'fluid_bolus':
           (fluidBolus?.trim().isEmpty ?? true) ? null : fluidBolus!.trim(),
       'cranial_usg': cranialUsg,
@@ -528,7 +543,7 @@ class RespCvNeuroCompletion {
     required bool? shock,
     required bool? vasoactiveSupport,
     required List<String> vasoactiveDrugs,
-    required String fluidBolus,
+    required bool? fluidBolusGiven,
     required bool? cranialUsg,
     required bool? ivh,
     required String? ivhGrade,
@@ -586,7 +601,7 @@ class RespCvNeuroCompletion {
     final cvTotal = vasoVisible ? 7 : 6;
     final cvKeys = [pdaSuspected, echoDone, hsPda, shock, vasoactiveSupport];
     var cvAnswered = cvKeys.where((v) => v != null).length +
-        (fluidBolus.trim().isNotEmpty ? 1 : 0) +
+        (fluidBolusGiven != null ? 1 : 0) +
         (vasoVisible && vasoactiveDrugs.isNotEmpty ? 1 : 0);
     if (cvAnswered > cvTotal) cvAnswered = cvTotal;
 

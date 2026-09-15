@@ -187,13 +187,7 @@ class _ScreeningFormState extends State<ScreeningForm>
         final needsSigs = _consentStatus == "Yes" ||
             _consentStatus == "No" ||
             _consentStatus == "Trial run";
-        if (needsSigs) {
-          final prepOk = (_icfSignatureBase64?.isNotEmpty ?? false) ||
-              _icfSignaturePoints.isNotEmpty;
-          final piOk = (_piSignatureBase64?.isNotEmpty ?? false) ||
-              _piSignaturePoints.isNotEmpty;
-          if (!prepOk || !piOk) return false;
-        }
+        if (needsSigs && !_attestationSignaturesComplete()) return false;
       }
     }
     return true;
@@ -305,6 +299,25 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   String _maternalUidLabel() {
     return "15. Maternal UID (CR number)";
+  }
+
+  /// Web `idFieldRule`: maternal UID required only at PGIMER and AMC.
+  bool get _maternalUidRequired =>
+      _selectedSite == "PGIMER" || _selectedSite == "AMC";
+
+  String _maternalUidHint() {
+    switch (_selectedSite) {
+      case "PGIMER":
+        return "12-digit CR number";
+      case "AMC":
+        return "e.g. 123/2026";
+      case "GMCH":
+        return "CR number";
+      case "IOG":
+        return "CR number (auto from UID)";
+      default:
+        return "CR / UID number";
+    }
   }
 
   int _maternalUidMaxLen() => _selectedSite == "PGIMER" ? 12 : 15;
@@ -1147,7 +1160,6 @@ class _ScreeningFormState extends State<ScreeningForm>
     // never invent "DRAFT" placeholder patients.
     if (_canSyncDraftToServer()) {
       try {
-        await _captureAttestationSignaturesIfDrawn();
         final resp = await _syncToBackend(isDraft: true);
         final sid = resp?['screening_id']?.toString();
         if (sid != null && sid.isNotEmpty) {
@@ -1266,6 +1278,62 @@ class _ScreeningFormState extends State<ScreeningForm>
   Future<void> _captureAttestationSignaturesIfDrawn() async {
     await _captureIcfSignatureIfDrawn();
     await _capturePiSignatureIfDrawn();
+  }
+
+  void _clearAttestationSignatures() {
+    _icfSignatureBase64 = null;
+    _icfSignaturePoints = [];
+    _piSignatureBase64 = null;
+    _piSignaturePoints = [];
+    _icfSigningActive = false;
+    _piSigningActive = false;
+  }
+
+  /// Web Form A: signatures required for Yes / No / Trial run when no exclusions.
+  bool get _needsAttestationSignatures {
+    if (_exclusionPresent) return false;
+    return _consentStatus == "Yes" ||
+        _consentStatus == "No" ||
+        _consentStatus == "Trial run";
+  }
+
+  bool _attestationSignaturesComplete() {
+    if (!_needsAttestationSignatures) return true;
+    return (_icfSignatureBase64?.isNotEmpty ?? false) &&
+        (_piSignatureBase64?.isNotEmpty ?? false);
+  }
+
+  Future<void> _savePreparedBySignature() async {
+    await _captureIcfSignatureIfDrawn();
+    if (!mounted) return;
+    setState(() {
+      if ((_icfSignatureBase64 ?? "").isNotEmpty) {
+        _icfSignaturePoints = [];
+        _icfSigningActive = false;
+      }
+    });
+  }
+
+  Future<void> _savePiSignature() async {
+    await _capturePiSignatureIfDrawn();
+    if (!mounted) return;
+    setState(() {
+      if ((_piSignatureBase64 ?? "").isNotEmpty) {
+        _piSignaturePoints = [];
+        _piSigningActive = false;
+      }
+    });
+  }
+
+  String? _validateAttestationSignaturesForSave() {
+    if (!_needsAttestationSignatures) return null;
+    if (!(_icfSignatureBase64?.isNotEmpty ?? false)) {
+      return "Prepared by signature (A5)";
+    }
+    if (!(_piSignatureBase64?.isNotEmpty ?? false)) {
+      return "Principal Investigator signature (A5)";
+    }
+    return null;
   }
 
   String _preparedByDisplayName() {
@@ -1455,13 +1523,6 @@ class _ScreeningFormState extends State<ScreeningForm>
       'reason_not_approached'      : _notApproachedReasons.isNotEmpty ? _notApproachedReasons.join(", ") : null,
       'reason_not_approached_other': _notApproachedOtherText.trim().isNotEmpty ? _notApproachedOtherText.trim() : null,
       'video_pis_shown': _videoPisShown != "Select" ? _videoPisShown : null,
-      'consent_obtained_by_signature': (_icfSignatureBase64 != null &&
-              _icfSignatureBase64!.isNotEmpty &&
-              (_consentStatus == "Yes" ||
-                  _consentStatus == "No" ||
-                  _consentStatus == "Trial run"))
-          ? _icfSignatureBase64
-          : null,
       if (_icfSignatureBase64 != null &&
           _icfSignatureBase64!.isNotEmpty &&
           (_consentStatus == "Yes" ||
@@ -1589,7 +1650,6 @@ class _ScreeningFormState extends State<ScreeningForm>
     // local SharedPreferences draft below still keeps the data safe.
     Map<String, dynamic>? syncResp;
     try {
-      await _captureAttestationSignaturesIfDrawn();
       syncResp = await _syncToBackend(isDraft: true);
     } catch (_) {
       syncResp = null;
@@ -1825,12 +1885,20 @@ class _ScreeningFormState extends State<ScreeningForm>
       return false;
     }
 
+    if (!_attestationSignaturesComplete()) {
+      setState(() => _submitted = true);
+      if (!mounted) return false;
+      final msg = _validateAttestationSignaturesForSave() ??
+          "Prepared by and PI signatures are required";
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      return false;
+    }
+
     final weeksParsed = int.tryParse(_gestWeeksCtrl.text.trim());
     final days        = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
 
     try {
       // Sync to shared backend FIRST so web + mobile stay aligned.
-      await _captureAttestationSignaturesIfDrawn();
       final syncResp = await _syncToBackend(isDraft: false);
       final serverStatus = syncResp?['screening_status']?.toString();
       final eligibility = (serverStatus != null && serverStatus.isNotEmpty)
@@ -2144,17 +2212,44 @@ class _ScreeningFormState extends State<ScreeningForm>
     });
   }
 
+  RenderBox? _signaturePadRenderBox(GlobalKey boundaryKey) {
+    return boundaryKey.currentContext?.findRenderObject() as RenderBox?;
+  }
+
+  bool _insideSignaturePad(Offset local, Size size) {
+    return local.dx >= 0 &&
+        local.dy >= 0 &&
+        local.dx <= size.width &&
+        local.dy <= size.height;
+  }
+
+  Offset _clampToSignaturePad(Offset local, Size size) {
+    return Offset(
+      local.dx.clamp(0.0, size.width),
+      local.dy.clamp(0.0, size.height),
+    );
+  }
+
   void _icfSignaturePointerDown(PointerDownEvent e) {
     if (widget.viewOnly) return;
+    final box = _signaturePadRenderBox(_icfSignatureBoundaryKey);
+    if (box == null) return;
+    final local = box.globalToLocal(e.position);
+    if (!_insideSignaturePad(local, box.size)) return;
     setState(() {
       _icfSigningActive = true;
-      _icfSignaturePoints.add(e.localPosition);
+      _icfSignaturePoints.add(_clampToSignaturePad(local, box.size));
     });
   }
 
   void _icfSignaturePointerMove(PointerMoveEvent e) {
     if (!_icfSigningActive || widget.viewOnly) return;
-    setState(() => _icfSignaturePoints.add(e.localPosition));
+    final box = _signaturePadRenderBox(_icfSignatureBoundaryKey);
+    if (box == null) return;
+    final local = box.globalToLocal(e.position);
+    setState(
+      () => _icfSignaturePoints.add(_clampToSignaturePad(local, box.size)),
+    );
   }
 
   void _icfSignaturePointerEnd() {
@@ -2167,15 +2262,24 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   void _piSignaturePointerDown(PointerDownEvent e) {
     if (widget.viewOnly) return;
+    final box = _signaturePadRenderBox(_piSignatureBoundaryKey);
+    if (box == null) return;
+    final local = box.globalToLocal(e.position);
+    if (!_insideSignaturePad(local, box.size)) return;
     setState(() {
       _piSigningActive = true;
-      _piSignaturePoints.add(e.localPosition);
+      _piSignaturePoints.add(_clampToSignaturePad(local, box.size));
     });
   }
 
   void _piSignaturePointerMove(PointerMoveEvent e) {
     if (!_piSigningActive || widget.viewOnly) return;
-    setState(() => _piSignaturePoints.add(e.localPosition));
+    final box = _signaturePadRenderBox(_piSignatureBoundaryKey);
+    if (box == null) return;
+    final local = box.globalToLocal(e.position);
+    setState(
+      () => _piSignaturePoints.add(_clampToSignaturePad(local, box.size)),
+    );
   }
 
   void _piSignaturePointerEnd() {
@@ -2197,6 +2301,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     required void Function(PointerMoveEvent) onMove,
     required VoidCallback onEnd,
     required VoidCallback onClear,
+    required Future<void> Function() onSave,
   }) {
     final hasSaved = (savedBase64 ?? '').isNotEmpty && points.isEmpty;
     return Column(
@@ -2233,25 +2338,38 @@ class _ScreeningFormState extends State<ScreeningForm>
         ] else ...[
           RepaintBoundary(
             key: boundaryKey,
-            child: Listener(
-              behavior: HitTestBehavior.opaque,
-              onPointerDown: onDown,
-              onPointerMove: onMove,
-              onPointerUp: (_) => onEnd(),
-              onPointerCancel: (_) => onEnd(),
-              child: Container(
-                height: 160,
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  border: Border.all(
-                    color: showRequiredError ? c.danger : c.border,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: onDown,
+                onPointerMove: onMove,
+                onPointerUp: (_) => onEnd(),
+                onPointerCancel: (_) => onEnd(),
+                child: Container(
+                  height: 160,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: showRequiredError ? c.danger : c.border,
+                    ),
+                    color: Colors.white,
                   ),
-                  borderRadius: BorderRadius.circular(8),
-                  color: Colors.white,
-                ),
-                child: CustomPaint(
-                  painter: _IcfSignaturePainter(points),
-                  size: Size.infinite,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      CustomPaint(
+                        painter: _IcfSignaturePainter(points),
+                        size: Size.infinite,
+                      ),
+                      if (points.whereType<Offset>().isEmpty)
+                        Text(
+                          "Sign here with a stylus, finger, or mouse",
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: c.textTertiary, fontSize: 12),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -2261,13 +2379,31 @@ class _ScreeningFormState extends State<ScreeningForm>
               padding: const EdgeInsets.only(top: 4),
               child: Text("Required", style: TextStyle(color: c.danger, fontSize: 12)),
             ),
-          if (points.isNotEmpty)
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                onPressed: onClear,
-                icon: const Icon(Icons.clear, size: 16),
-                label: const Text("Clear"),
+          if (!hasSaved)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton.icon(
+                    onPressed: points.isEmpty ? null : onClear,
+                    icon: const Icon(Icons.clear, size: 16),
+                    label: const Text("Clear"),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: points.whereType<Offset>().isEmpty ? null : () => onSave(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: c.primary,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    child: const Text("Save Signature"),
+                  ),
+                ],
               ),
             ),
         ],
@@ -3079,6 +3215,18 @@ class _ScreeningFormState extends State<ScreeningForm>
                     const SnackBar(content: Text("Please answer all exclusion criteria")));
                 return;
               }
+              final sigMissing = _validateAttestationSignaturesForSave();
+              if (sigMissing != null) {
+                setState(() {});
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      "$sigMissing — sign and tap Save Signature (same as web Form A)",
+                    ),
+                  ),
+                );
+                return;
+              }
               await _confirmSaveAndClose(); // ── FIX: awaited ──
             },
             style: ElevatedButton.styleFrom(
@@ -3720,8 +3868,10 @@ class _ScreeningFormState extends State<ScreeningForm>
                     ? TextInputType.number
                     : TextInputType.text,
                 inputFormatters: _maternalUidFormatters(),
-                decoration: _requiredDecoration(_maternalUidLabel())
-                    .copyWith(counterText: ""),
+                decoration: (_maternalUidRequired
+                        ? _requiredDecoration(_maternalUidLabel())
+                        : _inputDecoration(_maternalUidLabel()))
+                    .copyWith(counterText: "", hintText: _maternalUidHint()),
                 validator: (v) => _submitted ? _maternalUidValidator(v) : null,
                 onChanged: (v) => setState(() {
                   final max = _maternalUidMaxLen();
@@ -3911,6 +4061,7 @@ class _ScreeningFormState extends State<ScreeningForm>
           onChanged: (v) {
             setState(() {
               _consentStatus = v!;
+              _clearAttestationSignatures();
               if (v == "Yes" || v == "Trial run" || v == "No") {
                 _consentDateTimeIso ??= DateTime.now().toIso8601String();
               } else {
@@ -4116,8 +4267,8 @@ class _ScreeningFormState extends State<ScreeningForm>
             points: _icfSignaturePoints,
             savedBase64: _icfSignatureBase64,
             showRequiredError: _submitted &&
-                (_icfSignatureBase64 == null || _icfSignatureBase64!.isEmpty) &&
-                _icfSignaturePoints.isEmpty,
+                _needsAttestationSignatures &&
+                !(_icfSignatureBase64?.isNotEmpty ?? false),
             onDown: _icfSignaturePointerDown,
             onMove: _icfSignaturePointerMove,
             onEnd: _icfSignaturePointerEnd,
@@ -4125,6 +4276,7 @@ class _ScreeningFormState extends State<ScreeningForm>
               _icfSignatureBase64 = null;
               _icfSignaturePoints = [];
             }),
+            onSave: _savePreparedBySignature,
           ),
           const SizedBox(height: 16),
           Text(
@@ -4139,8 +4291,8 @@ class _ScreeningFormState extends State<ScreeningForm>
             points: _piSignaturePoints,
             savedBase64: _piSignatureBase64,
             showRequiredError: _submitted &&
-                (_piSignatureBase64 == null || _piSignatureBase64!.isEmpty) &&
-                _piSignaturePoints.isEmpty,
+                _needsAttestationSignatures &&
+                !(_piSignatureBase64?.isNotEmpty ?? false),
             onDown: _piSignaturePointerDown,
             onMove: _piSignaturePointerMove,
             onEnd: _piSignaturePointerEnd,
@@ -4148,6 +4300,7 @@ class _ScreeningFormState extends State<ScreeningForm>
               _piSignatureBase64 = null;
               _piSignaturePoints = [];
             }),
+            onSave: _savePiSignature,
           ),
         ],
 
@@ -4276,7 +4429,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       }
       return null;
     }
-    if (val.isEmpty) return "Required";
+    // GMCH / IOG / AFMC / GMCH-A: optional (matches web idFieldRule).
     return null;
   }
 
@@ -4358,6 +4511,7 @@ class _IcfSignaturePainter extends CustomPainter {
   _IcfSignaturePainter(this.points);
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.clipRect(Offset.zero & size);
     final paint = Paint()
       ..color = Colors.black
       ..strokeCap = StrokeCap.round

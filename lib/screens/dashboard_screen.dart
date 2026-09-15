@@ -14,11 +14,7 @@ import '../services/forms_api_service.dart';
 import '../services/pdf_service.dart';
 import 'package:open_filex/open_filex.dart';
 import '../screens/form_b_birth_resuscitation.dart';
-import '../screens/helper_fio2_auc.dart';
-import '../screens/helper_form5_minimal_monitoring.dart';
-import '../screens/helper_form2_resp_cv_neuro.dart';
-import '../screens/helper_form3_infect_gi_hema.dart';
-import '../screens/helper_form4_metab_renal_vasc_eye.dart';
+import '../navigation/helper_forms_navigation.dart';
 import '../services/screening_api_service.dart';
 import '../utils/screening_status.dart';
 import '../widgets/shimmer_loader.dart';
@@ -1236,56 +1232,29 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
       ));
       return;
     }
-    final gestation  = "${crf.gestationWeeks}w ${crf.gestationDays}d";
-    final motherName = "${crf.motherFirstName} ${crf.motherSurname}";
-    final babyUid    = crf.maternalUid;
+    final patient = HelperFormPatientContext(
+      enrollmentId: enrollment,
+      gestation: '${crf.gestationWeeks}w ${crf.gestationDays}d',
+      motherName: '${crf.motherFirstName} ${crf.motherSurname}',
+      babyUid: crf.maternalUid,
+      screeningId: crf.screeningId,
+    );
 
-    Widget? screen;
-    switch (value) {
-      case "fio2":
-        screen = HelperFiO2AUC(
-            key: ValueKey('fio2-$enrollment-${crf.screeningId}'),
-            enrollmentId: enrollment,
-            gestation: gestation,
-            motherName: motherName,
-            babyUid: babyUid);
-        break;
-      case "resp":
-        screen = HelperForm2RespCvNeuro(
-            key: ValueKey('rcn-$enrollment-${crf.screeningId}'),
-            enrollmentId: enrollment,
-            gestation: gestation,
-            motherName: motherName,
-            babyUid: babyUid);
-        break;
-      case "infect":
-        screen = HelperForm3InfectGIHema(
-            key: ValueKey('igh-$enrollment-${crf.screeningId}'),
-            enrollmentId: enrollment,
-            gestation: gestation,
-            motherName: motherName,
-            babyUid: babyUid);
-        break;
-      case "metab":
-        screen = HelperForm4MetabRenalVascEye(
-            key: ValueKey('mrve-$enrollment-${crf.screeningId}'),
-            enrollmentId: enrollment,
-            gestation: gestation,
-            motherName: motherName,
-            babyUid: babyUid);
-        break;
-      case "minimal_monitoring":
-        screen = HelperForm5MinimalMonitoring(
-            key: ValueKey('mm-$enrollment-${crf.screeningId}'),
-            enrollmentId: enrollment,
-            gestation: gestation,
-            motherName: motherName,
-            babyUid: babyUid);
-        break;
-    }
-    if (screen != null) {
-      Navigator.push(context, MaterialPageRoute(builder: (_) => screen!));
-    }
+    final HelperFormKind? kind = switch (value) {
+      'fio2' => HelperFormKind.fio2Auc,
+      'resp' => HelperFormKind.respCvNeuro,
+      'infect' => HelperFormKind.infectGiHema,
+      'metab' => HelperFormKind.metabRenalVascEye,
+      'minimal_monitoring' => HelperFormKind.minimalMonitoring,
+      _ => null,
+    };
+    if (kind == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => buildHelperFormScreen(kind, patient),
+      ),
+    );
   }
 
   // ── PDF ───────────────────────────────────────────────────────────────────

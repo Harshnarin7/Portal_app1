@@ -4,8 +4,6 @@
 // Parity with web MetabRenalVascEyeLog.jsx + Form 2 day-shell UX.
 
 import 'dart:async';
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 
 import '../models/metab_renal_vasc_eye_day.dart';
@@ -13,64 +11,10 @@ import '../services/forms_api_service.dart';
 import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
-import '../widgets/modern_date_picker.dart';
+import '../utils/helper_dob_day1.dart';
+import '../utils/mml_helper_linkages.dart';
+import '../navigation/helper_forms_navigation.dart';
 import '../widgets/theme_toggle_widget.dart';
-
-const _glucoseLowMax = 45.0;
-const _glucoseHighMin = 180.0;
-
-/// Helper 5 `met_a[].glucose` → readings (web `parseMetAGlucoseReadings`).
-/// Flat `glucose` is only used when `entries_json` is missing (legacy).
-List<double> _parseHelper5Glucose(Map<String, dynamic> data) {
-  dynamic entries = data['entries_json'];
-  if (entries is String) {
-    try {
-      entries = jsonDecode(entries);
-    } catch (_) {
-      entries = null;
-    }
-  }
-  if (entries is Map && entries['met_a'] is List) {
-    final out = <double>[];
-    for (final row in entries['met_a'] as List) {
-      if (row is! Map) continue;
-      final raw = row['glucose'];
-      if (raw == null || raw.toString().trim().isEmpty) continue;
-      final n = double.tryParse(raw.toString());
-      if (n != null) out.add(n);
-    }
-    // Empty met_a is valid — do not fall back to a stale flat column.
-    return out;
-  }
-  final flat = data['glucose'];
-  if (flat != null && flat.toString().trim().isNotEmpty) {
-    final n = double.tryParse(flat.toString());
-    if (n != null) return [n];
-  }
-  return [];
-}
-
-/// Same rules as web: &lt;45 low, 45–180 normal, &gt;180 high.
-Map<String, String> _computeGlucoseAutofill(List<double> readings) {
-  if (readings.isEmpty) {
-    return {
-      'lowest_glucose': 'Not Tested',
-      'hypoglycemia_episodes': '0',
-      'highest_glucose': 'Not Tested',
-    };
-  }
-  final lows = readings.where((v) => v < _glucoseLowMax).toList();
-  final highs = readings.where((v) => v > _glucoseHighMin).toList();
-  String fmt(double v) =>
-      v == v.roundToDouble() ? '${v.round()}' : '$v';
-  return {
-    'lowest_glucose':
-        lows.isEmpty ? 'Not Low' : fmt(lows.reduce((a, b) => a < b ? a : b)),
-    'hypoglycemia_episodes': '${lows.length}',
-    'highest_glucose':
-        highs.isEmpty ? 'Not High' : fmt(highs.reduce((a, b) => a > b ? a : b)),
-  };
-}
 
 bool _isEmptyGlucoseField(String? v) =>
     v == null || v.trim().isEmpty;
@@ -113,7 +57,6 @@ class _HelperForm4MetabRenalVascEyeState
   bool _bannerError = false;
 
   DateTime? _day1Date;
-  bool _day1Locked = false;
   int _totalDays = 14;
   int _activeDay = 1;
   int _todayNicuDay = 1;
@@ -142,7 +85,9 @@ class _HelperForm4MetabRenalVascEyeState
     'highest_glucose': false,
   };
 
-  int? _glucoseAutoDoneDay;
+  String? _mmlSheetDate;
+  final Map<String, String?> _lastAutoComputed = {};
+  Timer? _glucosePollTimer;
 
   final _lowGlucoseCtrl = TextEditingController();
   final _hypoEpisodesCtrl = TextEditingController();
@@ -173,6 +118,7 @@ class _HelperForm4MetabRenalVascEyeState
 
   @override
   void dispose() {
+    _glucosePollTimer?.cancel();
     unawaited(_stashCurrentDayDraft());
     for (final c in [
       _lowGlucoseCtrl,
@@ -198,20 +144,19 @@ class _HelperForm4MetabRenalVascEyeState
   String? get _activeDayYmd {
     final cal = _calendarForDay(_activeDay);
     if (cal == null) return null;
-    return '${cal.year.toString().padLeft(4, '0')}-'
-        '${cal.month.toString().padLeft(2, '0')}-'
-        '${cal.day.toString().padLeft(2, '0')}';
+    return formatNicuCalendarYmd(cal);
   }
 
   String get _todayYmd {
     final n = DateTime.now();
-    return '${n.year.toString().padLeft(4, '0')}-'
-        '${n.month.toString().padLeft(2, '0')}-'
-        '${n.day.toString().padLeft(2, '0')}';
+    return formatNicuCalendarYmd(n);
   }
 
+  /// NICU day being viewed is the current Helper 5 sheet date (web parity).
   bool get _isActiveDayToday =>
-      _activeDayYmd != null && _activeDayYmd == _todayYmd;
+      _activeDayYmd != null &&
+      _mmlSheetDate != null &&
+      _activeDayYmd == _mmlSheetDate;
 
   Future<void> _bootstrap() async {
     final eid = widget.enrollmentId.trim();
@@ -225,15 +170,17 @@ class _HelperForm4MetabRenalVascEyeState
     }
     try {
       try {
-        final d1 = await _api.loadDay1Date(eid);
-        final raw = d1['day1_date']?.toString();
+        final birth = await _api.loadBirthResuscitation(eid);
+        final raw = birth?['date_of_birth']?.toString();
         if (raw != null && raw.isNotEmpty) {
-          _day1Date = DateTime.tryParse(raw.substring(0, 10));
+          _day1Date = parseIsoDateOnly(raw);
+        } else {
+          _banner =
+              'Day 1 Date unavailable — Date of Birth not yet recorded in Form B.';
+          _bannerError = true;
         }
-        _day1Locked = d1['locked'] == true;
       } catch (e) {
-        _banner =
-            'Could not load Day 1 Date from server — set it before saving: $e';
+        _banner = 'Could not load Date of Birth from Form B: $e';
         _bannerError = true;
       }
 
@@ -248,11 +195,19 @@ class _HelperForm4MetabRenalVascEyeState
         final pct = row['completion_pct'];
         _dayStatus[day] = st;
         _dayPct[day] = pct is int ? pct : int.tryParse('$pct') ?? 0;
-        if (st != 'empty' && st.isNotEmpty) _day1Locked = true;
       }
       _totalDays = maxDay < 14 ? 14 : maxDay;
       _recomputeTodayNicuDay();
       _activeDay = _defaultActiveDay();
+      try {
+        final mml = await _api.loadMinimalMonitoringToday(eid);
+        final rd = mml['record_date']?.toString();
+        if (rd != null && rd.length >= 10) {
+          _mmlSheetDate = rd.substring(0, 10);
+        }
+      } catch (_) {
+        // Helper 5 optional
+      }
     } catch (e) {
       _banner = 'Could not load day summary: $e';
       _bannerError = true;
@@ -411,10 +366,9 @@ class _HelperForm4MetabRenalVascEyeState
 
   MrveReading _blankReading({String value = ''}) {
     final now = DateTime.now();
+    final dateStr = _activeDayYmd ?? _todayYmd;
     return MrveReading(
-      date: '${now.year.toString().padLeft(4, '0')}-'
-          '${now.month.toString().padLeft(2, '0')}-'
-          '${now.day.toString().padLeft(2, '0')}',
+      date: dateStr,
       time: '${now.hour.toString().padLeft(2, '0')}:'
           '${now.minute.toString().padLeft(2, '0')}',
       value: value,
@@ -431,6 +385,7 @@ class _HelperForm4MetabRenalVascEyeState
     final gen = ++_loadGen;
     setState(() => _dayLoading = true);
     _glucoseAutofilled.updateAll((_, __) => false);
+    _lastAutoComputed.clear();
     try {
       final raw = await _api.loadMetabRenalVascEyeDay(eid, day);
       if (!mounted || gen != _loadGen || day != _activeDay) return;
@@ -449,10 +404,6 @@ class _HelperForm4MetabRenalVascEyeState
           _overrideUntil = null;
           _dayLoadFailed = false;
         }
-        if (_isActiveDayToday && _glucoseAutoDoneDay != day) {
-          _glucoseAutoDoneDay = day;
-          await _applyGlucoseAutofill(force: false);
-        }
       } else {
         _applyDay(MetabRenalVascEyeDay.fromJson(raw));
         _recordExists = true;
@@ -460,10 +411,6 @@ class _HelperForm4MetabRenalVascEyeState
         _overrideUntil = _parseUtc(raw['override_unlocked_until']);
         _isEditing = _isOverrideActive;
         _dayLoadFailed = false;
-        if (_isActiveDayToday && _glucoseAutoDoneDay != day) {
-          _glucoseAutoDoneDay = day;
-          await _applyGlucoseAutofill(force: false);
-        }
       }
     } catch (e) {
       if (!mounted || gen != _loadGen || day != _activeDay) return;
@@ -490,6 +437,19 @@ class _HelperForm4MetabRenalVascEyeState
     } finally {
       if (mounted && gen == _loadGen) setState(() => _dayLoading = false);
     }
+    if (mounted && gen == _loadGen && day == _activeDay) {
+      final ok = await _applyGlucoseAutofill(force: false);
+      if (ok && mounted) setState(() => _isEditing = true);
+      _restartGlucosePoll();
+    }
+  }
+
+  void _restartGlucosePoll() {
+    _glucosePollTimer?.cancel();
+    if (!_isFieldEditable || !_isActiveDayToday) return;
+    _glucosePollTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      unawaited(_applyGlucoseAutofill(force: false));
+    });
   }
 
   Future<void> _stashCurrentDayDraft() async {
@@ -559,38 +519,44 @@ class _HelperForm4MetabRenalVascEyeState
   }
 
   Future<bool> _applyGlucoseAutofill({required bool force}) async {
-    // Web: only when this NICU day is calendar-today, and Helper 5
-    // record_date matches that same calendar date (boundary_hour=11 on API).
-    if (!_isActiveDayToday || _activeDayYmd == null) return false;
+    final viewedDate = _activeDayYmd;
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty || viewedDate == null) return false;
+    if (_isFutureDay) return false;
+    if (_isSubmitted && !_isOverrideActive) return false;
     try {
-      final data =
-          await _api.loadMinimalMonitoringToday(widget.enrollmentId.trim());
+      final data = await _api.loadMinimalMonitoringOnDate(eid, viewedDate);
+      if (!mounted || _activeDayYmd != viewedDate) return false;
+      if (data['id'] == null) return false;
       final recordDate = data['record_date']?.toString();
-      if (recordDate != null &&
-          recordDate.isNotEmpty &&
-          recordDate.substring(0, 10) != _activeDayYmd) {
+      if (recordDate == null || !recordDate.startsWith(viewedDate)) {
         return false;
       }
 
-      final computed = _computeGlucoseAutofill(_parseHelper5Glucose(data));
+      final computed = computeGlucoseAutofillFromMml(
+        parseMetAGlucoseReadings(data),
+      );
       final flags = <String, bool>{
         'lowest_glucose': false,
         'hypoglycemia_episodes': false,
         'highest_glucose': false,
       };
 
-      if (force || _isEmptyGlucoseField(_lowGlucoseCtrl.text)) {
-        _lowGlucoseCtrl.text = computed['lowest_glucose']!;
-        flags['lowest_glucose'] = true;
+      void maybeSet(String key, TextEditingController ctrl) {
+        final current = ctrl.text;
+        final lastComputed = _lastAutoComputed[key];
+        final stillMatches = lastComputed != null &&
+            current.trim() == lastComputed!.trim();
+        if (force || _isEmptyGlucoseField(current) || stillMatches) {
+          ctrl.text = computed[key]!;
+          flags[key] = true;
+          _lastAutoComputed[key] = computed[key];
+        }
       }
-      if (force || _isEmptyGlucoseField(_hypoEpisodesCtrl.text)) {
-        _hypoEpisodesCtrl.text = computed['hypoglycemia_episodes']!;
-        flags['hypoglycemia_episodes'] = true;
-      }
-      if (force || _isEmptyGlucoseField(_highGlucoseCtrl.text)) {
-        _highGlucoseCtrl.text = computed['highest_glucose']!;
-        flags['highest_glucose'] = true;
-      }
+
+      maybeSet('lowest_glucose', _lowGlucoseCtrl);
+      maybeSet('hypoglycemia_episodes', _hypoEpisodesCtrl);
+      maybeSet('highest_glucose', _highGlucoseCtrl);
 
       final changed = flags.values.any((v) => v);
       if (!changed) return false;
@@ -623,13 +589,13 @@ class _HelperForm4MetabRenalVascEyeState
   }
 
   Future<void> _refreshGlucoseFromHelper5() async {
-    if (!_isFieldEditable || !_isActiveDayToday) return;
+    if (!_isFieldEditable || _activeDayYmd == null) return;
     setState(() => _glucoseRefreshing = true);
     try {
       final ok = await _applyGlucoseAutofill(force: true);
       _toast(ok
           ? 'Glucose fields refreshed from Helper 5'
-          : 'No matching Helper 5 glucose sheet for today',
+          : 'No matching Helper 5 glucose sheet for this day',
           error: !ok);
     } finally {
       if (mounted) setState(() => _glucoseRefreshing = false);
@@ -660,33 +626,6 @@ class _HelperForm4MetabRenalVascEyeState
       m.ropStage = null;
       m.plusDisease = null;
       m.ropTreatment = null;
-    }
-  }
-
-  Future<void> _selectDay1Date() async {
-    if (_day1Locked) {
-      _toast('Day 1 Date is locked once daily logs exist', error: true);
-      return;
-    }
-    final picked = await showModernDatePicker(
-      context: context,
-      initialDate: _day1Date ?? DateTime.now(),
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now().add(const Duration(days: 1)),
-    );
-    if (picked == null) return;
-    final ymd =
-        '${picked.year.toString().padLeft(4, '0')}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}';
-    try {
-      await _api.saveDay1Date(widget.enrollmentId.trim(), ymd);
-      setState(() {
-        _day1Date = DateTime(picked.year, picked.month, picked.day);
-        _recomputeTodayNicuDay();
-        _activeDay = _defaultActiveDay();
-      });
-      await _loadActiveDay();
-    } catch (e) {
-      _toast('Could not save Day 1 Date: $e', error: true);
     }
   }
 
@@ -764,7 +703,6 @@ class _HelperForm4MetabRenalVascEyeState
         _isEditing = false;
         _dayStatus[_activeDay] = pct == 100 ? 'complete' : 'draft';
         _dayPct[_activeDay] = pct;
-        _day1Locked = true;
         _banner = forLater
             ? 'Day $_activeDay saved for later'
             : 'Day $_activeDay saved successfully';
@@ -852,6 +790,7 @@ class _HelperForm4MetabRenalVascEyeState
 
   void _updateReading(List<MrveReading> list, int i, String field, String v) {
     if (!_isFieldEditable) return;
+    if (field == 'date' && _activeDayYmd != null) return;
     setState(() {
       if (field == 'date') list[i].date = v;
       if (field == 'time') list[i].time = v;
@@ -958,7 +897,7 @@ class _HelperForm4MetabRenalVascEyeState
                             title: '4.1 Metabolic',
                             icon: Icons.bolt_rounded,
                             color: c.warning,
-                            headerAction: _isActiveDayToday
+                            headerAction: _isFieldEditable
                                 ? TextButton.icon(
                                     onPressed: (!_glucoseRefreshing && editable)
                                         ? _refreshGlucoseFromHelper5
@@ -1334,6 +1273,7 @@ class _HelperForm4MetabRenalVascEyeState
               reading: readings[i],
               unit: unit,
               editable: editable,
+              fixedEntryDate: _activeDayYmd,
               canDelete: readings.length > 1,
               colors: c,
               onChanged: (field, v) => _updateReading(readings, i, field, v),
@@ -1361,6 +1301,13 @@ class _HelperForm4MetabRenalVascEyeState
               fontSize: 12, color: c.textSecondary, fontStyle: FontStyle.italic)),
     );
   }
+
+  HelperFormPatientContext get _helperPatient => HelperFormPatientContext(
+        enrollmentId: widget.enrollmentId,
+        gestation: widget.gestation,
+        motherName: widget.motherName,
+        babyUid: widget.babyUid,
+      );
 
   AppBar _appBar(AppColors c) {
     return AppBar(
@@ -1391,8 +1338,12 @@ class _HelperForm4MetabRenalVascEyeState
           ),
         ],
       ),
-      actions: const [
-        Padding(
+      actions: [
+        HelperFormSwitcherButton(
+          current: HelperFormKind.metabRenalVascEye,
+          patient: _helperPatient,
+        ),
+        const Padding(
           padding: EdgeInsets.only(right: 8),
           child: Center(child: ThemeToggle()),
         ),
@@ -1401,32 +1352,33 @@ class _HelperForm4MetabRenalVascEyeState
   }
 
   Widget _day1Bar(AppColors c) {
-    final label = _day1Date == null
-        ? 'Not set'
-        : '${_day1Date!.day.toString().padLeft(2, '0')} '
-            '${_month(_day1Date!.month)} ${_day1Date!.year}';
+    final label = _day1Date != null
+        ? formatDisplayDate(_day1Date!)
+        : 'Awaiting Form B';
     return Container(
       color: c.surface,
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
       child: Row(
         children: [
-          Text('Day 1 Date',
-              style: TextStyle(
-                  color: c.textSecondary,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: OutlinedButton(
-              onPressed: _day1Locked ? null : _selectDay1Date,
-              child: Text(label),
+          Text(
+            'Day 1 Date',
+            style: TextStyle(
+              color: c.textSecondary,
+              fontWeight: FontWeight.w700,
+              fontSize: 13,
             ),
           ),
-          if (_day1Locked)
-            Padding(
-              padding: const EdgeInsets.only(left: 8),
-              child: Icon(Icons.lock_outline, size: 18, color: c.textTertiary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: c.textPrimary,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
             ),
+          ),
         ],
       ),
     );
@@ -1960,6 +1912,7 @@ class _ReadingEntryRow extends StatefulWidget {
   final MrveReading reading;
   final String unit;
   final bool editable;
+  final String? fixedEntryDate;
   final bool canDelete;
   final AppColors colors;
   final void Function(String field, String value) onChanged;
@@ -1972,6 +1925,7 @@ class _ReadingEntryRow extends StatefulWidget {
     required this.reading,
     required this.unit,
     required this.editable,
+    this.fixedEntryDate,
     required this.canDelete,
     required this.colors,
     required this.onChanged,
@@ -1990,7 +1944,9 @@ class _ReadingEntryRowState extends State<_ReadingEntryRow> {
   @override
   void initState() {
     super.initState();
-    _dateCtrl = TextEditingController(text: widget.reading.date);
+    _dateCtrl = TextEditingController(
+      text: widget.fixedEntryDate ?? widget.reading.date,
+    );
     _timeCtrl = TextEditingController(text: widget.reading.time);
     _valueCtrl = TextEditingController(text: widget.reading.value);
   }
@@ -2000,11 +1956,13 @@ class _ReadingEntryRowState extends State<_ReadingEntryRow> {
     super.didUpdateWidget(oldWidget);
     final r = widget.reading;
     final o = oldWidget.reading;
+    final displayDate = widget.fixedEntryDate ?? r.date;
     if (o.id != r.id ||
         o.date != r.date ||
         o.time != r.time ||
-        o.value != r.value) {
-      _dateCtrl.text = r.date;
+        o.value != r.value ||
+        widget.fixedEntryDate != oldWidget.fixedEntryDate) {
+      _dateCtrl.text = displayDate;
       _timeCtrl.text = r.time;
       _valueCtrl.text = r.value;
     }
@@ -2051,12 +2009,15 @@ class _ReadingEntryRowState extends State<_ReadingEntryRow> {
             Expanded(
               child: TextField(
                 controller: _dateCtrl,
+                readOnly: widget.fixedEntryDate != null,
                 enabled: widget.editable,
                 decoration: const InputDecoration(
-                  labelText: 'Date',
+                  labelText: 'Date (auto)',
                   isDense: true,
                 ),
-                onChanged: (v) => widget.onChanged('date', v),
+                onChanged: widget.fixedEntryDate == null
+                    ? (v) => widget.onChanged('date', v)
+                    : null,
               ),
             ),
             const SizedBox(width: 8),

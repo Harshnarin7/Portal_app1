@@ -9,11 +9,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/minimal_monitoring.dart';
+import '../utils/mml_table_fields.dart';
 import '../services/forms_api_service.dart';
 import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
-import '../widgets/modern_date_picker.dart';
+import '../navigation/helper_forms_navigation.dart';
 import '../widgets/theme_toggle_widget.dart';
 
 class HelperForm5MinimalMonitoring extends StatefulWidget {
@@ -60,7 +61,6 @@ class _HelperForm5MinimalMonitoringState
     '5.6': true,
   };
 
-  static const _shifts = ['Morning', 'Evening', 'Night'];
   static const _vasoactive = [
     'Dopamine',
     'Dobutamine',
@@ -190,7 +190,9 @@ class _HelperForm5MinimalMonitoringState
   }
 
   void _onText(String block, int i, String field, String value) {
-    _sheet.entries[block]![i][field] = value;
+    setState(() {
+      _sheet.entries[block]![i][field] = value;
+    });
   }
 
   List<String> _listOf(MmlEntry e, String field) {
@@ -201,11 +203,17 @@ class _HelperForm5MinimalMonitoringState
     return const [];
   }
 
-  void _addEntry(String block, Map<String, dynamic> blankFields) {
+  void _logAnotherReading(
+    String block,
+    Map<String, dynamic> Function() blankFactory,
+  ) {
     setState(() {
-      _sheet.entries[block] =
-          List<MmlEntry>.from(_sheet.entries[block] ?? const [])
-            ..add(MinimalMonitoringSheet.fresh(blankFields));
+      _disposeBlockCtrls(block);
+      final list = List<MmlEntry>.from(_sheet.entries[block] ?? const []);
+      final e = MinimalMonitoringSheet.fresh(blankFactory());
+      if (_sheetDate != null) e.date = _sheetDate!;
+      list.add(e);
+      _sheet.entries[block] = list;
     });
   }
 
@@ -216,43 +224,30 @@ class _HelperForm5MinimalMonitoringState
       _disposeBlockCtrls(block);
       list.removeAt(index);
       _sheet.entries[block] = List<MmlEntry>.from(list);
+      _ensureAllTrailingDrafts();
     });
   }
 
-  Future<void> _pickDate(String block, int i) async {
-    final e = _sheet.entries[block]![i];
-    final parsed = DateTime.tryParse(e.date);
-    final initial = parsed ?? DateTime.now();
-    final picked = await showModernDatePicker(
-      context: context,
-      initialDate: initial,
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now().add(const Duration(days: 1)),
-    );
-    if (picked == null) return;
-    setState(() {
-      e.date =
-          '${picked.year.toString().padLeft(4, '0')}-'
-          '${picked.month.toString().padLeft(2, '0')}-'
-          '${picked.day.toString().padLeft(2, '0')}';
-    });
-  }
-
-  Future<void> _pickTime(String block, int i) async {
-    final e = _sheet.entries[block]![i];
-    final parts = e.time.split(':');
-    final h = parts.isNotEmpty ? int.tryParse(parts[0]) ?? 0 : 0;
-    final m = parts.length > 1 ? int.tryParse(parts[1]) ?? 0 : 0;
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay(hour: h, minute: m),
-    );
-    if (picked == null) return;
-    setState(() {
-      e.time =
-          '${picked.hour.toString().padLeft(2, '0')}:'
-          '${picked.minute.toString().padLeft(2, '0')}';
-    });
+  /// Each block keeps a blank draft row at the end (web `openBlock` / EntryBlock).
+  void _ensureAllTrailingDrafts() {
+    final templates = MinimalMonitoringSheet.emptyEntries();
+    for (final block in kMmlBlockKeys) {
+      var list = _sheet.entries[block];
+      if (list == null || list.isEmpty) {
+        _sheet.entries[block] = List<MmlEntry>.from(templates[block] ?? const []);
+        list = _sheet.entries[block];
+      }
+      if (_sheetDate != null) {
+        for (final e in list!) {
+          e.date = _sheetDate!;
+        }
+      }
+      if (list!.last.hasClinicalData()) {
+        final blank = templates[block]!.first.copy();
+        if (_sheetDate != null) blank.date = _sheetDate!;
+        list.add(blank);
+      }
+    }
   }
 
   List<String> _splitTimeRange(String raw) {
@@ -393,6 +388,7 @@ class _HelperForm5MinimalMonitoringState
       'enrollment_id': eid,
     });
     _sheetDate = raw['record_date']?.toString() ?? sheetDate;
+    _ensureAllTrailingDrafts();
     return true;
   }
 
@@ -423,6 +419,7 @@ class _HelperForm5MinimalMonitoringState
         _sheetDate = data['record_date']?.toString() ??
             (cvA != null && cvA.isNotEmpty ? cvA.first.date : null) ??
             mmlSheetDate();
+        _ensureAllTrailingDrafts();
         _loading = false;
         _loadFailed = false;
       });
@@ -574,6 +571,90 @@ class _HelperForm5MinimalMonitoringState
     );
   }
 
+  Widget _readingsTable(
+    String block,
+    List<MmlEntry> list,
+    int draftIdx,
+  ) {
+    final c = AppTheme.of(context);
+    final cols = mmlTableFieldsForBlock(block);
+    final tableRows = <({MmlEntry entry, int idx, bool isDraft})>[];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].hasClinicalData()) {
+        tableRows.add((entry: list[i], idx: i, isDraft: i == draftIdx));
+      }
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Readings (${tableRows.length})',
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+              color: c.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 6),
+          if (tableRows.isEmpty)
+            Text(
+              'No entries yet for this field today.',
+              style: TextStyle(fontSize: 12, color: c.textSecondary),
+            )
+          else
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                headingRowHeight: 36,
+                dataRowMinHeight: 36,
+                dataRowMaxHeight: 56,
+                columns: [
+                  const DataColumn(label: Text('Date')),
+                  ...cols.map((f) => DataColumn(label: Text(f.label))),
+                  const DataColumn(label: Text('')),
+                ],
+                rows: tableRows.reversed.map((row) {
+                  return DataRow(
+                    color: row.isDraft
+                        ? MaterialStateProperty.all(
+                            c.primary.withOpacity(0.06),
+                          )
+                        : null,
+                    cells: [
+                      DataCell(Text(
+                        row.entry.date.isEmpty ? '—' : row.entry.date,
+                      )),
+                      ...cols.map(
+                        (f) => DataCell(
+                          Text(mmlFormatTableCell(f, row.entry)),
+                        ),
+                      ),
+                      DataCell(
+                        row.isDraft
+                            ? const SizedBox.shrink()
+                            : IconButton(
+                                icon: Icon(
+                                  Icons.delete_outline,
+                                  size: 18,
+                                  color: c.danger,
+                                ),
+                                tooltip: 'Remove reading',
+                                onPressed: () =>
+                                    _removeEntry(block, row.idx),
+                              ),
+                      ),
+                    ],
+                  );
+                }).toList(),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _entryBlock({
     required String code,
     required String block,
@@ -582,6 +663,12 @@ class _HelperForm5MinimalMonitoringState
   }) {
     final c = AppTheme.of(context);
     final list = _sheet.entries[block] ?? const <MmlEntry>[];
+    if (list.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final draftIdx = list.length - 1;
+    final draft = list[draftIdx];
+    final sheetDate = _sheetDate ?? draft.date;
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(10),
@@ -597,78 +684,75 @@ class _HelperForm5MinimalMonitoringState
             children: [
               Text(
                 code,
-              style: TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.w800,
                   color: c.primary,
                   fontSize: 13,
                 ),
               ),
-              const Spacer(),
-              TextButton.icon(
-                onPressed: () => _addEntry(block, blankFactory()),
-                icon: const Icon(Icons.add, size: 16),
-                label: const Text('Add values'),
-                style: TextButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  foregroundColor: c.primary,
-                ),
-              ),
             ],
           ),
-          for (var i = 0; i < list.length; i++) ...[
-            if (i > 0) Divider(color: c.border),
-            Row(
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: c.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: c.border.withValues(alpha: 0.6)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (list.length > 1)
-                  Container(
-                    margin: const EdgeInsets.only(right: 8),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-                      color: c.primary.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      '#${i + 1}',
-                      style: TextStyle(
-                        fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                        color: c.primary,
-          ),
-        ),
-      ),
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: () => _pickDate(block, i),
-                    child: Text(
-                      'Date ${list[i].date.isEmpty ? '—' : list[i].date}',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ),
-                if (block != 'resp_a') ...[
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => _pickTime(block, i),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: c.primary.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
                       child: Text(
-                        'Time ${list[i].time.isEmpty ? '—' : list[i].time}',
-                        overflow: TextOverflow.ellipsis,
+                        'New reading',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: c.primary,
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      'Date $sheetDate',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: c.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+                if (draft.hasClinicalData())
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed: () =>
+                          _logAnotherReading(block, blankFactory),
+                      icon: const Icon(Icons.add, size: 16),
+                      label: const Text('Log another reading'),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        foregroundColor: c.primary,
                       ),
                     ),
                   ),
-                ],
-                if (list.length > 1)
-                  IconButton(
-                    onPressed: () => _removeEntry(block, i),
-                    icon: Icon(Icons.delete_outline, color: c.danger),
-                    tooltip: 'Remove',
-                  ),
+                const SizedBox(height: 8),
+                ...fields(draft, draftIdx),
               ],
             ),
-        const SizedBox(height: 8),
-            ...fields(list[i], i),
-          ],
+          ),
+          _readingsTable(block, list, draftIdx),
         ],
       ),
     );
@@ -845,7 +929,18 @@ class _HelperForm5MinimalMonitoringState
       backgroundColor: c.bg,
       appBar: AppBar(
         title: const Text('Helper Form 5 — Minimal Monitoring'),
-        actions: const [ThemeToggle()],
+        actions: [
+          HelperFormSwitcherButton(
+            current: HelperFormKind.minimalMonitoring,
+            patient: HelperFormPatientContext(
+              enrollmentId: widget.enrollmentId,
+              gestation: widget.gestation,
+              motherName: widget.motherName,
+              babyUid: widget.babyUid,
+            ),
+          ),
+          const ThemeToggle(),
+        ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())

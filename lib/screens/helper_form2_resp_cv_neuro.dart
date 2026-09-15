@@ -12,7 +12,9 @@ import '../services/forms_api_service.dart';
 import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
-import '../widgets/modern_date_picker.dart';
+import '../utils/helper_dob_day1.dart';
+import '../utils/mml_helper_linkages.dart';
+import '../navigation/helper_forms_navigation.dart';
 import '../widgets/theme_toggle_widget.dart';
 
 const _kRespCvDraftKey = 'resp_cv_neuro';
@@ -51,7 +53,6 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
   bool _bannerError = false;
 
   DateTime? _day1Date;
-  bool _day1Locked = false;
   int _totalDays = 14;
   int _activeDay = 1;
   int _todayNicuDay = 1;
@@ -86,7 +87,9 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
   final _apneaCtrl = TextEditingController();
   final _desatCtrl = TextEditingController();
   final _severeDesatCtrl = TextEditingController();
-  final _fluidBolusCtrl = TextEditingController();
+
+  bool? _fluidBolusGiven;
+  bool _bolusAutofilled = false;
 
   bool? _respiratorySupport;
   bool? _endotrachealIntubation;
@@ -138,7 +141,6 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       _apneaCtrl,
       _desatCtrl,
       _severeDesatCtrl,
-      _fluidBolusCtrl,
     ]) {
       c.addListener(() => setState(() {}));
     }
@@ -162,7 +164,6 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       _apneaCtrl,
       _desatCtrl,
       _severeDesatCtrl,
-      _fluidBolusCtrl,
     ]) {
       c.dispose();
     }
@@ -187,15 +188,17 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     }
     try {
       try {
-        final d1 = await _api.loadDay1Date(eid);
-        final raw = d1['day1_date']?.toString();
+        final birth = await _api.loadBirthResuscitation(eid);
+        final raw = birth?['date_of_birth']?.toString();
         if (raw != null && raw.isNotEmpty) {
-          _day1Date = DateTime.tryParse(raw.substring(0, 10));
+          _day1Date = parseIsoDateOnly(raw);
+        } else {
+          _banner =
+              'Day 1 Date unavailable — Date of Birth not yet recorded in Form B.';
+          _bannerError = true;
         }
-        _day1Locked = d1['locked'] == true;
       } catch (e) {
-        _banner =
-            'Could not load Day 1 Date from server — set it before saving: $e';
+        _banner = 'Could not load Date of Birth from Form B: $e';
         _bannerError = true;
       }
 
@@ -210,7 +213,6 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         final pct = row['completion_pct'];
         _dayStatus[day] = st;
         _dayPct[day] = pct is int ? pct : int.tryParse('$pct') ?? 0;
-        if (st != 'empty' && st.isNotEmpty) _day1Locked = true;
       }
       _totalDays = maxDay < 14 ? 14 : maxDay;
       _recomputeTodayNicuDay();
@@ -250,6 +252,12 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     if (_day1Date == null) return null;
     return DateTime(_day1Date!.year, _day1Date!.month, _day1Date!.day)
         .add(Duration(days: day - 1));
+  }
+
+  String? get _activeDayYmd {
+    final cal = _calendarForDay(_activeDay);
+    if (cal == null) return null;
+    return formatNicuCalendarYmd(cal);
   }
 
   bool get _isFutureDay =>
@@ -322,7 +330,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         shock: _shock,
         vasoactiveSupport: _vasoactiveSupport,
         vasoactiveDrugs: _vasoactiveDrugs,
-        fluidBolus: _fluidBolusCtrl.text,
+        fluidBolusGiven: _fluidBolusGiven,
         cranialUsg: _cranialUsg,
         ivh: _ivh,
         ivhGrade: _ivhGrade,
@@ -398,6 +406,32 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     } finally {
       if (mounted && gen == _loadGen) setState(() => _dayLoading = false);
     }
+    if (mounted && gen == _loadGen && day == _activeDay) {
+      await _applyFluidBolusFromMml();
+    }
+  }
+
+  Future<void> _applyFluidBolusFromMml() async {
+    final eid = widget.enrollmentId.trim();
+    final recordDate = _activeDayYmd;
+    if (eid.isEmpty || recordDate == null) return;
+    if (_isFutureDay) return;
+    if (_isSubmitted && !_isOverrideActive) return;
+    try {
+      final data = await _api.loadMinimalMonitoringOnDate(eid, recordDate);
+      if (!mounted || _activeDayYmd != recordDate) return;
+      final rd = data['record_date']?.toString();
+      if (rd != null && rd.isNotEmpty && !rd.startsWith(recordDate)) return;
+      if (!mmlHasFluidBolus(data)) return;
+      if (_fluidBolusGiven == true) return;
+      setState(() {
+        _fluidBolusGiven = true;
+        _bolusAutofilled = true;
+        _isEditing = true;
+      });
+    } catch (_) {
+      // Helper 5 optional
+    }
   }
 
   Future<void> _stashCurrentDayDraft() async {
@@ -439,10 +473,11 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       _apneaCtrl,
       _desatCtrl,
       _severeDesatCtrl,
-      _fluidBolusCtrl,
     ]) {
       c.clear();
     }
+    _fluidBolusGiven = null;
+    _bolusAutofilled = false;
     _respiratorySupport = null;
     _endotrachealIntubation = null;
     _supportModes = [];
@@ -512,7 +547,8 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     _shock = d.shock;
     _vasoactiveSupport = d.vasoactiveSupport;
     _vasoactiveDrugs = List.of(d.vasoactiveDrugs);
-    _fluidBolusCtrl.text = d.fluidBolus ?? '';
+    _fluidBolusGiven = d.fluidBolusGiven;
+    _bolusAutofilled = false;
     _cranialUsg = d.cranialUsg;
     _ivh = d.ivh;
     _ivhGrade = d.ivhGrade;
@@ -564,8 +600,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     d.shock = _shock;
     d.vasoactiveSupport = _vasoactiveSupport;
     d.vasoactiveDrugs = List.of(_vasoactiveDrugs);
-    d.fluidBolus =
-        _fluidBolusCtrl.text.trim().isEmpty ? null : _fluidBolusCtrl.text.trim();
+    d.fluidBolusGiven = _fluidBolusGiven;
     d.cranialUsg = _cranialUsg;
     d.ivh = _ivh;
     d.ivhGrade = _ivhGrade;
@@ -576,33 +611,6 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     d.aedsGiven = _aedsGiven;
     d.nonIvhIch = _nonIvhIch;
     return d;
-  }
-
-  Future<void> _selectDay1Date() async {
-    if (_day1Locked) {
-      _toast('Day 1 Date is locked once daily logs exist', error: true);
-      return;
-    }
-    final picked = await showModernDatePicker(
-      context: context,
-      initialDate: _day1Date ?? DateTime.now(),
-      firstDate: DateTime(2020),
-      lastDate: DateTime.now().add(const Duration(days: 1)),
-    );
-    if (picked == null) return;
-    final ymd =
-        '${picked.year.toString().padLeft(4, '0')}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}';
-    try {
-      await _api.saveDay1Date(widget.enrollmentId.trim(), ymd);
-      setState(() {
-        _day1Date = DateTime(picked.year, picked.month, picked.day);
-        _recomputeTodayNicuDay();
-        _activeDay = _defaultActiveDay();
-      });
-      await _loadActiveDay();
-    } catch (e) {
-      _toast('Could not save Day 1 Date: $e', error: true);
-    }
   }
 
   Future<void> _switchDay(int day) async {
@@ -707,7 +715,6 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         _isEditing = false;
         _dayStatus[_activeDay] = pct == 100 ? 'complete' : 'draft';
         _dayPct[_activeDay] = pct;
-        _day1Locked = true;
         _banner = forLater
             ? 'Day $_activeDay saved for later'
             : 'Day $_activeDay saved successfully';
@@ -891,6 +898,14 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     );
   }
 
+  HelperFormPatientContext get _helperPatient => HelperFormPatientContext(
+        enrollmentId: widget.enrollmentId,
+        gestation: widget.gestation,
+        motherName: widget.motherName,
+        babyUid: widget.babyUid,
+        site: widget.site,
+      );
+
   AppBar _appBar(AppColors c) {
     return AppBar(
       backgroundColor: c.surface,
@@ -920,8 +935,12 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
           ),
         ],
       ),
-      actions: const [
-        Padding(
+      actions: [
+        HelperFormSwitcherButton(
+          current: HelperFormKind.respCvNeuro,
+          patient: _helperPatient,
+        ),
+        const Padding(
           padding: EdgeInsets.only(right: 8),
           child: Center(child: ThemeToggle()),
         ),
@@ -930,32 +949,33 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
   }
 
   Widget _day1Bar(AppColors c) {
-    final label = _day1Date == null
-        ? 'Not set'
-        : '${_day1Date!.day.toString().padLeft(2, '0')} '
-            '${_month(_day1Date!.month)} ${_day1Date!.year}';
+    final label = _day1Date != null
+        ? formatDisplayDate(_day1Date!)
+        : 'Awaiting Form B';
     return Container(
       color: c.surface,
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
       child: Row(
         children: [
-          Text('Day 1 Date',
-              style: TextStyle(
-                  color: c.textSecondary,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: OutlinedButton(
-              onPressed: _day1Locked ? null : _selectDay1Date,
-              child: Text(label),
+          Text(
+            'Day 1 Date',
+            style: TextStyle(
+              color: c.textSecondary,
+              fontWeight: FontWeight.w700,
+              fontSize: 13,
             ),
           ),
-          if (_day1Locked)
-            Padding(
-              padding: const EdgeInsets.only(left: 8),
-              child: Icon(Icons.lock_outline, size: 18, color: c.textTertiary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: c.textPrimary,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
             ),
+          ),
         ],
       ),
     );
@@ -1442,15 +1462,12 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
             c,
           ),
         ),
-      _fieldCard(
-        c,
-        number: '29',
-        label: 'Fluid bolus',
-        child: _textField(_fluidBolusCtrl, c,
-            enabled: editable,
-            hint: 'e.g. 10ml/kg NS',
-            error: RespCvNeuroValidators.fluidBolus(_fluidBolusCtrl.text)),
-      ),
+      _yn('29. Fluid bolus given', _fluidBolusGiven, editable, (v) {
+        setState(() {
+          _fluidBolusGiven = v;
+          _bolusAutofilled = false;
+        });
+      }, c),
     ];
   }
 
