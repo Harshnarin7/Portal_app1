@@ -14,6 +14,7 @@ import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
 import '../utils/helper_dob_day1.dart';
 import '../utils/mml_helper_linkages.dart';
+import '../utils/mml_resp_sync_bus.dart';
 import '../navigation/helper_forms_navigation.dart';
 import '../widgets/theme_toggle_widget.dart';
 
@@ -41,8 +42,6 @@ class HelperForm2RespCvNeuro extends StatefulWidget {
 }
 
 class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
-  static const _lateGraceHour = 11;
-
   final _api = FormsApiService.instance;
 
   bool _loading = true;
@@ -73,6 +72,9 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
   bool _dayLoadFailed = false;
   int _loadGen = 0;
 
+  StreamSubscription<MmlRespSavedEvent>? _mmlSavedSub;
+  Timer? _mmlPollTimer;
+
   // Controllers
   final _weightCtrl = TextEditingController();
   final _mapCpapCtrl = TextEditingController();
@@ -90,11 +92,14 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
 
   bool? _fluidBolusGiven;
   bool _bolusAutofilled = false;
+  bool _supportModesAutofilled = false;
+  final Map<String, String> _lastMmlAutoComputed = {};
 
   bool? _respiratorySupport;
   bool? _endotrachealIntubation;
   List<String> _supportModes = [];
   bool? _suppO2;
+  bool _lowestPhNotDone = false;
   bool _pao2NotDone = false;
   bool _paco2NotDone = false;
   bool? _surfactant;
@@ -144,11 +149,32 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     ]) {
       c.addListener(() => setState(() {}));
     }
+    _mmlSavedSub = MmlRespSyncBus.stream.listen((e) {
+      if (e.enrollmentId != widget.enrollmentId.trim()) return;
+      if (_day1Date != null) {
+        final targetDay = nicuDayForCalendarYmd(_day1Date, e.sheetYmd);
+        if (targetDay != null && targetDay != _activeDay) {
+          unawaited(_switchDay(targetDay));
+          return;
+        }
+      }
+      final ymd = _activeDayYmd;
+      final activeNorm = normalizeMmlYmd(ymd);
+      final sheetNorm = normalizeMmlYmd(e.sheetYmd);
+      if (activeNorm == null ||
+          sheetNorm == null ||
+          activeNorm != sheetNorm) {
+        return;
+      }
+      unawaited(_applyAutofillFromMml());
+    });
     _bootstrap();
   }
 
   @override
   void dispose() {
+    _mmlSavedSub?.cancel();
+    _mmlPollTimer?.cancel();
     unawaited(_stashCurrentDayDraft());
     for (final c in [
       _weightCtrl,
@@ -214,8 +240,9 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         _dayStatus[day] = st;
         _dayPct[day] = pct is int ? pct : int.tryParse('$pct') ?? 0;
       }
-      _totalDays = maxDay < 14 ? 14 : maxDay;
       _recomputeTodayNicuDay();
+      _totalDays = maxDay < 14 ? 14 : maxDay;
+      if (_todayNicuDay > _totalDays) _totalDays = _todayNicuDay;
       _activeDay = _defaultActiveDay();
     } catch (e) {
       _banner = 'Could not load day summary: $e';
@@ -228,25 +255,10 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
   }
 
   void _recomputeTodayNicuDay() {
-    if (_day1Date == null) {
-      _todayNicuDay = 1;
-      return;
-    }
-    final now = DateTime.now();
-    final d1 = DateTime(_day1Date!.year, _day1Date!.month, _day1Date!.day);
-    final today = DateTime(now.year, now.month, now.day);
-    final diff = today.difference(d1).inDays + 1;
-    _todayNicuDay = diff < 1 ? 1 : diff;
+    _todayNicuDay = nicuDayNumberFromDay1(_day1Date);
   }
 
-  int _defaultActiveDay() {
-    if (_day1Date == null) return 1;
-    final hour = DateTime.now().hour;
-    if (hour < _lateGraceHour && _todayNicuDay > 1) {
-      return _todayNicuDay - 1;
-    }
-    return _todayNicuDay;
-  }
+  int _defaultActiveDay() => _todayNicuDay;
 
   DateTime? _calendarForDay(int day) {
     if (_day1Date == null) return null;
@@ -306,6 +318,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         maxFlow: _maxFlowCtrl.text,
         suppO2: _suppO2,
         lowestPh: _phCtrl.text,
+        lowestPhNotDone: _lowestPhNotDone,
         pao2NotDone: _pao2NotDone,
         pao2Low: _pao2LowCtrl.text,
         pao2High: _pao2HighCtrl.text,
@@ -376,9 +389,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         _recordExists = true;
         _isSubmitted = (raw['submission_status']?.toString() == 'submitted');
         _overrideUntil = _parseUtc(raw['override_unlocked_until']);
-        // A reload/revisit during a still-active override window must not
-        // silently re-lock the fields.
-        _isEditing = _isOverrideActive;
+        _isEditing = !_isSubmitted || _isOverrideActive;
         _dayLoadFailed = false;
       }
     } catch (e) {
@@ -407,28 +418,345 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       if (mounted && gen == _loadGen) setState(() => _dayLoading = false);
     }
     if (mounted && gen == _loadGen && day == _activeDay) {
-      await _applyFluidBolusFromMml();
+      await _applyAutofillFromMml();
+      _restartMmlPoll();
     }
   }
 
-  Future<void> _applyFluidBolusFromMml() async {
+  void _restartMmlPoll() {
+    _mmlPollTimer?.cancel();
+    if (!_isFieldEditable || _isFutureDay) return;
+    _mmlPollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      unawaited(_applyAutofillFromMml());
+    });
+  }
+
+  bool _isEmptyBloodGasField(String v) => v.trim().isEmpty;
+
+  Future<MmlRespBBloodGasReadings> _loadMmlBloodGasReadingsForHelperDay(
+    String eid,
+    String recordDate,
+  ) async {
+    final helperYmd =
+        recordDate.length >= 10 ? recordDate.substring(0, 10) : recordDate;
+    var merged = const MmlRespBBloodGasReadings();
+    final ingestedSheets = <String>{};
+
+    void ingest(Map<String, dynamic> payload) {
+      if (helperYmd.isEmpty) return;
+      final rd = payload['record_date']?.toString().trim() ?? '';
+      final sheetYmd =
+          rd.length >= 10 ? rd.substring(0, 10) : (rd.isEmpty ? null : rd);
+      if (sheetYmd != null && sheetYmd.isNotEmpty && sheetYmd != helperYmd) {
+        return;
+      }
+      final dedupeKey = sheetYmd ?? helperYmd;
+      if (ingestedSheets.contains(dedupeKey)) return;
+      ingestedSheets.add(dedupeKey);
+      merged = mergeRespBBloodGasReadings(
+        merged,
+        parseRespBBloodGasReadings(payload, helperCalendarDate: helperYmd),
+      );
+    }
+
+    try {
+      ingest(await _api.loadMinimalMonitoringOnDate(
+        eid,
+        helperYmd,
+        bustCache: true,
+      ));
+    } catch (_) {}
+    try {
+      ingest(await _api.loadMinimalMonitoringToday(eid, bustCache: true));
+    } catch (_) {}
+    return merged;
+  }
+
+  Future<MmlRespCEpisodeReadings> _loadMmlEpisodeReadingsForHelperDay(
+    String eid,
+    String recordDate,
+  ) async {
+    final helperYmd =
+        recordDate.length >= 10 ? recordDate.substring(0, 10) : recordDate;
+    var merged = const MmlRespCEpisodeReadings();
+    final ingestedSheets = <String>{};
+
+    void ingest(Map<String, dynamic> payload) {
+      if (helperYmd.isEmpty) return;
+      final rd = payload['record_date']?.toString().trim() ?? '';
+      final sheetYmd =
+          rd.length >= 10 ? rd.substring(0, 10) : (rd.isEmpty ? null : rd);
+      if (sheetYmd != null && sheetYmd.isNotEmpty && sheetYmd != helperYmd) {
+        return;
+      }
+      final dedupeKey = sheetYmd ?? helperYmd;
+      if (ingestedSheets.contains(dedupeKey)) return;
+      ingestedSheets.add(dedupeKey);
+      merged = mergeRespCEpisodeReadings(
+        merged,
+        parseRespCEpisodeReadings(payload, helperCalendarDate: helperYmd),
+      );
+    }
+
+    try {
+      ingest(await _api.loadMinimalMonitoringOnDate(
+        eid,
+        helperYmd,
+        bustCache: true,
+      ));
+    } catch (_) {}
+    try {
+      ingest(await _api.loadMinimalMonitoringToday(eid, bustCache: true));
+    } catch (_) {}
+    return merged;
+  }
+
+  Future<List<Map<String, dynamic>>> _loadMmlRespAForHelperDay(
+    String eid,
+    String recordDate,
+  ) async {
+    final helperYmd =
+        recordDate.length >= 10 ? recordDate.substring(0, 10) : recordDate;
+    final rows = <Map<String, dynamic>>[];
+    final ingestedSheets = <String>{};
+
+    void ingest(Map<String, dynamic> payload) {
+      if (helperYmd.isEmpty) return;
+      final rd = payload['record_date']?.toString().trim() ?? '';
+      final sheetYmd =
+          rd.length >= 10 ? rd.substring(0, 10) : (rd.isEmpty ? null : rd);
+      if (sheetYmd != null && sheetYmd.isNotEmpty && sheetYmd != helperYmd) {
+        return;
+      }
+      final dedupeKey = sheetYmd ?? helperYmd;
+      if (ingestedSheets.contains(dedupeKey)) return;
+      ingestedSheets.add(dedupeKey);
+      rows.addAll(
+        parseRespAEntries(payload, helperCalendarDate: helperYmd),
+      );
+    }
+
+    try {
+      ingest(await _api.loadMinimalMonitoringOnDate(
+        eid,
+        helperYmd,
+        bustCache: true,
+      ));
+    } catch (_) {}
+    try {
+      ingest(await _api.loadMinimalMonitoringToday(eid, bustCache: true));
+    } catch (_) {}
+    return rows;
+  }
+
+  Future<bool> _loadMmlFluidBolusForHelperDay(
+    String eid,
+    String recordDate,
+  ) async {
+    var has = false;
+    try {
+      final on = await _api.loadMinimalMonitoringOnDate(eid, recordDate);
+      if (mmlHasFluidBolusForHelperDay(on, helperCalendarDate: recordDate)) {
+        has = true;
+      }
+    } catch (_) {}
+    if (has) return true;
+    try {
+      final today = await _api.loadMinimalMonitoringToday(eid);
+      final rd = today['record_date']?.toString() ?? '';
+      if (rd.isNotEmpty && !rd.startsWith(recordDate)) {
+        if (mmlHasFluidBolusForHelperDay(
+          today,
+          helperCalendarDate: recordDate,
+        )) {
+          has = true;
+        }
+      } else if (rd.isNotEmpty && rd.startsWith(recordDate)) {
+        has = mmlHasFluidBolusForHelperDay(
+          today,
+          helperCalendarDate: recordDate,
+        );
+      }
+    } catch (_) {}
+    return has;
+  }
+
+  Future<void> _applyAutofillFromMml() async {
     final eid = widget.enrollmentId.trim();
     final recordDate = _activeDayYmd;
     if (eid.isEmpty || recordDate == null) return;
     if (_isFutureDay) return;
     if (_isSubmitted && !_isOverrideActive) return;
     try {
-      final data = await _api.loadMinimalMonitoringOnDate(eid, recordDate);
+      final mmlHasBolus =
+          await _loadMmlFluidBolusForHelperDay(eid, recordDate);
       if (!mounted || _activeDayYmd != recordDate) return;
-      final rd = data['record_date']?.toString();
-      if (rd != null && rd.isNotEmpty && !rd.startsWith(recordDate)) return;
-      if (!mmlHasFluidBolus(data)) return;
-      if (_fluidBolusGiven == true) return;
-      setState(() {
-        _fluidBolusGiven = true;
+
+      var changed = false;
+      final bolusSync = mmlSyncTransfusionYnFromMml(
+        current: _fluidBolusGiven,
+        mmlHas: mmlHasBolus,
+        wasAutofilled: _bolusAutofilled,
+      );
+      if (bolusSync.changed) {
+        _fluidBolusGiven = bolusSync.nextValue;
+        _bolusAutofilled = bolusSync.nextAutofilled;
+        changed = true;
+      } else if (bolusSync.nextAutofilled) {
         _bolusAutofilled = true;
-        _isEditing = true;
-      });
+      }
+
+      final results = await Future.wait([
+        _loadMmlBloodGasReadingsForHelperDay(eid, recordDate),
+        _loadMmlEpisodeReadingsForHelperDay(eid, recordDate),
+        _loadMmlRespAForHelperDay(eid, recordDate),
+      ]);
+      if (!mounted || _activeDayYmd != recordDate) return;
+      final readings = results[0] as MmlRespBBloodGasReadings;
+      final episodeReadings = results[1] as MmlRespCEpisodeReadings;
+      final respARows = results[2] as List<Map<String, dynamic>>;
+      final respComputed = computeRespAAutofillFromMml(respARows);
+      final computed = computeBloodGasAutofillFromMml(readings);
+      final episodeComputed = computeEpisodeAutofillFromMml(episodeReadings);
+
+      // Helper 1 #8–#10: MML 5.2.B daily min/ranges always win (unless Not Done).
+      if (mmlRespBHasBloodGasRows(readings)) {
+        String normBg(String? v) => (v ?? '').trim();
+        if (!_lowestPhNotDone && !mmlEpisodeFieldIsNotDone(_phCtrl.text)) {
+          final mml = computed['lowest_ph'];
+          if (mml != null && normBg(_phCtrl.text) != normBg(mml)) {
+            _phCtrl.text = mml;
+            _lastMmlAutoComputed['lowest_ph'] = mml;
+            changed = true;
+          }
+        }
+        if (!_pao2NotDone) {
+          final lo = computed['pao2_low'];
+          final hi = computed['pao2_high'];
+          if (lo != null && normBg(_pao2LowCtrl.text) != normBg(lo)) {
+            _pao2LowCtrl.text = lo;
+            _lastMmlAutoComputed['pao2_low'] = lo;
+            changed = true;
+          }
+          if (hi != null && normBg(_pao2HighCtrl.text) != normBg(hi)) {
+            _pao2HighCtrl.text = hi;
+            _lastMmlAutoComputed['pao2_high'] = hi;
+            changed = true;
+          }
+        }
+        if (!_paco2NotDone) {
+          final lo = computed['paco2_low'];
+          final hi = computed['paco2_high'];
+          if (lo != null && normBg(_paco2LowCtrl.text) != normBg(lo)) {
+            _paco2LowCtrl.text = lo;
+            _lastMmlAutoComputed['paco2_low'] = lo;
+            changed = true;
+          }
+          if (hi != null && normBg(_paco2HighCtrl.text) != normBg(hi)) {
+            _paco2HighCtrl.text = hi;
+            _lastMmlAutoComputed['paco2_high'] = hi;
+            changed = true;
+          }
+        }
+      }
+
+      // Helper 1 #13–#15: MML 5.2.C daily sums always win (unless Not Done).
+      if (mmlRespCHasEpisodeRows(episodeReadings)) {
+        String normEp(String? v) => (v ?? '').trim();
+        if (!mmlEpisodeFieldIsNotDone(_apneaCtrl.text)) {
+          final mml = episodeComputed['apnea_count'];
+          if (mmlEpisodeComputedCountIsReal(episodeComputed, 'apnea_count') &&
+              normEp(_apneaCtrl.text) != normEp(mml)) {
+            _apneaCtrl.text = mml;
+            _lastMmlAutoComputed['apnea_count'] = mml;
+            changed = true;
+          }
+        }
+        if (!mmlEpisodeFieldIsNotDone(_desatCtrl.text)) {
+          final mml = episodeComputed['desaturation_count'];
+          if (mmlEpisodeComputedCountIsReal(
+                episodeComputed, 'desaturation_count') &&
+              normEp(_desatCtrl.text) != normEp(mml)) {
+            _desatCtrl.text = mml;
+            _lastMmlAutoComputed['desaturation_count'] = mml;
+            changed = true;
+          }
+        }
+        if (!mmlEpisodeFieldIsNotDone(_severeDesatCtrl.text)) {
+          final mml = episodeComputed['severe_desaturation_count'];
+          if (mmlEpisodeComputedCountIsReal(
+                episodeComputed, 'severe_desaturation_count') &&
+              normEp(_severeDesatCtrl.text) != normEp(mml)) {
+            _severeDesatCtrl.text = mml;
+            _lastMmlAutoComputed['severe_desaturation_count'] = mml;
+            changed = true;
+          }
+        }
+      }
+
+      // Helper 1 #3–#5: MML 5.2.A daily union/max always wins when rows exist.
+      String normMirror(String? v) => (v ?? '').trim();
+      if (respComputed.hasRows) {
+        final union = respComputed.modesUnion;
+        if (union.isNotEmpty && !modesArraysEqual(_supportModes, union)) {
+          _supportModes = [...union];
+          changed = true;
+        }
+        if (union.isNotEmpty) {
+          _supportModesAutofilled = true;
+          _lastMmlAutoComputed['support_modes_union'] = union.join(',');
+        }
+        if (_respiratorySupport != true) {
+          _respiratorySupport = true;
+          changed = true;
+        }
+        final mmlFio2 = respComputed.maxFio2;
+        if (mmlFio2 != null &&
+            normMirror(_maxFio2Ctrl.text) != normMirror(mmlFio2)) {
+          _maxFio2Ctrl.text = mmlFio2;
+          _lastMmlAutoComputed['max_fio2'] = mmlFio2;
+          changed = true;
+        }
+        final agg = respComputed.aggregateMode;
+        if (agg == 'BOTH') {
+          final sec = respComputed.mapCpapSecondary;
+          if (sec != null &&
+              normMirror(_mapCpapSecCtrl.text) != normMirror(sec)) {
+            _mapCpapSecCtrl.text = sec;
+            _lastMmlAutoComputed['map_cpap_secondary'] = sec;
+            changed = true;
+          }
+          final map = respComputed.mapCpap;
+          if (map != null &&
+              normMirror(_mapCpapCtrl.text) != normMirror(map)) {
+            _mapCpapCtrl.text = map;
+            _lastMmlAutoComputed['map_cpap'] = map;
+            changed = true;
+          }
+        } else if (agg == 'CPAP' || agg == 'MAP') {
+          final map = respComputed.mapCpap;
+          if (map != null &&
+              normMirror(_mapCpapCtrl.text) != normMirror(map)) {
+            _mapCpapCtrl.text = map;
+            _lastMmlAutoComputed['map_cpap'] = map;
+            changed = true;
+          }
+          if (_mapCpapSecCtrl.text.trim().isNotEmpty) {
+            _mapCpapSecCtrl.clear();
+            _lastMmlAutoComputed.remove('map_cpap_secondary');
+            changed = true;
+          }
+        }
+      } else if (_supportModes.isNotEmpty && _supportModesAutofilled) {
+        _supportModes = [];
+        _supportModesAutofilled = false;
+        _lastMmlAutoComputed.remove('support_modes_union');
+        changed = true;
+      }
+
+      if (changed && mounted) {
+        setState(() => _isEditing = true);
+      }
     } catch (_) {
       // Helper 5 optional
     }
@@ -478,10 +806,13 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     }
     _fluidBolusGiven = null;
     _bolusAutofilled = false;
+    _supportModesAutofilled = false;
+    _lastMmlAutoComputed.clear();
     _respiratorySupport = null;
     _endotrachealIntubation = null;
     _supportModes = [];
     _suppO2 = null;
+    _lowestPhNotDone = false;
     _pao2NotDone = false;
     _paco2NotDone = false;
     _surfactant = null;
@@ -520,7 +851,9 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     _maxFio2Ctrl.text = d.maxFio2?.toString() ?? '';
     _maxFlowCtrl.text = d.maxFlow?.toString() ?? '';
     _suppO2 = d.suppO2;
-    _phCtrl.text = d.lowestPh ?? '';
+    final phParsed = mmlParseHelperSingleField(d.lowestPh);
+    _lowestPhNotDone = phParsed.notDone;
+    _phCtrl.text = phParsed.value;
     final pa = RespCvNeuroValidators.parseRange(d.pao2Range);
     _pao2NotDone = pa.notDone;
     _pao2LowCtrl.text = pa.low;
@@ -549,6 +882,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     _vasoactiveDrugs = List.of(d.vasoactiveDrugs);
     _fluidBolusGiven = d.fluidBolusGiven;
     _bolusAutofilled = false;
+    _lastMmlAutoComputed.clear();
     _cranialUsg = d.cranialUsg;
     _ivh = d.ivh;
     _ivhGrade = d.ivhGrade;
@@ -574,7 +908,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     d.maxFio2 = double.tryParse(_maxFio2Ctrl.text.trim());
     d.maxFlow = double.tryParse(_maxFlowCtrl.text.trim());
     d.suppO2 = _suppO2;
-    d.lowestPh = _phCtrl.text.trim().isEmpty ? null : _phCtrl.text.trim();
+    d.lowestPh = mmlCombineHelperSingleField(_phCtrl.text, _lowestPhNotDone);
     d.pao2Range = RespCvNeuroValidators.combineRange(
         _pao2LowCtrl.text, _pao2HighCtrl.text, _pao2NotDone);
     d.paco2Range = RespCvNeuroValidators.combineRange(
@@ -619,6 +953,9 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       _toast('Day $day is not available yet');
       return;
     }
+    if (_isFieldEditable && _completion.percent > 0) {
+      await _save();
+    }
     await _stashCurrentDayDraft();
     setState(() => _activeDay = day);
     await _loadActiveDay();
@@ -662,6 +999,10 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     if (eid.isEmpty) return false;
     if (_day1Date == null) {
       _toast('Set Day 1 Date first', error: true);
+      return false;
+    }
+    if (!force && _completion.percent == 0 && !_recordExists) {
+      _toast('Nothing entered for this day yet', error: true);
       return false;
     }
 
@@ -712,7 +1053,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       final pct = _completion.percent;
       setState(() {
         _recordExists = true;
-        _isEditing = false;
+        _isEditing = !_isSubmitted;
         _dayStatus[_activeDay] = pct == 100 ? 'complete' : 'draft';
         _dayPct[_activeDay] = pct;
         _banner = forLater
@@ -920,7 +1261,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            widget.babyUid.isEmpty ? 'HELPER FORM 1' : widget.babyUid,
+            widget.babyUid.isEmpty ? 'HELPER FORM 2' : widget.babyUid,
             style: TextStyle(
               color: c.primary,
               fontSize: 13,
@@ -1327,11 +1668,29 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         number: '8',
         label: 'pH',
         hint: '(lowest of the day)',
-        child: _textField(_phCtrl, c,
-            enabled: editable,
-            keyboard: const TextInputType.numberWithOptions(decimal: true),
-            hint: '7.25',
-            error: RespCvNeuroValidators.ph(_phCtrl.text)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _textField(_phCtrl, c,
+                enabled: editable && !_lowestPhNotDone,
+                keyboard: const TextInputType.numberWithOptions(decimal: true),
+                hint: '7.25',
+                error: _lowestPhNotDone
+                    ? null
+                    : RespCvNeuroValidators.ph(_phCtrl.text)),
+            const SizedBox(height: 6),
+            FilterChip(
+              label: const Text('Not Done'),
+              selected: _lowestPhNotDone,
+              onSelected: !editable
+                  ? null
+                  : (v) => setState(() {
+                        _lowestPhNotDone = v;
+                        if (v) _phCtrl.clear();
+                      }),
+            ),
+          ],
+        ),
       ),
       _bloodGasField(
         c,

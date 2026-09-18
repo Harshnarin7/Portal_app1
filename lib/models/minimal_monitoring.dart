@@ -5,10 +5,137 @@
 
 import 'dart:convert';
 
-const kMmlBoundaryHour = 11;
+import 'resp_cv_neuro_day.dart';
+
+const kMmlBoundaryHour = 8;
+
+/// Helper Form 5 header dropdown only (web `MML_DROPDOWN_CUTOFF_HOUR`).
+/// Before this hour, nurses may pick yesterday or today; from this hour onward
+/// only today. Unrelated to [kMmlBoundaryHour] used by `/today` and other forms.
+const kMmlDropdownCutoffHour = 8;
+
+/// Real local calendar date (YYYY-MM-DD), not grace-shifted NICU working day.
+String realCalendarDateYmd([DateTime? now]) {
+  final n = now ?? DateTime.now();
+  return '${n.year.toString().padLeft(4, '0')}-'
+      '${n.month.toString().padLeft(2, '0')}-'
+      '${n.day.toString().padLeft(2, '0')}';
+}
+
+String mmlFormatDisplayDateYmd(String ymd) {
+  final parts = ymd.split('-');
+  if (parts.length != 3) return ymd;
+  final y = int.tryParse(parts[0]);
+  final mo = int.tryParse(parts[1]);
+  final d = int.tryParse(parts[2]);
+  if (y == null || mo == null || d == null) return ymd;
+  return '${d.toString().padLeft(2, '0')}-'
+      '${mo.toString().padLeft(2, '0')}-'
+      '$y';
+}
+
+class MmlDropdownDateOption {
+  final String value;
+  final String label;
+  const MmlDropdownDateOption(this.value, this.label);
+}
+
+List<MmlDropdownDateOption> mmlDropdownDateOptions({
+  DateTime? now,
+  int cutoffHour = kMmlDropdownCutoffHour,
+}) {
+  final n = now ?? DateTime.now();
+  final today = realCalendarDateYmd(n);
+  final y = DateTime(n.year, n.month, n.day).subtract(const Duration(days: 1));
+  final yesterday = realCalendarDateYmd(y);
+  MmlDropdownDateOption opt(String value) =>
+      MmlDropdownDateOption(value, mmlFormatDisplayDateYmd(value));
+  if (n.hour < cutoffHour) {
+    return [opt(yesterday), opt(today)];
+  }
+  return [opt(today)];
+}
+
+String mmlDefaultSheetDate({
+  DateTime? now,
+  int cutoffHour = kMmlDropdownCutoffHour,
+}) {
+  final opts = mmlDropdownDateOptions(now: now, cutoffHour: cutoffHour);
+  return opts.last.value;
+}
 
 /// Same rule as backend `_mml_sheet_date` / web `MML_BOUNDARY_HOUR`:
 /// before [boundaryHour] local time, "today" is still yesterday's date.
+DateTime? mmlParseDateTime(String dateYmd, String timeHm) {
+  final dp = dateYmd.split('-');
+  if (dp.length < 3) return null;
+  final y = int.tryParse(dp[0]);
+  final mo = int.tryParse(dp[1]);
+  final d = int.tryParse(dp[2]);
+  if (y == null || mo == null || d == null) return null;
+  final tp = timeHm.trim().split(':');
+  if (tp.isEmpty) return null;
+  final h = int.tryParse(tp[0]) ?? 0;
+  final min = tp.length > 1 ? (int.tryParse(tp[1]) ?? 0) : 0;
+  return DateTime(y, mo, d, h, min);
+}
+
+bool mmlIsFutureDateTime(String dateYmd, String timeHm) {
+  final dt = mmlParseDateTime(dateYmd, timeHm);
+  if (dt == null) return false;
+  return dt.isAfter(DateTime.now());
+}
+
+String mmlMaxAllowedTimeHm(String dateYmd, {DateTime? now}) {
+  final todayReal = realCalendarDateYmd(now);
+  if (dateYmd.compareTo(todayReal) > 0) return '00:00';
+  if (dateYmd.compareTo(todayReal) < 0) return '23:59';
+  final n = now ?? DateTime.now();
+  return '${n.hour.toString().padLeft(2, '0')}:'
+      '${n.minute.toString().padLeft(2, '0')}';
+}
+
+const kMmlSevereDesatExceedsMsg =
+    "Severe desaturations can't exceed total desaturation episodes";
+
+void mmlApplyRespCEpisodeConstraints(MmlEntry entry) {
+  final desat = int.tryParse(
+    entry['desaturation_episodes']?.toString().trim() ?? '',
+  );
+  final severe = int.tryParse(
+    entry['severe_desaturation_episodes']?.toString().trim() ?? '',
+  );
+  if (desat != null && severe != null && severe > desat) {
+    entry['severe_desaturation_episodes'] = desat.toString();
+  }
+}
+
+String mmlClampTimeHm(String dateYmd, String timeHm, {DateTime? now}) {
+  if (timeHm.isEmpty) return timeHm;
+  final hm = timeHm.length >= 5 ? timeHm.substring(0, 5) : timeHm;
+  final max = mmlMaxAllowedTimeHm(dateYmd, now: now);
+  return hm.compareTo(max) <= 0 ? hm : max;
+}
+
+/// Strip legacy "Should not have been done" sentinel from 5.1.B fluid bolus.
+String mmlNormalizeFluidBolusValue(dynamic v) {
+  if (v == null) return '';
+  final s = v.toString().trim();
+  if (s.isEmpty) return '';
+  if (RegExp(r'^should\s+not\s+have\s+been\s+done$', caseSensitive: false)
+      .hasMatch(s)) {
+    return '';
+  }
+  return s;
+}
+
+void mmlSanitizeFluidBolusEntries(Map<String, List<MmlEntry>> entries) {
+  for (final entry in entries['cv_b'] ?? const <MmlEntry>[]) {
+    entry['fluid_bolus_given'] =
+        mmlNormalizeFluidBolusValue(entry['fluid_bolus_given']);
+  }
+}
+
 String mmlSheetDate({DateTime? now, int boundaryHour = kMmlBoundaryHour}) {
   final n = now ?? DateTime.now();
   var sheet = DateTime(n.year, n.month, n.day);
@@ -70,12 +197,7 @@ class MmlEntry {
   static String _uid() =>
       '${DateTime.now().microsecondsSinceEpoch}-${DateTime.now().millisecondsSinceEpoch % 1000}';
 
-  static String _todayYmd() {
-    final d = DateTime.now();
-    return '${d.year.toString().padLeft(4, '0')}-'
-        '${d.month.toString().padLeft(2, '0')}-'
-        '${d.day.toString().padLeft(2, '0')}';
-  }
+  static String _todayYmd() => mmlSheetDate();
 
   static String _nowHm() {
     final d = DateTime.now();
@@ -188,6 +310,41 @@ class MinimalMonitoringSheet {
   static MmlEntry fresh(Map<String, dynamic> fields) =>
       MmlEntry(fields: Map<String, dynamic>.from(fields));
 
+  static String _nowTimeHm() {
+    final n = DateTime.now();
+    return '${n.hour.toString().padLeft(2, '0')}:${n.minute.toString().padLeft(2, '0')}';
+  }
+
+  /// Web `commitFilledDraftRows` — filled trailing row becomes a saved reading.
+  void commitFilledDraftRows(String sheetDateYmd) {
+    for (final key in kMmlBlockKeys) {
+      final list = entries[key];
+      if (list == null || list.isEmpty) continue;
+      if (!list.last.hasClinicalData()) continue;
+      final template = Map<String, dynamic>.from(
+        emptyEntries()[key]!.first.fields,
+      );
+      list.add(MmlEntry(
+        id: '${DateTime.now().millisecondsSinceEpoch}-$key',
+        date: sheetDateYmd,
+        time: _nowTimeHm(),
+        fields: template,
+      ));
+    }
+  }
+
+  /// Persist only rows with clinical data (no date/time-only draft shells).
+  Map<String, dynamic> entriesMapForPersist() {
+    final out = <String, dynamic>{};
+    for (final k in kMmlBlockKeys) {
+      out[k] = (entries[k] ?? [])
+          .where((e) => e.hasClinicalData())
+          .map((e) => e.toJson())
+          .toList();
+    }
+    return out;
+  }
+
   static Map<String, List<MmlEntry>> emptyEntries() => {
         'cv_a': [
           fresh({
@@ -213,6 +370,7 @@ class MinimalMonitoringSheet {
             'time_range': '',
             'respiratory_modes': <String>[],
             'max_map_cpap': '',
+            'max_map_cpap_secondary': '',
             'max_fio2': '',
           })
         ],
@@ -245,7 +403,7 @@ class MinimalMonitoringSheet {
           })
         ],
         'gi_a': [
-          fresh({'shift': '', 'cumulative_feed_volume': ''})
+          fresh({'cumulative_feed_volume': ''})
         ],
         'gi_b': [fresh({'direct_bilirubin': ''})],
         'neuro_a': [
@@ -315,6 +473,7 @@ class MinimalMonitoringSheet {
                   .toList();
             }
           }
+          mmlSanitizeFluidBolusEntries(base);
           return base;
         }
       } catch (_) {}
@@ -323,12 +482,12 @@ class MinimalMonitoringSheet {
     final e = emptyEntries();
     e['cv_a']![0]
       ..date = (d['record_date'] ?? e['cv_a']![0].date).toString()
-      ..['shift'] = d['shift'] ?? ''
       ..['axillary_temp'] = d['axillary_temp'] ?? ''
       ..['sbp'] = d['sbp'] ?? ''
       ..['dbp'] = d['dbp'] ?? ''
       ..['map_value'] = d['map_value'] ?? '';
-    e['cv_b']![0]['fluid_bolus_given'] = d['fluid_bolus_given'] ?? '';
+    e['cv_b']![0]['fluid_bolus_given'] =
+        mmlNormalizeFluidBolusValue(d['fluid_bolus_given']);
     e['cv_c']![0]
       ..['vasoactive_drugs'] = _splitList(d['vasoactive_drugs'])
       ..['vasoactive_dose'] = d['vasoactive_dose'] ?? ''
@@ -340,13 +499,13 @@ class MinimalMonitoringSheet {
       ..['time_range'] = d['respiratory_time'] ?? ''
       ..['respiratory_modes'] = _splitList(d['respiratory_modes'])
       ..['max_map_cpap'] = d['max_map_cpap'] ?? ''
+      ..['max_map_cpap_secondary'] = d['max_map_cpap_secondary'] ?? ''
       ..['max_fio2'] = d['max_fio2'] ?? '';
     e['resp_b']![0]
       ..['ph'] = d['ph'] ?? ''
       ..['pao2'] = d['pao2'] ?? ''
       ..['paco2'] = d['paco2'] ?? '';
     e['resp_c']![0]
-      ..['shift'] = d['apnea_shift'] ?? ''
       ..['apnea_episodes'] = d['apnea_episodes'] ?? ''
       ..['desaturation_episodes'] = d['desaturation_episodes'] ?? ''
       ..['severe_desaturation_episodes'] =
@@ -367,7 +526,6 @@ class MinimalMonitoringSheet {
       ..['symptomatic_status'] = d['symptomatic_status'] ?? ''
       ..['symptomatic_detail'] = d['symptomatic_detail'] ?? '';
     e['gi_a']![0]
-      ..['shift'] = d['feed_shift'] ?? ''
       ..['cumulative_feed_volume'] = d['cumulative_feed_volume'] ?? '';
     e['gi_b']![0]['direct_bilirubin'] = d['direct_bilirubin'] ?? '';
     e['neuro_a']![0]
@@ -383,6 +541,7 @@ class MinimalMonitoringSheet {
       ..['transfusion_products'] = _splitList(d['transfusion_products'])
       ..['transfusion_count'] = d['transfusion_count'] ?? ''
       ..['prbc_volume'] = d['prbc_volume'] ?? '';
+    mmlSanitizeFluidBolusEntries(e);
     return e;
   }
 
@@ -407,7 +566,8 @@ class MinimalMonitoringSheet {
 
   /// Flatten first entry of each block + full entries_json (web parity).
   /// Sends empty strings for clears (do not strip nulls for string fields).
-  Map<String, dynamic> toJson({String? savedBy}) {
+  Map<String, dynamic> toJson({String? savedBy, String? sheetRecordDate}) {
+    mmlSanitizeFluidBolusEntries(entries);
     final cvA = _g('cv_a');
     final cvB = _g('cv_b');
     final cvC = _g('cv_c');
@@ -425,23 +585,21 @@ class MinimalMonitoringSheet {
     final nB = _g('neuro_b');
     final hA = _g('heme_a');
 
-    final entriesMap = <String, dynamic>{};
-    for (final k in kMmlBlockKeys) {
-      entriesMap[k] = (entries[k] ?? []).map((e) => e.toJson()).toList();
-    }
+    final entriesMap = entriesMapForPersist();
 
     final pdaDose = cvD['pda_dose'];
     final steroidDose = rD['steroid_dose'];
 
     return {
       'enrollment_id': enrollmentId,
-      'record_date': cvA.date,
-      'shift': cvA['shift'] ?? '',
+      'record_date': sheetRecordDate ?? recordDate ?? cvA.date,
+      'shift': '',
       'axillary_temp': _asNum(cvA['axillary_temp']),
       'sbp': _asNum(cvA['sbp']),
       'dbp': _asNum(cvA['dbp']),
       'map_value': _asNum(cvA['map_value']),
-      'fluid_bolus_given': cvB['fluid_bolus_given'] ?? '',
+      'fluid_bolus_given':
+          mmlNormalizeFluidBolusValue(cvB['fluid_bolus_given']),
       'vasoactive_drugs': _listToString(cvC['vasoactive_drugs']),
       'vasoactive_dose': cvC['vasoactive_dose'] ?? '',
       'vasoactive_unit': cvC['vasoactive_unit'] ?? '',
@@ -454,11 +612,12 @@ class MinimalMonitoringSheet {
           : (rA.time),
       'respiratory_modes': _listToString(rA['respiratory_modes']),
       'max_map_cpap': _asNum(rA['max_map_cpap']),
+      'max_map_cpap_secondary': _asNum(rA['max_map_cpap_secondary']),
       'max_fio2': _asNum(rA['max_fio2']),
       'ph': _asNum(rB['ph']),
       'pao2': _asNum(rB['pao2']),
       'paco2': _asNum(rB['paco2']),
-      'apnea_shift': rC['shift'] ?? '',
+      'apnea_shift': '',
       'apnea_episodes': _asInt(rC['apnea_episodes']),
       'desaturation_episodes': _asInt(rC['desaturation_episodes']),
       'severe_desaturation_episodes':
@@ -478,7 +637,7 @@ class MinimalMonitoringSheet {
       'hypo_hyper': mC['hypo_hyper'] ?? '',
       'symptomatic_status': mC['symptomatic_status'] ?? '',
       'symptomatic_detail': mC['symptomatic_detail'] ?? '',
-      'feed_shift': giA['shift'] ?? '',
+      'feed_shift': '',
       'cumulative_feed_volume': _asNum(giA['cumulative_feed_volume']),
       'direct_bilirubin': _asNum(giB['direct_bilirubin']),
       'imaging_date': nA.date,
@@ -501,15 +660,46 @@ class MinimalMonitoringSheet {
   /// Soft validation messages (same ranges as web).
   String? validate() {
     for (final e in entries['resp_a'] ?? <MmlEntry>[]) {
+      final modes = _splitList(e['respiratory_modes']);
+      final mapMode = RespCvNeuroValidators.mapCpapMode(modes);
+      if (mapMode == 'BOTH') {
+        final cpapErr = RespCvNeuroValidators.mapCpap(
+          e['max_map_cpap_secondary']?.toString(),
+          'CPAP',
+        );
+        if (cpapErr != null) return cpapErr;
+        final mapErr = RespCvNeuroValidators.mapCpap(
+          e['max_map_cpap']?.toString(),
+          'MAP',
+        );
+        if (mapErr != null) return mapErr;
+      } else if (mapMode != null && mapMode != 'NA') {
+        final err = RespCvNeuroValidators.mapCpap(
+          e['max_map_cpap']?.toString(),
+          mapMode,
+        );
+        if (err != null) return err;
+      }
       final f = _asNum(e['max_fio2']);
       if (f != null && (f < 21 || f > 100)) {
         return 'Max FiO₂ must be 21–100';
       }
     }
-    for (final e in entries['resp_b'] ?? <MmlEntry>[]) {
+    final respB = entries['resp_b'] ?? <MmlEntry>[];
+    for (var i = 0; i < respB.length; i++) {
+      final e = respB[i];
+      if (i == respB.length - 1 && !e.hasClinicalData()) continue;
       final p = _asNum(e['ph']);
       if (p != null && (p < 6.6 || p > 7.8)) {
-        return 'pH must be 6.6–7.8';
+        return 'pH is usually 6.6–7.8 — please double-check this value';
+      }
+      final pao2 = _asNum(e['pao2']);
+      if (pao2 != null && (pao2 < 20 || pao2 > 600)) {
+        return 'PaO₂ is usually 20–600 mmHg — please double-check';
+      }
+      final paco2 = _asNum(e['paco2']);
+      if (paco2 != null && (paco2 < 15 || paco2 > 150)) {
+        return 'PaCO₂ is usually 15–150 mmHg — please double-check';
       }
     }
     for (final e in entries['resp_c'] ?? <MmlEntry>[]) {
@@ -524,6 +714,15 @@ class MinimalMonitoringSheet {
         if (n == null || n < 0) {
           return 'Episode counts must be whole numbers ≥ 0';
         }
+      }
+      final desat = int.tryParse(
+        e['desaturation_episodes']?.toString().trim() ?? '',
+      );
+      final severe = int.tryParse(
+        e['severe_desaturation_episodes']?.toString().trim() ?? '',
+      );
+      if (desat != null && severe != null && severe > desat) {
+        return kMmlSevereDesatExceedsMsg;
       }
     }
     for (final e in entries['resp_d'] ?? <MmlEntry>[]) {
@@ -545,6 +744,33 @@ class MinimalMonitoringSheet {
         final n = int.tryParse(t);
         if (n == null || n < 0) {
           return 'Transfusion count must be a whole number ≥ 0';
+        }
+      }
+    }
+    final maxDate = realCalendarDateYmd();
+    for (final block in kMmlBlockKeys) {
+      final list = entries[block] ?? <MmlEntry>[];
+      for (var i = 0; i < list.length; i++) {
+        final e = list[i];
+        if (i == list.length - 1 && !e.hasClinicalData()) continue;
+        if (e.date.compareTo(maxDate) > 0) {
+          return 'Date cannot be in the future';
+        }
+        if (block == 'resp_a') {
+          final raw = (e['time_range'] ?? '').toString();
+          final parts = raw
+              .split(RegExp(r'\s*[–—−-]\s*|\s+to\s+', caseSensitive: false))
+              .map((p) => p.trim())
+              .where((p) => p.isNotEmpty)
+              .toList();
+          for (final part in parts) {
+            final hm = part.length >= 5 ? part.substring(0, 5) : part;
+            if (hm.isNotEmpty && mmlIsFutureDateTime(e.date, hm)) {
+              return 'Time cannot be in the future';
+            }
+          }
+        } else if (e.time.isNotEmpty && mmlIsFutureDateTime(e.date, e.time)) {
+          return 'Time cannot be in the future';
         }
       }
     }

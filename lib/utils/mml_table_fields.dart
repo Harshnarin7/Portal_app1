@@ -116,6 +116,10 @@ String mmlFormatTableCell(MmlTableField field, MmlEntry entry) {
     return s.isEmpty ? '—' : s;
   }
   if (v == null || v.toString().trim().isEmpty) return '—';
-  final s = v.toString();
+  var s = v.toString();
+  if (field.key == 'fluid_bolus_given') {
+    s = mmlNormalizeFluidBolusValue(s);
+    if (s.isEmpty) return '—';
+  }
   return field.unit != null ? '$s ${field.unit}' : s;
 }

@@ -13,11 +13,44 @@ DateTime? parseIsoDateOnly(String? raw) {
   return DateTime.tryParse(s);
 }
 
+/// Lockstep with web `NICU_DAY_GRACE_HOUR` / backend `NICU_DAY_GRACE_HOUR`.
+const int kNicuDayGraceHour = 8;
+
+/// NICU day number for [day1Date] as of [asOf], with grace hour (before
+/// [graceHour] local, "today" is yesterday's calendar date for day math).
+int nicuDayNumberFromDay1(
+  DateTime? day1Date, [
+  DateTime? asOf,
+  int graceHour = kNicuDayGraceHour,
+]) {
+  if (day1Date == null) return 1;
+  final now = asOf ?? DateTime.now();
+  final base = DateTime(day1Date.year, day1Date.month, day1Date.day);
+  var ref = DateTime(now.year, now.month, now.day);
+  if (now.hour < graceHour) {
+    ref = ref.subtract(const Duration(days: 1));
+  }
+  final n = ref.difference(base).inDays + 1;
+  return n < 1 ? 1 : n;
+}
+
 /// Calendar date for NICU day [nicuDay] (1-based) from Day 1 anchor.
 DateTime? calendarDateForNicuDay(DateTime? day1, int nicuDay) {
   if (day1 == null || nicuDay < 1) return null;
   final base = DateTime(day1.year, day1.month, day1.day);
   return base.add(Duration(days: nicuDay - 1));
+}
+
+/// NICU day (1-based) for a calendar date `YYYY-MM-DD`, or null if before Day 1.
+int? nicuDayForCalendarYmd(DateTime? day1, String? ymd) {
+  if (day1 == null || ymd == null || ymd.trim().isEmpty) return null;
+  final cal = parseIsoDateOnly(ymd);
+  if (cal == null) return null;
+  final base = DateTime(day1.year, day1.month, day1.day);
+  final target = DateTime(cal.year, cal.month, cal.day);
+  final diff = target.difference(base).inDays;
+  if (diff < 0) return null;
+  return diff + 1;
 }
 
 String formatDisplayDate(DateTime d) {

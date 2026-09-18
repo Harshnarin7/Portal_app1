@@ -39,15 +39,34 @@ String normalizeClockTimeHms(String value) {
   );
 }
 
-/// "DD/MM/YYYY HH:MM" or with AM/PM → ISO local `YYYY-MM-DDTHH:MM:00`.
+/// Split `dd-MM-yyyy` or `dd/MM/yyyy` (also `.`) into day/month/year tokens.
+List<String>? splitDdMmYyyy(String datePart) {
+  final parts = datePart.trim().split(RegExp(r'[/\-.]'));
+  if (parts.length != 3) return null;
+  return parts;
+}
+
+/// Web DatePicker display: `dd-MM-yyyy`.
+String formatDdMmYyyy(DateTime d) =>
+    '${d.day.toString().padLeft(2, '0')}-'
+    '${d.month.toString().padLeft(2, '0')}-'
+    '${d.year}';
+
+/// Web Q11 display: `dd-MM-yyyy  |  HH:mm` (24h).
+String formatDdMmYyyyPipeHHmm(DateTime d) =>
+    '${formatDdMmYyyy(d)}  |  '
+    '${d.hour.toString().padLeft(2, '0')}:'
+    '${d.minute.toString().padLeft(2, '0')}';
+
+/// "DD-MM-YYYY HH:MM" or slashes, optional `|`, or 12h AM/PM → ISO local.
 String? ddMmYyyyHhMmToIso(String? raw) {
   if (raw == null || raw.trim().isEmpty) return null;
-  final segs = raw.trim().split(RegExp(r'\s+'));
+  final segs = raw.trim().split(RegExp(r'\s+')).where((s) => s != '|').toList();
   if (segs.isEmpty) return null;
   final datePart = segs[0];
   final timePart = segs.length > 1 ? segs[1] : '00:00';
-  final parts = datePart.split('/');
-  if (parts.length != 3) return null;
+  final parts = splitDdMmYyyy(datePart);
+  if (parts == null) return null;
   final d = parts[0].padLeft(2, '0');
   final m = parts[1].padLeft(2, '0');
   final y = parts[2];

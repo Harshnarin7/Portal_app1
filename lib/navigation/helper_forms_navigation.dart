@@ -32,31 +32,31 @@ class HelperFormPatientContext {
 }
 
 enum HelperFormKind {
+  minimalMonitoring,
   respCvNeuro,
   fio2Auc,
   infectGiHema,
   metabRenalVascEye,
-  minimalMonitoring,
 }
 
 extension HelperFormKindMeta on HelperFormKind {
   int get number => switch (this) {
-        HelperFormKind.respCvNeuro => 1,
-        HelperFormKind.fio2Auc => 2,
-        HelperFormKind.infectGiHema => 3,
-        HelperFormKind.metabRenalVascEye => 4,
-        HelperFormKind.minimalMonitoring => 5,
+        HelperFormKind.minimalMonitoring => 1,
+        HelperFormKind.respCvNeuro => 2,
+        HelperFormKind.fio2Auc => 3,
+        HelperFormKind.infectGiHema => 4,
+        HelperFormKind.metabRenalVascEye => 5,
       };
 
   String get shortTitle => switch (this) {
-        HelperFormKind.respCvNeuro => 'Resp / CV / Neuro',
-        HelperFormKind.fio2Auc => 'FiO₂ AUC',
-        HelperFormKind.infectGiHema => 'Infection / GI / Hema',
-        HelperFormKind.metabRenalVascEye => 'Metab / Renal / Vasc / Eye',
         HelperFormKind.minimalMonitoring => 'Minimal Monitoring',
+        HelperFormKind.respCvNeuro => 'Resp / CV / Neuro',
+        HelperFormKind.fio2Auc => 'FiO₂ Logging',
+        HelperFormKind.infectGiHema => 'Infection / GI / Hema',
+        HelperFormKind.metabRenalVascEye => 'Metab / Renal / Eye',
       };
 
-  String get menuLabel => 'Helper $number — $shortTitle';
+  String get menuLabel => 'Helper Form $number — $shortTitle';
 
   IconData get icon => switch (this) {
         HelperFormKind.respCvNeuro => Icons.favorite_rounded,

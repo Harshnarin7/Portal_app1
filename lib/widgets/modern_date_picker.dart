@@ -23,6 +23,46 @@ Future<DateTime?> showModernDatePicker({
       firstDate: DateTime(firstDate.year, firstDate.month, firstDate.day),
       lastDate: DateTime(lastDate.year, lastDate.month, lastDate.day),
       helpText: helpText ?? 'Select date',
+      includeTime: false,
+    ),
+  );
+}
+
+/// Combined calendar + 24-hour time in one dialog (Form A Q11).
+/// Cancel returns null and must not write the field.
+Future<DateTime?> showModernDateTimePicker({
+  required BuildContext context,
+  required DateTime initialDateTime,
+  required DateTime firstDate,
+  required DateTime lastDate,
+  String? helpText,
+}) {
+  assert(!lastDate.isBefore(firstDate), 'lastDate must be on or after firstDate');
+
+  var initial = initialDateTime;
+  if (initial.isBefore(firstDate)) initial = firstDate;
+  if (initial.isAfter(lastDate)) {
+    final lastDay = DateTime(lastDate.year, lastDate.month, lastDate.day);
+    final initDay = DateTime(initial.year, initial.month, initial.day);
+    if (initDay.isAfter(lastDay)) {
+      initial = DateTime(
+        lastDate.year,
+        lastDate.month,
+        lastDate.day,
+        initial.hour,
+        initial.minute,
+      );
+    }
+  }
+
+  return showDialog<DateTime>(
+    context: context,
+    builder: (ctx) => _ModernDatePickerDialog(
+      initialDate: initial,
+      firstDate: DateTime(firstDate.year, firstDate.month, firstDate.day),
+      lastDate: DateTime(lastDate.year, lastDate.month, lastDate.day),
+      helpText: helpText ?? 'Select date & time',
+      includeTime: true,
     ),
   );
 }
@@ -32,12 +72,14 @@ class _ModernDatePickerDialog extends StatefulWidget {
   final DateTime firstDate;
   final DateTime lastDate;
   final String helpText;
+  final bool includeTime;
 
   const _ModernDatePickerDialog({
     required this.initialDate,
     required this.firstDate,
     required this.lastDate,
     required this.helpText,
+    this.includeTime = false,
   });
 
   @override
@@ -48,6 +90,8 @@ class _ModernDatePickerDialogState extends State<_ModernDatePickerDialog> {
   late int _year;
   late int _month;
   late int _day;
+  late int _hour;
+  late int _minute;
 
   static const _months = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -61,10 +105,17 @@ class _ModernDatePickerDialogState extends State<_ModernDatePickerDialog> {
     _year = widget.initialDate.year;
     _month = widget.initialDate.month;
     _day = widget.initialDate.day;
+    _hour = widget.initialDate.hour.clamp(0, 23);
+    _minute = widget.initialDate.minute.clamp(0, 59);
     _ensureValidMonth();
   }
 
-  DateTime get _selected => DateTime(_year, _month, _day);
+  DateTime get _selected {
+    if (widget.includeTime) {
+      return DateTime(_year, _month, _day, _hour, _minute);
+    }
+    return DateTime(_year, _month, _day);
+  }
 
   int get _daysInMonth => DateTime(_year, _month + 1, 0).day;
 
@@ -150,7 +201,8 @@ class _ModernDatePickerDialogState extends State<_ModernDatePickerDialog> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 360),
-        child: Padding(
+        child: SingleChildScrollView(
+          child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -167,8 +219,13 @@ class _ModernDatePickerDialogState extends State<_ModernDatePickerDialog> {
               ),
               const SizedBox(height: 6),
               Text(
-                '${_weekdays[(_selected.weekday - 1) % 7]}, '
-                '${_months[_month - 1].substring(0, 3)} $_day, $_year',
+                widget.includeTime
+                    ? '${_weekdays[(_selected.weekday - 1) % 7]}, '
+                        '${_months[_month - 1].substring(0, 3)} $_day, $_year'
+                        '  ·  ${_hour.toString().padLeft(2, '0')}:'
+                        '${_minute.toString().padLeft(2, '0')}'
+                    : '${_weekdays[(_selected.weekday - 1) % 7]}, '
+                        '${_months[_month - 1].substring(0, 3)} $_day, $_year',
                 style: TextStyle(
                   color: text1,
                   fontSize: 20,
@@ -327,6 +384,94 @@ class _ModernDatePickerDialogState extends State<_ModernDatePickerDialog> {
                 );
               }),
 
+              if (widget.includeTime) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Time (24-hour)',
+                  style: TextStyle(
+                    color: text3,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _dropdownShell(
+                        border: border,
+                        soft: soft,
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<int>(
+                            value: _hour,
+                            isExpanded: true,
+                            icon: Icon(Icons.expand_more_rounded, color: primary),
+                            menuMaxHeight: 280,
+                            style: TextStyle(
+                              color: text1,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 14,
+                            ),
+                            items: List.generate(
+                              24,
+                              (h) => DropdownMenuItem(
+                                value: h,
+                                child: Text(h.toString().padLeft(2, '0')),
+                              ),
+                            ),
+                            onChanged: (h) {
+                              if (h == null) return;
+                              setState(() => _hour = h);
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Text(
+                        ':',
+                        style: TextStyle(
+                          color: text1,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 20,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: _dropdownShell(
+                        border: border,
+                        soft: soft,
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<int>(
+                            value: _minute,
+                            isExpanded: true,
+                            icon: Icon(Icons.expand_more_rounded, color: primary),
+                            menuMaxHeight: 280,
+                            style: TextStyle(
+                              color: text1,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 14,
+                            ),
+                            items: List.generate(
+                              60,
+                              (m) => DropdownMenuItem(
+                                value: m,
+                                child: Text(m.toString().padLeft(2, '0')),
+                              ),
+                            ),
+                            onChanged: (m) {
+                              if (m == null) return;
+                              setState(() => _minute = m);
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+
               const SizedBox(height: 8),
               Row(
                 children: [
@@ -374,6 +519,7 @@ class _ModernDatePickerDialogState extends State<_ModernDatePickerDialog> {
               ),
             ],
           ),
+        ),
         ),
       ),
     );

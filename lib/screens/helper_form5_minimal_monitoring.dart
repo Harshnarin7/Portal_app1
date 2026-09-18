@@ -1,7 +1,7 @@
 // Helper Form 5 — Minimal Monitoring Log
 // Parity with web MinimalMonitoringLog.jsx:
-//   multi-entry blocks + entries_json dual-write + boundary_hour=11
-//   Sheet date rolls at 11:00 local — form auto-refreshes to a new blank day.
+//   multi-entry blocks + entries_json dual-write
+//   Sheet date dropdown (8:00 cutoff) + GET/PUT .../on/{date}
 
 import 'dart:async';
 
@@ -9,7 +9,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/minimal_monitoring.dart';
+import '../models/resp_cv_neuro_day.dart';
+import '../utils/mml_resp_sync_bus.dart';
 import '../utils/mml_table_fields.dart';
+import '../utils/mml_validation_hints.dart';
+import '../widgets/field_validation_info.dart';
 import '../services/forms_api_service.dart';
 import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
@@ -36,8 +40,7 @@ class HelperForm5MinimalMonitoring extends StatefulWidget {
       _HelperForm5MinimalMonitoringState();
 }
 
-class _HelperForm5MinimalMonitoringState
-    extends State<HelperForm5MinimalMonitoring> with WidgetsBindingObserver {
+class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitoring> {
   static const _kMmDraftKey = 'mm5';
 
   final _api = FormsApiService.instance;
@@ -45,10 +48,10 @@ class _HelperForm5MinimalMonitoringState
   bool _loading = true;
   bool _saving = false;
   bool _loadFailed = false;
+  bool _dirty = false;
   String? _sheetDate;
   String? _banner;
   bool _bannerError = false;
-  Timer? _boundaryTimer;
 
   late MinimalMonitoringSheet _sheet;
   final Map<String, TextEditingController> _ctrls = {};
@@ -94,65 +97,19 @@ class _HelperForm5MinimalMonitoringState
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _sheet = MinimalMonitoringSheet(enrollmentId: widget.enrollmentId);
-    _loadToday();
-    _scheduleBoundaryRefresh();
+    _loadSheetForDate(mmlDefaultSheetDate());
   }
+
+  void _markDirty() => _dirty = true;
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _boundaryTimer?.cancel();
     unawaited(_stashMmDraft());
     for (final c in _ctrls.values) {
       c.dispose();
     }
     super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _checkSheetRollover(showBanner: true);
-    }
-  }
-
-  /// Schedule reload at the next 11:00 local boundary (and each day after).
-  void _scheduleBoundaryRefresh() {
-    _boundaryTimer?.cancel();
-    final next = mmlNextBoundary();
-    final wait = next.difference(DateTime.now());
-    // Tiny buffer so server clock / second rounding is past the boundary.
-    final delay = wait.isNegative
-        ? const Duration(seconds: 1)
-        : wait + const Duration(seconds: 2);
-    _boundaryTimer = Timer(delay, () async {
-      if (!mounted) return;
-      await _checkSheetRollover(showBanner: true);
-      if (mounted) _scheduleBoundaryRefresh();
-    });
-  }
-
-  /// If local sheet date no longer matches the loaded row, refresh to the new day.
-  Future<void> _checkSheetRollover({bool showBanner = false}) async {
-    final expected = mmlSheetDate();
-    if (_sheetDate == null || _sheetDate == expected) {
-      // Still same day — keep schedule; if we never got a date, reload once.
-      if (_sheetDate == null && !_loading && !_loadFailed) {
-        await _loadToday(quiet: true);
-      }
-      return;
-    }
-    await _loadToday(quiet: true);
-    if (!mounted) return;
-    if (showBanner) {
-      setState(() {
-        _banner =
-            "New day's sheet started — previous values cleared after 11:00 AM";
-        _bannerError = false;
-      });
-    }
   }
 
   // ── Controllers ─────────────────────────────────────────────────────────
@@ -162,7 +119,10 @@ class _HelperForm5MinimalMonitoringState
   TextEditingController _c(String block, int i, String field) {
     final key = _ck(block, i, field);
     final raw = _sheet.entries[block]![i][field];
-    final text = raw == null ? '' : raw.toString();
+    var text = raw == null ? '' : raw.toString();
+    if (block == 'cv_b' && field == 'fluid_bolus_given') {
+      text = mmlNormalizeFluidBolusValue(text);
+    }
     final existing = _ctrls[key];
     if (existing == null) {
       final c = TextEditingController(text: text);
@@ -184,14 +144,37 @@ class _HelperForm5MinimalMonitoringState
   }
 
   void _setField(String block, int i, String field, dynamic value) {
+    _markDirty();
     setState(() {
-      _sheet.entries[block]![i][field] = value;
+      final entry = _sheet.entries[block]![i];
+      entry[field] = value;
+      if (block == 'resp_c') {
+        mmlApplyRespCEpisodeConstraints(entry);
+      }
     });
   }
 
   void _onText(String block, int i, String field, String value) {
+    _markDirty();
     setState(() {
-      _sheet.entries[block]![i][field] = value;
+      final entry = _sheet.entries[block]![i];
+      if (block == 'cv_b' && field == 'fluid_bolus_given') {
+        entry[field] = mmlNormalizeFluidBolusValue(value);
+      } else {
+        entry[field] = value;
+      }
+      if (block == 'resp_c') {
+        mmlApplyRespCEpisodeConstraints(entry);
+        if (field == 'desaturation_episodes') {
+          final severeKey = _ck(block, i, 'severe_desaturation_episodes');
+          final ctrl = _ctrls[severeKey];
+          final severeText =
+              entry['severe_desaturation_episodes']?.toString() ?? '';
+          if (ctrl != null && ctrl.text != severeText) {
+            ctrl.text = severeText;
+          }
+        }
+      }
     });
   }
 
@@ -207,6 +190,7 @@ class _HelperForm5MinimalMonitoringState
     String block,
     Map<String, dynamic> Function() blankFactory,
   ) {
+    _markDirty();
     setState(() {
       _disposeBlockCtrls(block);
       final list = List<MmlEntry>.from(_sheet.entries[block] ?? const []);
@@ -217,9 +201,39 @@ class _HelperForm5MinimalMonitoringState
     });
   }
 
+  Future<void> _pickTime(String block, int i) async {
+    final e = _sheet.entries[block]![i];
+    final parts = e.time.split(':');
+    final h = parts.isNotEmpty ? int.tryParse(parts[0]) ?? 0 : 0;
+    final m = parts.length > 1 ? int.tryParse(parts[1]) ?? 0 : 0;
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: h, minute: m),
+    );
+    if (picked == null) return;
+    final dateYmd = _sheetDate ?? e.date;
+    var hm =
+        '${picked.hour.toString().padLeft(2, '0')}:'
+        '${picked.minute.toString().padLeft(2, '0')}';
+    hm = mmlClampTimeHm(dateYmd, hm);
+    if (mmlIsFutureDateTime(dateYmd, hm)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Time cannot be in the future')),
+        );
+      }
+      return;
+    }
+    setState(() {
+      e.time = hm;
+      _markDirty();
+    });
+  }
+
   void _removeEntry(String block, int index) {
     final list = _sheet.entries[block];
     if (list == null || list.length <= 1) return;
+    _markDirty();
     setState(() {
       _disposeBlockCtrls(block);
       list.removeAt(index);
@@ -299,8 +313,19 @@ class _HelperForm5MinimalMonitoringState
     );
     final picked = await showTimePicker(context: context, initialTime: initial);
     if (picked == null) return;
-    final hm =
+    final entry = _sheet.entries[block]![i];
+    final dateYmd = _sheetDate ?? entry.date;
+    var hm =
         '${picked.hour.toString().padLeft(2, '0')}:${picked.minute.toString().padLeft(2, '0')}';
+    hm = mmlClampTimeHm(dateYmd, hm);
+    if (mmlIsFutureDateTime(dateYmd, hm)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Time cannot be in the future')),
+        );
+      }
+      return;
+    }
     final from = isFrom ? hm : parts[0];
     final to = isFrom ? parts[1] : hm;
     _setField(block, i, 'time_range', _joinTimeRange(from, to));
@@ -356,7 +381,7 @@ class _HelperForm5MinimalMonitoringState
   Future<void> _stashMmDraft() async {
     final eid = widget.enrollmentId.trim();
     if (eid.isEmpty) return;
-    final date = _sheetDate ?? mmlSheetDate();
+    final date = _sheetDate ?? mmlDefaultSheetDate();
     await HelperDayDraftStorage.saveBySheetDate(
       _kMmDraftKey,
       eid,
@@ -392,7 +417,36 @@ class _HelperForm5MinimalMonitoringState
     return true;
   }
 
-  Future<void> _loadToday({bool quiet = false}) async {
+  Future<void> _requestSheetDateChange(String? nextYmd) async {
+    if (nextYmd == null || nextYmd.isEmpty || nextYmd == _sheetDate) return;
+    if (_dirty) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Unsaved changes'),
+          content: const Text(
+            'You have unsaved changes on this date. Switch anyway? Unsaved edits will be lost.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Switch'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    if (!mounted) return;
+    setState(() => _banner = null);
+    await _loadSheetForDate(nextYmd);
+  }
+
+  Future<void> _loadSheetForDate(String ymd, {bool quiet = false}) async {
     if (!_loading && (_sheetDate != null || _ctrls.isNotEmpty)) {
       await _stashMmDraft();
     }
@@ -402,8 +456,10 @@ class _HelperForm5MinimalMonitoringState
       if (!quiet) _banner = null;
     });
     try {
-      final data =
-          await _api.loadMinimalMonitoringToday(widget.enrollmentId.trim());
+      final data = await _api.loadMinimalMonitoringOnDate(
+        widget.enrollmentId.trim(),
+        ymd,
+      );
       if (!mounted) return;
       final loaded = MinimalMonitoringSheet.fromJson({
         ...data,
@@ -415,21 +471,20 @@ class _HelperForm5MinimalMonitoringState
       _ctrls.clear();
       setState(() {
         _sheet = loaded;
-        final cvA = loaded.entries['cv_a'];
-        _sheetDate = data['record_date']?.toString() ??
-            (cvA != null && cvA.isNotEmpty ? cvA.first.date : null) ??
-            mmlSheetDate();
+        _sheetDate = data['record_date']?.toString() ?? ymd;
+        mmlSanitizeFluidBolusEntries(_sheet.entries);
         _ensureAllTrailingDrafts();
         _loading = false;
         _loadFailed = false;
+        _dirty = false;
       });
     } catch (_) {
       if (!mounted) return;
-      final expected = mmlSheetDate();
-      if (await _tryRestoreMmDraft(expected)) {
+      if (await _tryRestoreMmDraft(ymd)) {
         setState(() {
           _loadFailed = false;
           _loading = false;
+          _dirty = false;
           _banner =
               'Restored unsaved draft (could not reach server). Tap Save when online.';
           _bannerError = false;
@@ -442,10 +497,13 @@ class _HelperForm5MinimalMonitoringState
       _ctrls.clear();
       setState(() {
         _sheet = MinimalMonitoringSheet(enrollmentId: widget.enrollmentId);
-        _sheetDate = null;
+        _sheetDate = ymd;
+        mmlSanitizeFluidBolusEntries(_sheet.entries);
+        _ensureAllTrailingDrafts();
         _loadFailed = true;
         _loading = false;
-        _banner = "Could not load today's sheet. Please try again.";
+        _dirty = false;
+        _banner = 'Could not load sheet for this date. Please try again.';
         _bannerError = true;
       });
     }
@@ -459,11 +517,11 @@ class _HelperForm5MinimalMonitoringState
       });
       return;
     }
-    // If 11:00 AM already passed while the form stayed open, start a new day
-    // instead of writing into yesterday's sheet.
-    final expected = mmlSheetDate();
-    if (_sheetDate != null && _sheetDate != expected) {
-      await _checkSheetRollover(showBanner: true);
+    if (_sheetDate == null || _sheetDate!.isEmpty) {
+      setState(() {
+        _banner = 'Select a sheet date before saving.';
+        _bannerError = true;
+      });
       return;
     }
     final err = _sheet.validate();
@@ -474,30 +532,41 @@ class _HelperForm5MinimalMonitoringState
       });
       return;
     }
-    setState(() => _saving = true);
+    final sheetYmd = _sheetDate!;
+    setState(() {
+      _sheet.commitFilledDraftRows(sheetYmd);
+      _ensureAllTrailingDrafts();
+      _saving = true;
+    });
     try {
       final profile = await TokenStorage.getProfile();
       final savedBy = (profile?['full_name'] ?? profile?['username'] ?? 'Nurse')
           .toString()
           .trim();
       final by = savedBy.isEmpty ? 'Nurse' : savedBy;
-      final result = await _api.saveMinimalMonitoringToday(
+      final result = await _api.saveMinimalMonitoringOnDate(
         widget.enrollmentId.trim(),
-        _sheet.toJson(savedBy: by),
+        sheetYmd,
+        _sheet.toJson(savedBy: by, sheetRecordDate: sheetYmd),
       );
       if (!mounted) return;
       final savedDate =
-          result['record_date']?.toString() ?? _sheetDate ?? mmlSheetDate();
+          result['record_date']?.toString() ?? sheetYmd;
       await HelperDayDraftStorage.clearBySheetDate(
         _kMmDraftKey,
         widget.enrollmentId.trim(),
         savedDate,
       );
       if (!mounted) return;
+      MmlRespSyncBus.notifySaved(
+        enrollmentId: widget.enrollmentId.trim(),
+        sheetYmd: savedDate,
+      );
       setState(() {
         _sheetDate = savedDate;
-        _banner = "Today's sheet saved";
+        _banner = 'Sheet saved (${mmlFormatDisplayDateYmd(savedDate)})';
         _bannerError = false;
+        _dirty = false;
       });
     } catch (e) {
       if (!mounted) return;
@@ -578,10 +647,11 @@ class _HelperForm5MinimalMonitoringState
   ) {
     final c = AppTheme.of(context);
     final cols = mmlTableFieldsForBlock(block);
+    final showStampTime = block != 'resp_a';
     final tableRows = <({MmlEntry entry, int idx, bool isDraft})>[];
     for (var i = 0; i < list.length; i++) {
-      if (list[i].hasClinicalData()) {
-        tableRows.add((entry: list[i], idx: i, isDraft: i == draftIdx));
+      if (i != draftIdx && list[i].hasClinicalData()) {
+        tableRows.add((entry: list[i], idx: i, isDraft: false));
       }
     }
     return Padding(
@@ -612,6 +682,7 @@ class _HelperForm5MinimalMonitoringState
                 dataRowMaxHeight: 56,
                 columns: [
                   const DataColumn(label: Text('Date')),
+                  if (showStampTime) const DataColumn(label: Text('Time')),
                   ...cols.map((f) => DataColumn(label: Text(f.label))),
                   const DataColumn(label: Text('')),
                 ],
@@ -626,6 +697,10 @@ class _HelperForm5MinimalMonitoringState
                       DataCell(Text(
                         row.entry.date.isEmpty ? '—' : row.entry.date,
                       )),
+                      if (showStampTime)
+                        DataCell(Text(
+                          row.entry.time.isEmpty ? '—' : row.entry.time,
+                        )),
                       ...cols.map(
                         (f) => DataCell(
                           Text(mmlFormatTableCell(f, row.entry)),
@@ -656,7 +731,8 @@ class _HelperForm5MinimalMonitoringState
   }
 
   Widget _entryBlock({
-    required String code,
+    String? code,
+    String? subsectionTitle,
     required String block,
     required Map<String, dynamic> Function() blankFactory,
     required List<Widget> Function(MmlEntry e, int i) fields,
@@ -669,6 +745,7 @@ class _HelperForm5MinimalMonitoringState
     final draftIdx = list.length - 1;
     final draft = list[draftIdx];
     final sheetDate = _sheetDate ?? draft.date;
+    final showStampTime = block != 'resp_a';
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(10),
@@ -680,19 +757,21 @@ class _HelperForm5MinimalMonitoringState
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Text(
-                code,
-                style: TextStyle(
-                  fontWeight: FontWeight.w800,
-                  color: c.primary,
-                  fontSize: 13,
+          if (subsectionTitle != null || (code != null && code.isNotEmpty))
+            Row(
+              children: [
+                Text(
+                  subsectionTitle ?? code!,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    color: c.primary,
+                    fontSize: subsectionTitle != null ? 14 : 13,
+                  ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
+              ],
+            ),
+          if (subsectionTitle != null || (code != null && code.isNotEmpty))
+            const SizedBox(height: 8),
           Container(
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
@@ -724,13 +803,61 @@ class _HelperForm5MinimalMonitoringState
                       ),
                     ),
                     const Spacer(),
-                    Text(
-                      'Date $sheetDate',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: c.textSecondary,
-                      ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Date',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: c.textSecondary,
+                          ),
+                        ),
+                        const FieldValidationInfo(hint: kMmlDateStampHint),
+                        const SizedBox(width: 4),
+                        Text(
+                          sheetDate,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: c.textPrimary,
+                          ),
+                        ),
+                      ],
                     ),
+                    if (showStampTime) ...[
+                      const SizedBox(width: 10),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'Time',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: c.textSecondary,
+                            ),
+                          ),
+                          const FieldValidationInfo(hint: kMmlTimeStampHint),
+                          const SizedBox(width: 4),
+                          OutlinedButton(
+                            onPressed: () => _pickTime(block, draftIdx),
+                            style: OutlinedButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
+                              ),
+                            ),
+                            child: Text(
+                              draft.time.isEmpty ? 'Set time' : draft.time,
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                   ],
                 ),
                 if (draft.hasClinicalData())
@@ -758,44 +885,115 @@ class _HelperForm5MinimalMonitoringState
     );
   }
 
-  Widget _item(int n, String label, Widget child, {String? sub}) {
+  Widget _item(
+    Object n,
+    String label,
+    Widget child, {
+    String? sub,
+    String? validationHint,
+  }) {
     final c = AppTheme.of(context);
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-          Text.rich(
-            TextSpan(
-      children: [
-                TextSpan(
-                  text: '$n. ',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    color: c.primary,
-                  ),
-                ),
-                TextSpan(
-                  text: label,
-                style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    color: c.textPrimary,
-                    fontSize: 13,
-                  ),
-                ),
-                if (sub != null)
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text.rich(
                   TextSpan(
-                    text: '  $sub',
-                    style: TextStyle(color: c.textSecondary, fontSize: 12),
+                    children: [
+                      TextSpan(
+                        text: '$n. ',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: c.primary,
+                        ),
+                      ),
+                      TextSpan(
+                        text: label,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: c.textPrimary,
+                          fontSize: 13,
+                        ),
+                      ),
+                      if (sub != null)
+                        TextSpan(
+                          text: '  $sub',
+                          style: TextStyle(
+                            color: c.textSecondary,
+                            fontSize: 12,
+                          ),
+                        ),
+                    ],
                   ),
-              ],
-            ),
+                ),
+              ),
+              if (validationHint != null)
+                FieldValidationInfo(hint: validationHint),
+            ],
           ),
           const SizedBox(height: 6),
           child,
         ],
       ),
     );
+  }
+
+  List<Widget> _respAMapCpapItems(MmlEntry e, int i) {
+    final modes = _listOf(e, 'respiratory_modes');
+    final mode = RespCvNeuroValidators.mapCpapMode(modes);
+    final c = AppTheme.of(context);
+    if (mode == 'NA') {
+      return [
+        _item(
+          3,
+          'Max MAP/CPAP of the hour',
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: c.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: c.border),
+            ),
+            child: Text(
+              'NA — mode doesn\'t generate pressure',
+              style: TextStyle(color: c.textSecondary, fontSize: 13),
+            ),
+          ),
+        ),
+      ];
+    }
+    if (mode == 'BOTH') {
+      return [
+        _item(
+          3,
+          'Max CPAP of the hour',
+          _numField('resp_a', i, 'max_map_cpap_secondary', unit: 'cm H₂O'),
+        ),
+        _item(
+          '3b',
+          'Max MAP of the hour',
+          _numField('resp_a', i, 'max_map_cpap', unit: 'cm H₂O'),
+        ),
+      ];
+    }
+    final label = mode == 'CPAP'
+        ? 'Max CPAP of the hour'
+        : mode == 'MAP'
+            ? 'Max MAP of the hour'
+            : 'Max MAP/CPAP of the hour';
+    return [
+      _item(
+        3,
+        label,
+        _numField('resp_a', i, 'max_map_cpap', unit: 'cm H₂O'),
+      ),
+    ];
   }
 
   Widget _numField(
@@ -928,7 +1126,7 @@ class _HelperForm5MinimalMonitoringState
     return Scaffold(
       backgroundColor: c.bg,
       appBar: AppBar(
-        title: const Text('Helper Form 5 — Minimal Monitoring'),
+        title: const Text('Helper Form 1 — Minimal Monitoring'),
         actions: [
           HelperFormSwitcherButton(
             current: HelperFormKind.minimalMonitoring,
@@ -979,14 +1177,61 @@ class _HelperForm5MinimalMonitoringState
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        _sheetDate != null && _sheetDate!.isNotEmpty
-                            ? "Today's sheet ($_sheetDate) — clears automatically after 11:00 AM"
-                            : "Today's sheet — clears automatically after 11:00 AM",
+                        'Sheet date — before $kMmlDropdownCutoffHour:00 you can choose yesterday or today; '
+                        'from $kMmlDropdownCutoffHour:00 onward only today. Every section uses this date.',
                         style: TextStyle(
-                          color: c.primary,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
+                          color: c.textSecondary,
+                          fontSize: 11,
                         ),
+                      ),
+                      const SizedBox(height: 6),
+                      Builder(
+                        builder: (context) {
+                          final opts = mmlDropdownDateOptions();
+                          if (opts.length > 1) {
+                            final selected = _sheetDate != null &&
+                                    opts.any((o) => o.value == _sheetDate)
+                                ? _sheetDate!
+                                : opts.last.value;
+                            return Row(
+                              children: [
+                                Text(
+                                  'Date',
+                                  style: TextStyle(
+                                    color: c.textSecondary,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                DropdownButton<String>(
+                                  value: selected,
+                                  onChanged: _loading
+                                      ? null
+                                      : (v) => _requestSheetDateChange(v),
+                                  items: opts
+                                      .map(
+                                        (o) => DropdownMenuItem(
+                                          value: o.value,
+                                          child: Text(o.label),
+                                        ),
+                                      )
+                                      .toList(),
+                                ),
+                              ],
+                            );
+                          }
+                          return Text(
+                            _sheetDate != null && _sheetDate!.isNotEmpty
+                                ? mmlFormatDisplayDateYmd(_sheetDate!)
+                                : '—',
+                            style: TextStyle(
+                              color: c.primary,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          );
+                        },
                       ),
                     ],
                   ),
@@ -1008,7 +1253,9 @@ class _HelperForm5MinimalMonitoringState
                       ),
                       if (_loadFailed)
                         TextButton(
-                          onPressed: _loadToday,
+                          onPressed: () => _loadSheetForDate(
+                            _sheetDate ?? mmlDefaultSheetDate(),
+                          ),
                           child: const Text('Retry'),
                         ),
                     ],
@@ -1026,7 +1273,6 @@ class _HelperForm5MinimalMonitoringState
                             code: '5.1.A',
                             block: 'cv_a',
                             blankFactory: () => {
-                              'shift': '',
                               'axillary_temp': '',
                               'sbp': '',
                               'dbp': '',
@@ -1035,31 +1281,22 @@ class _HelperForm5MinimalMonitoringState
                             fields: (e, i) => [
                               _item(
                                 1,
-                                'Select Shift',
-                                _pillSingle(
-                                  _shifts,
-                                  e['shift']?.toString(),
-                                  (v) => _setField('cv_a', i, 'shift', v ?? ''),
-                                ),
-                              ),
-                              _item(
-                                2,
                                 'Axillary Temp',
                                 _numField('cv_a', i, 'axillary_temp',
                                     unit: '°C'),
                               ),
                               _item(
-                                3,
+                                2,
                                 'SBP',
                                 _numField('cv_a', i, 'sbp', unit: 'mm Hg'),
                               ),
                               _item(
-                                4,
+                                3,
                                 'DBP',
                                 _numField('cv_a', i, 'dbp', unit: 'mm Hg'),
                               ),
                               _item(
-                                5,
+                                4,
                                 'MAP',
                                 _numField('cv_a', i, 'map_value',
                                     unit: 'mm Hg'),
@@ -1074,11 +1311,12 @@ class _HelperForm5MinimalMonitoringState
                               _item(
                                 1,
                                 'Fluid Bolus given',
-                                _textField(
+                                _numField(
                                   'cv_b',
                                   i,
                                   'fluid_bolus_given',
-                                  hint: 'e.g. 10ml/kg NS',
+                                  hint: 'e.g. 10',
+                                  integer: true,
                                 ),
                               ),
                             ],
@@ -1159,6 +1397,7 @@ class _HelperForm5MinimalMonitoringState
                               'time_range': '',
                               'respiratory_modes': <String>[],
                               'max_map_cpap': '',
+                              'max_map_cpap_secondary': '',
                               'max_fio2': '',
                             },
                             fields: (e, i) => [
@@ -1174,20 +1413,28 @@ class _HelperForm5MinimalMonitoringState
                                 _pillMulti(
                                   _respModes,
                                   _listOf(e, 'respiratory_modes'),
-                                  (v) => _setField(
-                                      'resp_a', i, 'respiratory_modes', v),
+                                  (v) {
+                                    _setField(
+                                        'resp_a', i, 'respiratory_modes', v);
+                                    final m =
+                                        RespCvNeuroValidators.mapCpapMode(v);
+                                    if (m == 'NA') {
+                                      _setField('resp_a', i, 'max_map_cpap', '');
+                                      _setField(
+                                          'resp_a', i, 'max_map_cpap_secondary', '');
+                                    } else if (m != 'BOTH') {
+                                      _setField(
+                                          'resp_a', i, 'max_map_cpap_secondary', '');
+                                    }
+                                  },
                                 ),
                               ),
-                              _item(
-                                3,
-                                'Max MAP/CPAP of the hour',
-                                _numField('resp_a', i, 'max_map_cpap',
-                                    unit: 'cm H₂O'),
-                              ),
+                              ..._respAMapCpapItems(e, i),
                               _item(
                                 4,
                                 'Max FiO₂ of the hour',
                                 _numField('resp_a', i, 'max_fio2', unit: '%'),
+                                validationHint: kMmlHintMaxFio2,
                               ),
                             ],
                           ),
@@ -1198,16 +1445,22 @@ class _HelperForm5MinimalMonitoringState
                                 {'ph': '', 'pao2': '', 'paco2': ''},
                             fields: (e, i) => [
                               _item(
-                                  1, 'pH', _numField('resp_b', i, 'ph')),
+                                1,
+                                'pH',
+                                _numField('resp_b', i, 'ph'),
+                                validationHint: kMmlHintPh,
+                              ),
                               _item(
                                 2,
                                 'PaO₂',
                                 _numField('resp_b', i, 'pao2', unit: 'mmHg'),
+                                validationHint: kMmlHintPao2,
                               ),
                               _item(
                                 3,
                                 'PaCO₂',
                                 _numField('resp_b', i, 'paco2', unit: 'mmHg'),
+                                validationHint: kMmlHintPaco2,
                               ),
                             ],
                           ),
@@ -1215,7 +1468,6 @@ class _HelperForm5MinimalMonitoringState
                             code: '5.2.C',
                             block: 'resp_c',
                             blankFactory: () => {
-                              'shift': '',
                               'apnea_episodes': '',
                               'desaturation_episodes': '',
                               'severe_desaturation_episodes': '',
@@ -1223,33 +1475,26 @@ class _HelperForm5MinimalMonitoringState
                             fields: (e, i) => [
                               _item(
                                 1,
-                                'Select Shift',
-                                _pillSingle(
-                                  _shifts,
-                                  e['shift']?.toString(),
-                                  (v) =>
-                                      _setField('resp_c', i, 'shift', v ?? ''),
-                                ),
-                              ),
-                              _item(
-                                2,
                                 'Apnea Episodes',
                                 _numField('resp_c', i, 'apnea_episodes',
                                     integer: true),
+                                validationHint: kMmlHintEpisodeCount,
                               ),
                               _item(
-                                3,
+                                2,
                                 'Desaturation episodes',
                                 _numField(
                                     'resp_c', i, 'desaturation_episodes',
                                     integer: true),
+                                validationHint: kMmlHintEpisodeCount,
                               ),
                               _item(
-                                4,
+                                3,
                                 'Sev. desaturation episodes',
                                 _numField('resp_c', i,
                                     'severe_desaturation_episodes',
                                     integer: true),
+                                validationHint: kMmlHintSevereDesat,
                               ),
                             ],
                           ),
@@ -1291,6 +1536,7 @@ class _HelperForm5MinimalMonitoringState
                                       'steroid_other',
                                       hint: 'Other steroid name',
                                     ),
+                                    validationHint: kMmlHintSteroidOther,
                                   ),
                               ];
                             },
@@ -1408,6 +1654,7 @@ class _HelperForm5MinimalMonitoringState
                                     'If symptomatic',
                                     _textField(
                                         'met_c', i, 'symptomatic_detail'),
+                                    validationHint: kMmlHintSymptomaticDetail,
                                   ),
                               ];
                             },
@@ -1423,22 +1670,11 @@ class _HelperForm5MinimalMonitoringState
                             code: '5.4.A',
                             block: 'gi_a',
                             blankFactory: () => {
-                              'shift': '',
                               'cumulative_feed_volume': '',
                             },
                             fields: (e, i) => [
                               _item(
                                 1,
-                                'Select Shift',
-                                _pillSingle(
-                                  _shifts,
-                                  e['shift']?.toString(),
-                                  (v) =>
-                                      _setField('gi_a', i, 'shift', v ?? ''),
-                                ),
-                              ),
-                              _item(
-                                2,
                                 'Cumulative feed volume',
                                 _numField(
                                     'gi_a', i, 'cumulative_feed_volume',
@@ -1467,7 +1703,7 @@ class _HelperForm5MinimalMonitoringState
                         icon: Icons.psychology_outlined,
                         children: [
                           _entryBlock(
-                            code: '5.5.A',
+                            subsectionTitle: 'Ventriculomegaly',
                             block: 'neuro_a',
                             blankFactory: () => {
                               'ventriculomegaly_severity': '',
@@ -1498,7 +1734,7 @@ class _HelperForm5MinimalMonitoringState
                             ],
                           ),
                           _entryBlock(
-                            code: '5.5.B',
+                            subsectionTitle: 'Doppler',
                             block: 'neuro_b',
                             blankFactory: () =>
                                 {'tod': '', 'aca_ri': '', 'mca_ri': ''},
@@ -1555,6 +1791,7 @@ class _HelperForm5MinimalMonitoringState
                                   _numField(
                                       'heme_a', i, 'transfusion_count',
                                       integer: true),
+                                  validationHint: kMmlHintTransfusionCount,
                                 ),
                                 if (products.contains('PRBC'))
                                   _item(

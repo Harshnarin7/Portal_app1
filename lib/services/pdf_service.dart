@@ -1,13 +1,53 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 
 import '../models/birth_resuscitation.dart';
 import '../models/crf.dart';
 import '../models/form_b.dart';
 import '../models/form_c.dart';
+import '../utils/screening_status.dart';
+
+/// Extra Form A print fields that are not stored on [CRF] (ICF image, PI name,
+/// GA source, exclusion Yes-details, etc.). Dashboard full-trial export may
+/// omit this; the Form A screen passes live values for PrintSummary parity.
+class FormAPrintExtras {
+  final String? piName;
+  final String? userFullName;
+  final String? consentDateTime;
+  final String? videoPisShown;
+  final String? consentSignatureImage;
+  final String? consentSignatureCapturedAt;
+  final String? gaSource;
+  final String? lmpDate;
+  final String? hydropsType;
+  final String? resusReason;
+  final String? insufficientTimeReason;
+  final String? notApproachedReason;
+  final Map<String, String?>? exclusionAnswers;
+
+  const FormAPrintExtras({
+    this.piName,
+    this.userFullName,
+    this.consentDateTime,
+    this.videoPisShown,
+    this.consentSignatureImage,
+    this.consentSignatureCapturedAt,
+    this.gaSource,
+    this.lmpDate,
+    this.hydropsType,
+    this.resusReason,
+    this.insufficientTimeReason,
+    this.notApproachedReason,
+    this.exclusionAnswers,
+  });
+}
 
 /// Patient PDF export aligned with web PrintSummary / PrintSummaryB.
 /// Includes only forms that have been filled:
@@ -21,6 +61,7 @@ class PdfService {
     FormC? formC,
     BirthResuscitationData? birth,
     bool includeFormA = true,
+    FormAPrintExtras? formAExtras,
   }) async {
     final hasB = formB != null || _birthHasIdentification(birth);
     final hasC = formC != null || _birthHasResuscitation(birth);
@@ -32,7 +73,7 @@ class PdfService {
     final pages = <pw.Widget>[];
 
     if (includeFormA) {
-      pages.addAll(_buildFormA(crf, todayLong, todayShort));
+      pages.addAll(_buildFormA(crf, todayLong, todayShort, formAExtras));
     }
     if (hasB) {
       if (pages.isNotEmpty) pages.add(pw.NewPage());
@@ -95,6 +136,25 @@ class PdfService {
     return generateFullTrialPdf(crf: crf, includeFormA: true);
   }
 
+  /// Form A only, with PrintSummary extras, then native share sheet.
+  /// File is kept in app documents (same path_provider pattern as dashboard).
+  static Future<File> shareFormAPdf({
+    required CRF crf,
+    FormAPrintExtras? extras,
+  }) async {
+    final file = await generateFullTrialPdf(
+      crf: crf,
+      includeFormA: true,
+      formAExtras: extras,
+    );
+    final id = crf.screeningId.trim().isEmpty ? 'FormA' : crf.screeningId.trim();
+    await Printing.sharePdf(
+      bytes: await file.readAsBytes(),
+      filename: '${id}_FormA.pdf',
+    );
+    return file;
+  }
+
   // ── Presence helpers ──────────────────────────────────────────────────────
 
   static bool _birthHasIdentification(BirthResuscitationData? d) {
@@ -119,12 +179,18 @@ class PdfService {
   // ── FORM A (PrintSummary.jsx) ─────────────────────────────────────────────
 
   static List<pw.Widget> _buildFormA(
-      CRF crf, String todayLong, String todayShort) {
-    final outcome = _formAOutcome(crf);
-    final gaStr =
-        '${crf.gestationWeeks} weeks ${crf.gestationDays} days';
+    CRF crf,
+    String todayLong,
+    String todayShort,
+    FormAPrintExtras? extras,
+  ) {
+    final outcome = _formAOutcome(crf, extras);
+    final hasGa = crf.gestationWeeks > 0 || crf.gestationDays > 0;
+    final gaStr = hasGa
+        ? '${crf.gestationWeeks} weeks ${crf.gestationDays} days'
+        : '';
     final gaDays = crf.gestationWeeks * 7 + crf.gestationDays;
-    final gaElig = (crf.gestationWeeks <= 0 && crf.gestationDays <= 0)
+    final gaElig = !hasGa
         ? 'Not calculated'
         : (gaDays >= 25 * 7 && gaDays <= 31 * 7 + 6
             ? 'Within range (25w 0d – 31w 6d)'
@@ -133,29 +199,59 @@ class PdfService {
     final methodLabels = {
       'LMP': 'LMP (Last Menstrual Period)',
       'Early USG': 'Early USG (<24w)',
+      'Early USG (<24w)': 'Early USG (<24w)',
       'Fundal Height': 'Fundal height',
       'Unknown': 'Method not known',
+      'Method not known': 'Method not known',
     };
 
-    final yesKeys = crf.exclusionReason
-        .split(RegExp(r'[;,]'))
-        .map((e) => e.trim().toUpperCase())
-        .where((e) => e.isNotEmpty)
-        .toSet();
-
     String excYn(String key) {
+      if (extras?.exclusionAnswers != null) {
+        final fromExtras = extras!.exclusionAnswers![key];
+        if (fromExtras == null || fromExtras.trim().isEmpty) return '—';
+        return fromExtras.trim();
+      }
+      final yesKeys = crf.exclusionReason
+          .split(RegExp(r'[;,]'))
+          .map((e) => e.trim().toUpperCase())
+          .where((e) => e.isNotEmpty)
+          .toSet();
       if (yesKeys.contains(key)) return 'Yes';
       if (crf.exclusionReason.trim().isEmpty && !crf.exclusion) return 'No';
       if (crf.exclusion && yesKeys.isEmpty) return '—';
-      return yesKeys.isEmpty ? 'No' : (yesKeys.contains(key) ? 'Yes' : 'No');
+      return yesKeys.isEmpty ? 'No' : 'No';
     }
+
+    final relationship = crf.relationshipToParticipant.trim();
+    final relationshipDisplay =
+        (relationship == 'Other' && crf.relationshipOther.trim().isNotEmpty)
+            ? 'Other — ${crf.relationshipOther.trim()}'
+            : relationship;
+    final videoPis = (extras?.videoPisShown ?? '').trim();
+    final lmp = _fmtAnyDate(extras?.lmpDate ?? '');
+    final edd = _fmtAnyDate(crf.expectedDeliveryDate);
+    final screeningDt = _fmtAnyDateTime(crf.screeningDateTime);
+    final consentDt = _fmtAnyDateTime(extras?.consentDateTime ?? '');
+    final notApproached = (extras?.notApproachedReason ?? '').trim().isNotEmpty
+        ? extras!.notApproachedReason!.trim()
+        : crf.consentRefusalReason;
+
+    final anomalyYes = excYn('ANOMALY') == 'Yes';
+    final hydropsYes = excYn('HYDROPS') == 'Yes';
+    final resusYes = excYn('RESUSCITATION') == 'Yes';
+    final insuffYes = excYn('INSUFFICIENT') == 'Yes';
+    final hydropsType = (extras?.hydropsType ?? '').trim();
+    final resusReason = (extras?.resusReason ?? '').trim();
+    final insuffReason = (extras?.insufficientTimeReason ?? '').trim();
 
     return [
       _studyHeader(
         docLabel: 'Screening Summary — Form A',
         meta: [
-          ['Screening ID',
-            crf.screeningId.isEmpty ? 'Not assigned' : crf.screeningId],
+          [
+            'Screening ID',
+            crf.screeningId.isEmpty ? 'Not assigned' : crf.screeningId
+          ],
           ['Site', crf.site],
           ['Print Date', todayLong],
         ],
@@ -164,91 +260,256 @@ class PdfService {
       _outcomeBanner('Screening Outcome', outcome),
       pw.SizedBox(height: 10),
 
-      _sectionHd('Maternal Information'),
-      _kvTable([
-        ['Mother\'s Name',
-          '${crf.motherFirstName} ${crf.motherSurname}'.trim()],
-        ['Husband\'s Name',
-          '${crf.husbandFirstName} ${crf.husbandSurname}'.trim()],
-        ['Maternal UID (CR No.)', crf.maternalUid],
-        ['Hospital Admission No.', crf.hospitalNo],
-        ['Mother Contact', crf.motherPhone],
-        ['Husband Contact', crf.husbandPhone],
-      ]),
+      pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Expanded(
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                _sectionHd('Maternal Information'),
+                _kvTable([
+                  [
+                    'Mother\'s Name',
+                    '${crf.motherFirstName} ${crf.motherSurname}'.trim()
+                  ],
+                  [
+                    'Husband\'s Name',
+                    '${crf.husbandFirstName} ${crf.husbandSurname}'.trim()
+                  ],
+                  ['Maternal UID (CR No.)', crf.maternalUid],
+                  ['Hospital Admission No.', crf.hospitalNo],
+                  ['Mother Contact', crf.motherPhone],
+                  ['Husband Contact', crf.husbandPhone],
+                ]),
+                _sectionHd('Screening Information'),
+                _kvTable([
+                  ['Site', crf.site],
+                  ['Site ID', crf.siteId],
+                  ['Screened By', crf.screenedBy],
+                  [
+                    'Screening Date & Time',
+                    screeningDt.isEmpty ? crf.screeningDateTime : screeningDt
+                  ],
+                ]),
+                _sectionHd('Consent Information'),
+                ..._formAConsentSection(
+                  crf: crf,
+                  extras: extras,
+                  relationshipDisplay: relationshipDisplay,
+                  videoPis: videoPis,
+                  consentDt: consentDt,
+                  notApproached: notApproached,
+                ),
+              ],
+            ),
+          ),
+          pw.SizedBox(width: 10),
+          pw.Expanded(
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                _sectionHd('Gestation Assessment'),
+                _kvTable([
+                  [
+                    'Gestation Known',
+                    crf.gestationKnownInWeeks ? 'Yes' : 'No'
+                  ],
+                  if (!crf.gestationKnownInWeeks)
+                    ['GA Source', extras?.gaSource ?? ''],
+                  if (lmp.isNotEmpty) ['LMP Date', lmp],
+                  ['Best Estimate GA', gaStr],
+                  ['EDD', edd],
+                  if (crf.gestationKnownInWeeks)
+                    [
+                      'Assessment Method',
+                      methodLabels[crf.gestationMethod] ?? crf.gestationMethod
+                    ],
+                  ['GA Eligibility', gaElig],
+                ]),
+                _sectionHd('Exclusion Criteria'),
+                _ynTable(
+                  [
+                    ['Major Structural Anomaly / Genetic', excYn('ANOMALY')],
+                    if (anomalyYes && crf.anomalyDetails.trim().isNotEmpty)
+                      ['↳ ${crf.anomalyDetails.trim()}', ''],
+                    ['Fetal Hydrops', excYn('HYDROPS')],
+                    if (hydropsYes && hydropsType.isNotEmpty)
+                      ['↳ Type: $hydropsType', ''],
+                    [
+                      'Decision to Forego Resuscitation',
+                      excYn('RESUSCITATION')
+                    ],
+                    if (resusYes && resusReason.isNotEmpty)
+                      ['↳ Reason: $resusReason', ''],
+                    [
+                      'Insufficient Time for Consent',
+                      excYn('INSUFFICIENT')
+                    ],
+                    if (insuffYes && insuffReason.isNotEmpty)
+                      ['↳ $insuffReason', ''],
+                    ['Intrauterine Fetal Death (IUFD)', excYn('IUFD')],
+                  ],
+                  leftHeader: 'Criterion',
+                  rightHeader: 'Present',
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
 
-      _sectionHd('Screening Information'),
-      _kvTable([
-        ['Site', crf.site],
-        ['Site ID', crf.siteId],
-        ['Screened By', crf.screenedBy],
-        ['Screening Date & Time', crf.screeningDateTime],
-      ]),
-
-      _sectionHd('Consent Information'),
-      _kvTable([
-        ['Consent Status', crf.consentStatus],
-        ['Consent Taken By', crf.consentTakenBy],
-        ['Relationship', crf.relationshipToParticipant == 'Other'
-            ? 'Other — ${crf.relationshipOther}'
-            : crf.relationshipToParticipant],
-        if (crf.consentStatus == 'No')
-          ['Refusal Reason', crf.consentRefusalReason],
-        if (crf.consentStatus == 'Not approached')
-          ['Not Approached Reason', crf.consentRefusalReason],
-      ]),
-
-      _sectionHd('Gestation Assessment'),
-      _kvTable([
-        ['Gestation Known', crf.gestationKnownInWeeks ? 'Yes' : 'No'],
-        ['Best Estimate GA', gaStr],
-        ['EDD', crf.expectedDeliveryDate],
-        if (crf.gestationKnownInWeeks)
-          ['Assessment Method',
-            methodLabels[crf.gestationMethod] ?? crf.gestationMethod],
-        ['GA Eligibility', gaElig],
-        ['Final Eligibility', crf.eligibilityStatus],
-      ]),
-
-      _sectionHd('Exclusion Criteria'),
-      _ynTable([
-        ['Major Structural Anomaly / Genetic', excYn('ANOMALY')],
-        if (excYn('ANOMALY') == 'Yes' && crf.anomalyDetails.trim().isNotEmpty)
-          ['↳ Anomaly details', crf.anomalyDetails],
-        ['Fetal Hydrops', excYn('HYDROPS')],
-        ['Decision to Forego Resuscitation', excYn('RESUSCITATION')],
-        ['Insufficient Time for Consent', excYn('INSUFFICIENT')],
-        ['Intrauterine Fetal Death (IUFD)', excYn('IUFD')],
-      ]),
-
-      _signatureArea(),
+      _formAAttestation(
+        preparedBy: _preparedByDisplayName(crf, extras),
+        dateText: consentDt.isNotEmpty
+            ? _fmtAnyDate(extras?.consentDateTime ?? '')
+            : todayShort,
+        piName: (extras?.piName ?? '').trim(),
+      ),
       _formFooter(
         'PORTAL Trial · Form A · Version 1.0',
-        'ID: ${crf.screeningId.isEmpty ? "—" : crf.screeningId} · Printed: $todayShort',
+        'ID: ${crf.screeningId.isEmpty ? "—" : crf.screeningId} · Printed: $todayLong',
       ),
     ];
   }
 
-  static String _formAOutcome(CRF crf) {
-    final gaDays = crf.gestationWeeks * 7 + crf.gestationDays;
-    if (!crf.gestationKnownInWeeks && !crf.eddKnown) {
-      return 'SCREEN FAILURE';
-    }
-    if (crf.gestationWeeks <= 0 && crf.gestationDays <= 0) return 'PENDING';
-    if (gaDays < 25 * 7 || gaDays > 31 * 7 + 6) return 'NOT ELIGIBLE';
-    if (crf.exclusion) return 'SCREEN FAILURE';
+  /// Reuses on-screen/backend [computeScreeningStatus] — not PrintSummary's
+  /// private `outcome` IIFE. Banner is uppercased to match the web print.
+  /// Previous PDF-only label CONSENT REFUSED is dropped; consent No / Not
+  /// approached is NOT ELIGIBLE, same as web print and mobile badges.
+  static String _formAOutcome(CRF crf, FormAPrintExtras? extras) {
+    final hasGa = crf.gestationWeeks > 0 || crf.gestationDays > 0;
     final consent = crf.consentStatus.trim();
-    if (consent == 'No' || consent == 'Not approached') {
-      return 'CONSENT REFUSED';
+    final gaSource = (extras?.gaSource ?? '').trim().isNotEmpty
+        ? extras!.gaSource!.trim()
+        : (!crf.gestationKnownInWeeks && !crf.eddKnown ? 'Neither' : null);
+    final status = computeScreeningStatus(
+      gestationWeeks: hasGa ? crf.gestationWeeks : null,
+      gestationDays: crf.gestationDays,
+      exclusionPresent: crf.exclusion,
+      consentGiven:
+          (consent.isEmpty || consent == 'Select') ? null : consent,
+      gestationKnown: crf.gestationKnownInWeeks ? 'Yes' : 'No',
+      gaSource: gaSource,
+    );
+    return normalizeScreeningStatus(status).toUpperCase();
+  }
+
+  static String _preparedByDisplayName(CRF crf, FormAPrintExtras? extras) {
+    final screened = crf.screenedBy.trim();
+    if (screened.isNotEmpty &&
+        screened != 'DRAFT' &&
+        screened != 'N/A' &&
+        screened != 'Select') {
+      return screened;
     }
-    if (consent == 'Yes') return 'ELIGIBLE';
-    if (crf.eligibilityStatus.toLowerCase().contains('eligible') &&
-        !crf.eligibilityStatus.toLowerCase().contains('not')) {
-      return 'ELIGIBLE';
-    }
-    if (crf.eligibilityStatus.toLowerCase().contains('not')) {
-      return 'NOT ELIGIBLE';
-    }
-    return 'PENDING';
+    final takenBy = crf.consentTakenBy.trim();
+    if (takenBy.isNotEmpty && takenBy != 'Select') return takenBy;
+    return (extras?.userFullName ?? '').trim();
+  }
+
+  static List<pw.Widget> _formAConsentSection({
+    required CRF crf,
+    required FormAPrintExtras? extras,
+    required String relationshipDisplay,
+    required String videoPis,
+    required String consentDt,
+    required String notApproached,
+  }) {
+    final rows = <List<String>>[
+      ['Consent Status', crf.consentStatus == 'Select' ? '' : crf.consentStatus],
+      ['Consent Taken By', crf.consentTakenBy],
+      ['Relationship', relationshipDisplay],
+      if (crf.consentStatus == 'No')
+        ['Refusal Reason', crf.consentRefusalReason],
+      if (crf.consentStatus == 'Not approached')
+        ['Not Approached Reason', notApproached],
+      if (crf.consentStatus == 'Yes' && consentDt.isNotEmpty)
+        ['Consent Date & Time', consentDt],
+      ['Video PIS Shown', videoPis],
+    ];
+    final sig = _decodePngBytes(extras?.consentSignatureImage);
+    final signedAt = _fmtAnyDateTime(extras?.consentSignatureCapturedAt ?? '');
+    return [
+      _kvTable(rows),
+      if (sig != null) ...[
+        pw.SizedBox(height: 2),
+        pw.Table(
+          border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.4),
+          columnWidths: const {
+            0: pw.FlexColumnWidth(1.35),
+            1: pw.FlexColumnWidth(2),
+          },
+          children: [
+            pw.TableRow(children: [
+              pw.Container(
+                color: PdfColors.grey100,
+                padding: const pw.EdgeInsets.symmetric(
+                    horizontal: 6, vertical: 4),
+                child: pw.Text('ICF Signature',
+                    style: const pw.TextStyle(fontSize: 8.5)),
+              ),
+              pw.Padding(
+                padding: const pw.EdgeInsets.symmetric(
+                    horizontal: 6, vertical: 6),
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Image(pw.MemoryImage(sig), height: 52),
+                    if (signedAt.isNotEmpty) ...[
+                      pw.SizedBox(height: 3),
+                      pw.Text('Signed $signedAt',
+                          style: const pw.TextStyle(
+                              fontSize: 7.5, color: PdfColors.grey700)),
+                    ],
+                  ],
+                ),
+              ),
+            ]),
+          ],
+        ),
+      ],
+    ];
+  }
+
+  static pw.Widget _formAAttestation({
+    required String preparedBy,
+    required String dateText,
+    required String piName,
+  }) {
+    pw.Widget block(String name, String cap) => pw.Expanded(
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.center,
+            children: [
+              pw.SizedBox(height: 46),
+              pw.Container(
+                height: 0.8,
+                width: double.infinity,
+                color: PdfColors.grey800,
+              ),
+              pw.SizedBox(height: 3),
+              pw.Text(name.trim().isEmpty ? '—' : name.trim(),
+                  textAlign: pw.TextAlign.center,
+                  style: pw.TextStyle(
+                      fontSize: 8, fontWeight: pw.FontWeight.bold)),
+              pw.SizedBox(height: 1),
+              pw.Text(cap,
+                  textAlign: pw.TextAlign.center,
+                  style: const pw.TextStyle(
+                      fontSize: 7.5, color: PdfColors.grey700)),
+            ],
+          ),
+        );
+    return pw.Padding(
+      padding: const pw.EdgeInsets.only(top: 25),
+      child: pw.Row(children: [
+        block(preparedBy, 'Prepared By — Signature'),
+        pw.SizedBox(width: 16),
+        block(dateText, 'Date'),
+        pw.SizedBox(width: 16),
+        block(piName, 'Principal Investigator — Signature'),
+      ]),
+    );
   }
 
   // ── Form B1 (PrintSummaryB B1–B3 + Randomisation) ──────────────────────────
@@ -793,7 +1054,11 @@ class PdfService {
     );
   }
 
-  static pw.Widget _ynTable(List<List<String>> rows) {
+  static pw.Widget _ynTable(
+    List<List<String>> rows, {
+    String leftHeader = 'Criterion / Finding',
+    String rightHeader = 'Yes / No',
+  }) {
     return pw.Table(
       border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.4),
       columnWidths: const {
@@ -806,13 +1071,13 @@ class PdfService {
           children: [
             pw.Padding(
               padding: const pw.EdgeInsets.all(4),
-              child: pw.Text('Criterion / Finding',
+              child: pw.Text(leftHeader,
                   style: pw.TextStyle(
                       fontSize: 8, fontWeight: pw.FontWeight.bold)),
             ),
             pw.Padding(
               padding: const pw.EdgeInsets.all(4),
-              child: pw.Text('Yes / No',
+              child: pw.Text(rightHeader,
                   textAlign: pw.TextAlign.center,
                   style: pw.TextStyle(
                       fontSize: 8, fontWeight: pw.FontWeight.bold)),
@@ -820,12 +1085,15 @@ class PdfService {
           ],
         ),
         ...rows.map((r) {
-          final yn = r.length > 1 ? r[1] : '—';
-          final display = yn == 'Yes'
-              ? 'YES'
-              : yn == 'No'
-                  ? 'NO'
-                  : (yn.startsWith('↳') ? yn : (yn.isEmpty ? '—' : yn));
+          final yn = r.length > 1 ? r[1] : '';
+          final isDetail = r[0].startsWith('↳');
+          final display = isDetail
+              ? ''
+              : yn == 'Yes'
+                  ? 'YES'
+                  : yn == 'No'
+                      ? 'NO'
+                      : (yn.isEmpty ? '—' : yn);
           return pw.TableRow(children: [
             pw.Padding(
               padding: const pw.EdgeInsets.symmetric(
@@ -963,6 +1231,75 @@ class PdfService {
       return DateFormat('dd MMM yyyy').format(d);
     } catch (_) {
       return iso;
+    }
+  }
+
+  /// PrintSummary `fmtDate` — ISO or dd/MM/yyyy → `dd MMM yyyy`.
+  static String _fmtAnyDate(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return '';
+    if (RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(t)) {
+      try {
+        return DateFormat('dd MMM yyyy')
+            .format(DateTime.parse(t).toLocal());
+      } catch (_) {}
+    }
+    final segs = t.split(RegExp(r'[/\-.]'));
+    if (segs.length == 3) {
+      final d = int.tryParse(segs[0]);
+      final m = int.tryParse(segs[1]);
+      final y = int.tryParse(segs[2]);
+      if (d != null && m != null && y != null && y > 31 && m <= 12) {
+        return DateFormat('dd MMM yyyy').format(DateTime(y, m, d));
+      }
+    }
+    try {
+      return DateFormat('dd MMM yyyy').format(DateTime.parse(t).toLocal());
+    } catch (_) {
+      return t;
+    }
+  }
+
+  /// PrintSummary `formatDateTimeDisplay24` — `DD-MM-YYYY HH:MM`.
+  static String _fmtAnyDateTime(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return '';
+    DateTime? dt = DateTime.tryParse(t);
+    if (dt == null) {
+      final segs = t.split(RegExp(r'\s+')).where((s) => s != '|').toList();
+      if (segs.isNotEmpty) {
+        final datePart = segs[0].split(RegExp(r'[/\-.]'));
+        if (datePart.length == 3) {
+          final d = int.tryParse(datePart[0]);
+          final m = int.tryParse(datePart[1]);
+          final y = int.tryParse(datePart[2]);
+          var hour = 0, minute = 0;
+          if (segs.length > 1) {
+            final clock = segs[1].split(':');
+            hour = int.tryParse(clock[0]) ?? 0;
+            minute = clock.length > 1 ? (int.tryParse(clock[1]) ?? 0) : 0;
+          }
+          if (d != null && m != null && y != null && y > 31) {
+            dt = DateTime(y, m, d, hour, minute);
+          }
+        }
+      }
+    }
+    if (dt == null) return t;
+    final local = dt.toLocal();
+    return DateFormat('dd-MM-yyyy HH:mm').format(local);
+  }
+
+  static Uint8List? _decodePngBytes(String? raw) {
+    if (raw == null) return null;
+    var s = raw.trim();
+    if (s.isEmpty) return null;
+    if (s.contains(',')) s = s.split(',').last;
+    try {
+      final bytes = base64Decode(s);
+      return bytes.isEmpty ? null : bytes;
+    } catch (_) {
+      return null;
     }
   }
 

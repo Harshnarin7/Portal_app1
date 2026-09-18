@@ -519,6 +519,7 @@ class RespCvNeuroCompletion {
     required String maxFlow,
     required bool? suppO2,
     required String lowestPh,
+    required bool lowestPhNotDone,
     required bool pao2NotDone,
     required String pao2Low,
     required String pao2High,
@@ -581,7 +582,7 @@ class RespCvNeuroCompletion {
         ((supportNo || maxFio2.trim().isNotEmpty) ? 1 : 0) +
         ((supportNo || maxFlow.trim().isNotEmpty) ? 1 : 0) +
         ((supportNo || suppO2 != null) ? 1 : 0) +
-        (lowestPh.trim().isNotEmpty ? 1 : 0) +
+        ((lowestPhNotDone || lowestPh.trim().isNotEmpty) ? 1 : 0) +
         ((pao2NotDone ||
                 (pao2Low.trim().isNotEmpty && pao2High.trim().isNotEmpty))
             ? 1

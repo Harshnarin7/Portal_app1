@@ -280,7 +280,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         if (showToast) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(sortedDays.isEmpty
-                ? 'No Supplemental O₂ days in Helper Form 1 yet'
+                ? 'No Supplemental O₂ days in Helper Form 2 yet'
                 : 'Synced ${sortedDays.length} day'
                     '${sortedDays.length == 1 ? '' : 's'} for FiO₂ AUC'),
             behavior: SnackBarBehavior.floating,
@@ -293,7 +293,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         setState(() => _refreshing = false);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(
-              'Could not load FiO₂ / Helper 1 data — server save disabled until refresh succeeds: $e'),
+              'Could not load FiO₂ / Helper 2 data — server save disabled until refresh succeeds: $e'),
           backgroundColor: AppTheme.of(context).danger,
           behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 5),
@@ -689,7 +689,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-            Text('Helper Form 2 — FiO₂ AUC',
+            Text('Helper Form 3 — FiO₂ Logging',
                 style: TextStyle(
                     color: c.textPrimary,
                     fontWeight: FontWeight.w800,
@@ -713,7 +713,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
             ),
           ),
           IconButton(
-            tooltip: 'Refresh from Helper 1',
+            tooltip: 'Refresh from Helper 2',
             onPressed: _refreshing
                 ? null
                 : () => _syncDaysFromHelper2(
@@ -771,8 +771,8 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
                   fontSize: 16)),
           const SizedBox(height: 8),
           Text(
-            'FiO₂ AUC days come from Helper Form 1 days where Supplemental O₂ = Yes.\n'
-            'Complete those days in Helper Form 1, then tap Refresh.',
+            'FiO₂ logging days come from Helper Form 2 days where Supplemental O₂ = Yes.\n'
+            'Complete those days in Helper Form 2, then tap Refresh.',
             textAlign: TextAlign.center,
             style: TextStyle(color: c.textSecondary, fontSize: 13, height: 1.4),
           ),
@@ -781,7 +781,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
             onPressed: () =>
                 _syncDaysFromHelper2(preserveLocal: true, showToast: true),
             icon: const Icon(Icons.refresh_rounded, size: 18),
-            label: const Text('Refresh from Helper 1'),
+            label: const Text('Refresh from Helper 2'),
               ),
             ]),
       ),

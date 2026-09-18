@@ -44,8 +44,6 @@ class HelperForm4MetabRenalVascEye extends StatefulWidget {
 
 class _HelperForm4MetabRenalVascEyeState
     extends State<HelperForm4MetabRenalVascEye> {
-  static const _lateGraceHour = 11;
-
   final _api = FormsApiService.instance;
 
   bool _loading = true;
@@ -196,8 +194,9 @@ class _HelperForm4MetabRenalVascEyeState
         _dayStatus[day] = st;
         _dayPct[day] = pct is int ? pct : int.tryParse('$pct') ?? 0;
       }
-      _totalDays = maxDay < 14 ? 14 : maxDay;
       _recomputeTodayNicuDay();
+      _totalDays = maxDay < 14 ? 14 : maxDay;
+      if (_todayNicuDay > _totalDays) _totalDays = _todayNicuDay;
       _activeDay = _defaultActiveDay();
       try {
         final mml = await _api.loadMinimalMonitoringToday(eid);
@@ -219,25 +218,10 @@ class _HelperForm4MetabRenalVascEyeState
   }
 
   void _recomputeTodayNicuDay() {
-    if (_day1Date == null) {
-      _todayNicuDay = 1;
-      return;
-    }
-    final now = DateTime.now();
-    final d1 = DateTime(_day1Date!.year, _day1Date!.month, _day1Date!.day);
-    final today = DateTime(now.year, now.month, now.day);
-    final diff = today.difference(d1).inDays + 1;
-    _todayNicuDay = diff < 1 ? 1 : diff;
+    _todayNicuDay = nicuDayNumberFromDay1(_day1Date);
   }
 
-  int _defaultActiveDay() {
-    if (_day1Date == null) return 1;
-    final hour = DateTime.now().hour;
-    if (hour < _lateGraceHour && _todayNicuDay > 1) {
-      return _todayNicuDay - 1;
-    }
-    return _todayNicuDay;
-  }
+  int _defaultActiveDay() => _todayNicuDay;
 
   DateTime? _calendarForDay(int day) {
     if (_day1Date == null) return null;
@@ -409,7 +393,7 @@ class _HelperForm4MetabRenalVascEyeState
         _recordExists = true;
         _isSubmitted = raw['submission_status']?.toString() == 'submitted';
         _overrideUntil = _parseUtc(raw['override_unlocked_until']);
-        _isEditing = _isOverrideActive;
+        _isEditing = !_isSubmitted || _isOverrideActive;
         _dayLoadFailed = false;
       }
     } catch (e) {
@@ -533,33 +517,40 @@ class _HelperForm4MetabRenalVascEyeState
         return false;
       }
 
-      final computed = computeGlucoseAutofillFromMml(
-        parseMetAGlucoseReadings(data),
-      );
-      final flags = <String, bool>{
-        'lowest_glucose': false,
-        'hypoglycemia_episodes': false,
-        'highest_glucose': false,
-      };
+      final readings = parseMetAGlucoseReadings(data);
+      final computed = computeGlucoseAutofillFromMml(readings);
+      final afNext = Map<String, bool>.from(_glucoseAutofilled);
+      var anyChanged = false;
 
       void maybeSet(String key, TextEditingController ctrl) {
         final current = ctrl.text;
         final lastComputed = _lastAutoComputed[key];
         final stillMatches = lastComputed != null &&
             current.trim() == lastComputed!.trim();
-        if (force || _isEmptyGlucoseField(current) || stillMatches) {
-          ctrl.text = computed[key]!;
-          flags[key] = true;
-          _lastAutoComputed[key] = computed[key];
+        final sync = mmlSyncGlucoseFieldFromMml(
+          current: ctrl.text.isEmpty ? null : ctrl.text,
+          wasAutofilled: _glucoseAutofilled[key] ?? false,
+          stillMatchesLastAuto: stillMatches,
+          force: force,
+          fieldKey: key,
+          readings: readings,
+          computedValue: computed[key]!,
+        );
+        if (!sync.changed) {
+          if (sync.nextAutofilled) afNext[key] = true;
+          return;
         }
+        ctrl.text = sync.nextValue;
+        afNext[key] = sync.nextAutofilled;
+        _lastAutoComputed[key] = sync.nextValue;
+        anyChanged = true;
       }
 
       maybeSet('lowest_glucose', _lowGlucoseCtrl);
       maybeSet('hypoglycemia_episodes', _hypoEpisodesCtrl);
       maybeSet('highest_glucose', _highGlucoseCtrl);
 
-      final changed = flags.values.any((v) => v);
-      if (!changed) return false;
+      if (!anyChanged) return false;
 
       final ep = double.tryParse(_hypoEpisodesCtrl.text.trim()) ?? 0;
       if (ep <= 0) _model.hypoglycemiaRx = null;
@@ -572,13 +563,9 @@ class _HelperForm4MetabRenalVascEyeState
 
       if (mounted) {
         setState(() {
-          for (final e in flags.entries) {
-            if (e.value) {
-              _glucoseAutofilled[e.key] = true;
-            } else if (force) {
-              _glucoseAutofilled[e.key] = false;
-            }
-          }
+          _glucoseAutofilled
+            ..clear()
+            ..addAll(afNext);
           _isEditing = true;
         });
       }
@@ -594,8 +581,8 @@ class _HelperForm4MetabRenalVascEyeState
     try {
       final ok = await _applyGlucoseAutofill(force: true);
       _toast(ok
-          ? 'Glucose fields refreshed from Helper 5'
-          : 'No matching Helper 5 glucose sheet for this day',
+          ? 'Glucose fields refreshed from Helper 1'
+          : 'No matching Helper 1 glucose sheet for this day',
           error: !ok);
     } finally {
       if (mounted) setState(() => _glucoseRefreshing = false);
@@ -634,6 +621,9 @@ class _HelperForm4MetabRenalVascEyeState
     if (_day1Date != null && day > _todayNicuDay) {
       _toast('Day $day is not available yet');
       return;
+    }
+    if (_isFieldEditable && _completion.percent > 0) {
+      await _save();
     }
     await _stashCurrentDayDraft();
     setState(() => _activeDay = day);
@@ -681,6 +671,10 @@ class _HelperForm4MetabRenalVascEyeState
       _toast('Set Day 1 Date first', error: true);
       return false;
     }
+    if (!force && _completion.percent == 0 && !_recordExists) {
+      _toast('Nothing entered for this day yet', error: true);
+      return false;
+    }
 
     setState(() => _saving = true);
     try {
@@ -700,7 +694,7 @@ class _HelperForm4MetabRenalVascEyeState
       final pct = _completion.percent;
       setState(() {
         _recordExists = true;
-        _isEditing = false;
+        _isEditing = !_isSubmitted;
         _dayStatus[_activeDay] = pct == 100 ? 'complete' : 'draft';
         _dayPct[_activeDay] = pct;
         _banner = forLater
@@ -914,7 +908,7 @@ class _HelperForm4MetabRenalVascEyeState
                                         : const Icon(Icons.refresh, size: 16),
                                     label: Text(_glucoseRefreshing
                                         ? 'Refreshing…'
-                                        : 'Refresh from Helper 5'),
+                                        : 'Refresh from Helper 1'),
                                   )
                                 : null,
                             children: _metabolicFields(c, editable),
@@ -1215,7 +1209,7 @@ class _HelperForm4MetabRenalVascEyeState
       c,
       number: number,
       label: label,
-      hint: autofilled ? 'Auto-filled from Helper 5' : null,
+      hint: autofilled ? 'Auto-filled from Helper 1' : null,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1223,7 +1217,7 @@ class _HelperForm4MetabRenalVascEyeState
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
               child: Text(
-                'Auto-filled from Helper 5',
+                'Auto-filled from Helper 1',
                 style: TextStyle(
                   color: c.primary,
                   fontSize: 11,
@@ -1323,7 +1317,7 @@ class _HelperForm4MetabRenalVascEyeState
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            widget.babyUid.isEmpty ? 'HELPER FORM 4' : widget.babyUid,
+            widget.babyUid.isEmpty ? 'HELPER FORM 5' : widget.babyUid,
             style: TextStyle(
               color: c.primary,
               fontSize: 13,

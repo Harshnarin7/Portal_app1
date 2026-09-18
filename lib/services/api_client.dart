@@ -203,10 +203,37 @@ class ApiClient {
         // common ones instead of assuming 'detail' is always present
         // (e.g. rate-limit responses used to use 'error'/'message' only).
         final d = err['detail'] ?? err['message'] ?? err['error'];
-        if (d != null) detail = d.toString();
+        if (d != null) {
+          final formatted = _formatApiDetail(d);
+          if (formatted.isNotEmpty) detail = formatted;
+        }
       }
     } catch (_) {}
     throw ApiException(resp.statusCode, detail);
+  }
+
+  /// FastAPI 422 `detail` is often a list of `{loc, msg, type}` maps.
+  String _formatApiDetail(dynamic d) {
+    if (d == null) return '';
+    if (d is String) return d;
+    if (d is List) {
+      return d.map((e) {
+        if (e is Map) {
+          final loc = e['loc'];
+          var field = '';
+          if (loc is List && loc.isNotEmpty) {
+            field = loc.last.toString();
+          }
+          final msg = (e['msg'] ?? e['message'] ?? e).toString();
+          return field.isNotEmpty ? '$field: $msg' : msg;
+        }
+        return e.toString();
+      }).where((s) => s.isNotEmpty).join('; ');
+    }
+    if (d is Map) {
+      return (d['msg'] ?? d['message'] ?? d).toString();
+    }
+    return d.toString();
   }
 
   // ── Silent token refresh ──────────────────────────────────────────────────

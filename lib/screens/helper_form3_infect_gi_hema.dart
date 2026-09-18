@@ -41,8 +41,6 @@ class HelperForm3InfectGIHema extends StatefulWidget {
 }
 
 class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
-  static const _lateGraceHour = 11;
-
   final _api = FormsApiService.instance;
 
   bool _loading = true;
@@ -74,6 +72,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   String? _lastFeedAutoDate;
   double? _lastFeedAutoValue;
   bool _feedVolumeAutofilled = false;
+  bool _hemaPrbcAutofilled = false;
+  bool _hemaPlateletAutofilled = false;
+  bool _hemaFfpAutofilled = false;
 
   // Controllers
   final _cumulativeFeedCtrl = TextEditingController();
@@ -189,8 +190,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         _dayStatus[day] = st;
         _dayPct[day] = pct is int ? pct : int.tryParse('$pct') ?? 0;
       }
-      _totalDays = maxDay < 14 ? 14 : maxDay;
       _recomputeTodayNicuDay();
+      _totalDays = maxDay < 14 ? 14 : maxDay;
+      if (_todayNicuDay > _totalDays) _totalDays = _todayNicuDay;
       _activeDay = _defaultActiveDay();
     } catch (e) {
       _banner = 'Could not load day summary: $e';
@@ -203,25 +205,10 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   }
 
   void _recomputeTodayNicuDay() {
-    if (_day1Date == null) {
-      _todayNicuDay = 1;
-      return;
-    }
-    final now = DateTime.now();
-    final d1 = DateTime(_day1Date!.year, _day1Date!.month, _day1Date!.day);
-    final today = DateTime(now.year, now.month, now.day);
-    final diff = today.difference(d1).inDays + 1;
-    _todayNicuDay = diff < 1 ? 1 : diff;
+    _todayNicuDay = nicuDayNumberFromDay1(_day1Date);
   }
 
-  int _defaultActiveDay() {
-    if (_day1Date == null) return 1;
-    final hour = DateTime.now().hour;
-    if (hour < _lateGraceHour && _todayNicuDay > 1) {
-      return _todayNicuDay - 1;
-    }
-    return _todayNicuDay;
-  }
+  int _defaultActiveDay() => _todayNicuDay;
 
   DateTime? _calendarForDay(int day) {
     if (_day1Date == null) return null;
@@ -287,6 +274,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _lastFeedAutoDate = null;
     _lastFeedAutoValue = null;
     _feedVolumeAutofilled = false;
+    _hemaPrbcAutofilled = false;
+    _hemaPlateletAutofilled = false;
+    _hemaFfpAutofilled = false;
     try {
       final raw = await _api.loadInfectGiHemaDay(eid, day);
       if (!mounted || gen != _loadGen || day != _activeDay) return;
@@ -310,7 +300,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         _recordExists = true;
         _isSubmitted = (raw['submission_status']?.toString() == 'submitted');
         _overrideUntil = _parseUtc(raw['override_unlocked_until']);
-        _isEditing = _isOverrideActive;
+        _isEditing = !_isSubmitted || _isOverrideActive;
         _dayLoadFailed = false;
       }
     } catch (e) {
@@ -339,8 +329,114 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       if (mounted && gen == _loadGen) setState(() => _dayLoading = false);
     }
     if (mounted && gen == _loadGen && day == _activeDay) {
-      await _applyFeedVolumeFromMml();
+      await _applyMmlAutofillFromHelper5();
     }
+  }
+
+  Future<MmlHemeTransfusionFlags> _loadMmlHemeTransfusionFlagsForHelperDay(
+    String eid,
+    String recordDate,
+  ) async {
+    var merged = const MmlHemeTransfusionFlags();
+    try {
+      final on = await _api.loadMinimalMonitoringOnDate(eid, recordDate);
+      merged = merged.merge(
+        parseHemeATransfusionFlags(on, helperCalendarDate: recordDate),
+      );
+    } catch (_) {}
+    if (merged.any) return merged;
+    try {
+      final today = await _api.loadMinimalMonitoringToday(eid);
+      final rd = today['record_date']?.toString() ?? '';
+      if (rd.isNotEmpty && !rd.startsWith(recordDate)) {
+        merged = merged.merge(
+          parseHemeATransfusionFlags(today, helperCalendarDate: recordDate),
+        );
+      } else if (rd.isNotEmpty && rd.startsWith(recordDate)) {
+        merged = parseHemeATransfusionFlags(
+          today,
+          helperCalendarDate: recordDate,
+        );
+      }
+    } catch (_) {}
+    return merged;
+  }
+
+  Future<void> _applyTransfusionFlagsFromMml() async {
+    final eid = widget.enrollmentId.trim();
+    final recordDate = _activeDayYmd;
+    if (eid.isEmpty || recordDate == null) return;
+    if (_isFutureDay) return;
+    if (_isSubmitted && !_isOverrideActive) return;
+    try {
+      final flags = await _loadMmlHemeTransfusionFlagsForHelperDay(eid, recordDate);
+      if (!mounted || _activeDayYmd != recordDate) return;
+
+      var changed = false;
+      void sync(bool mmlHas, bool wasAf, bool? current, void Function(bool?) setVal,
+          void Function(bool) setAf) {
+        final r = mmlSyncTransfusionYnFromMml(
+          current: current,
+          mmlHas: mmlHas,
+          wasAutofilled: wasAf,
+        );
+        if (r.changed) {
+          setVal(r.nextValue);
+          setAf(r.nextAutofilled);
+          changed = true;
+        }
+      }
+
+      sync(flags.prbc, _hemaPrbcAutofilled, _prbcTransfusion, (v) => _prbcTransfusion = v,
+          (a) => _hemaPrbcAutofilled = a);
+      sync(flags.platelet, _hemaPlateletAutofilled, _plateletTransfusion,
+          (v) => _plateletTransfusion = v, (a) => _hemaPlateletAutofilled = a);
+      sync(flags.ffpCryo, _hemaFfpAutofilled, _ffpCryo, (v) => _ffpCryo = v,
+          (a) => _hemaFfpAutofilled = a);
+
+      if (changed && mounted) {
+        setState(() => _isEditing = true);
+      }
+    } catch (_) {
+      // Helper 5 optional
+    }
+  }
+
+  Future<void> _applyMmlAutofillFromHelper5() async {
+    await _applyFeedVolumeFromMml();
+    await _applyTransfusionFlagsFromMml();
+  }
+
+  Future<List<double>> _loadMmlGiAFeedValuesForHelperDay(
+    String eid,
+    String recordDate,
+  ) async {
+    var merged = <double>[];
+    try {
+      final on = await _api.loadMinimalMonitoringOnDate(eid, recordDate);
+      merged = mergeGiAFeedValueLists(
+        merged,
+        parseGiAFeedVolumeValues(on, helperCalendarDate: recordDate),
+      );
+    } catch (_) {}
+    if (merged.isNotEmpty) return merged;
+    try {
+      final today = await _api.loadMinimalMonitoringToday(eid);
+      final rd = today['record_date']?.toString() ?? '';
+      if (rd.isNotEmpty && !rd.startsWith(recordDate)) {
+        merged = mergeGiAFeedValueLists(
+          merged,
+          parseGiAFeedVolumeValues(today, helperCalendarDate: recordDate),
+        );
+      } else if (rd.isNotEmpty && rd.startsWith(recordDate)) {
+        // Same sheet date but /on/ missed — use today row once (no double-count).
+        merged = parseGiAFeedVolumeValues(
+          today,
+          helperCalendarDate: recordDate,
+        );
+      }
+    } catch (_) {}
+    return merged;
   }
 
   Future<void> _applyFeedVolumeFromMml() async {
@@ -350,41 +446,45 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     if (_isFutureDay) return;
     if (_isSubmitted && !_isOverrideActive) return;
     try {
-      final data = await _api.loadMinimalMonitoringOnDate(eid, recordDate);
+      final entryValues = await _loadMmlGiAFeedValuesForHelperDay(eid, recordDate);
       if (!mounted || _activeDayYmd != recordDate) return;
-      final rd = data['record_date']?.toString();
-      if (rd != null && rd.isNotEmpty && !rd.startsWith(recordDate)) return;
-      final vol = mmlSumCumulativeFeedVolume(data);
-      if (vol == null) return;
+      final vol = sumGiAFeedVolumeValues(entryValues);
       if (_npo == true) return;
 
       final current = _cumulativeFeedCtrl.text.trim();
-      final isEmpty = current.isEmpty;
       final stillMatchesLastAuto = _lastFeedAutoDate == recordDate &&
           _lastFeedAutoValue != null &&
           current == _formatFeedVol(_lastFeedAutoValue!);
-      final alreadyInSync = current == _formatFeedVol(vol);
+      final sync = mmlSyncAggregateFieldFromMml(
+        current: current.isEmpty ? null : current,
+        blockedByNotDone: false,
+        wasAutofilled: _feedVolumeAutofilled,
+        stillMatchesLastAuto: stillMatchesLastAuto,
+        looksSourced: (c, _) =>
+            feedVolumeLooksMmlSourced(c?.toString(), entryValues),
+        entryValuesForSourced: entryValues,
+        mmlValue: vol == null ? null : _formatFeedVol(vol),
+      );
 
-      if (!isEmpty && !stillMatchesLastAuto) {
-        if (alreadyInSync) {
-          _lastFeedAutoDate = recordDate;
-          _lastFeedAutoValue = vol;
-          if (mounted) setState(() => _feedVolumeAutofilled = true);
+      if (!sync.changed) {
+        if (sync.nextAutofilled && mounted && !_feedVolumeAutofilled) {
+          setState(() => _feedVolumeAutofilled = true);
         }
         return;
       }
 
-      _lastFeedAutoDate = recordDate;
-      _lastFeedAutoValue = vol;
-      if (alreadyInSync) {
-        if (mounted) setState(() => _feedVolumeAutofilled = true);
-        return;
+      if (vol != null) {
+        _lastFeedAutoDate = recordDate;
+        _lastFeedAutoValue = vol;
+      } else {
+        _lastFeedAutoDate = recordDate;
+        _lastFeedAutoValue = null;
       }
 
       if (!mounted) return;
       setState(() {
-        _cumulativeFeedCtrl.text = _formatFeedVol(vol);
-        _feedVolumeAutofilled = true;
+        _cumulativeFeedCtrl.text = sync.nextValue;
+        _feedVolumeAutofilled = sync.nextAutofilled;
         _isEditing = true;
       });
     } catch (_) {
@@ -564,6 +664,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       _toast('Day $day is not available yet');
       return;
     }
+    if (_isFieldEditable && _completion.percent > 0) {
+      await _save();
+    }
     await _stashCurrentDayDraft();
     setState(() => _activeDay = day);
     await _loadActiveDay();
@@ -609,6 +712,10 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       _toast('Set Day 1 Date first', error: true);
       return false;
     }
+    if (!force && _completion.percent == 0 && !_recordExists) {
+      _toast('Nothing entered for this day yet', error: true);
+      return false;
+    }
     // Block invalid numeric text so tryParse→null cannot wipe a good server value.
     for (final entry in [
       ('Cumulative feed volume', _cumulativeFeedCtrl.text),
@@ -642,7 +749,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       setState(() {
         _applyDay(model);
         _recordExists = true;
-        _isEditing = false;
+        _isEditing = !_isSubmitted;
         _dayStatus[_activeDay] = pct == 100 ? 'complete' : 'draft';
         _dayPct[_activeDay] = pct;
         _banner = forLater
@@ -866,7 +973,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            widget.babyUid.isEmpty ? 'HELPER FORM 3' : widget.babyUid,
+            widget.babyUid.isEmpty ? 'HELPER FORM 4' : widget.babyUid,
             style: TextStyle(
               color: c.primary,
               fontSize: 13,
@@ -1404,12 +1511,24 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       ),
       _yn('27. Exchange Transfusion', _exchangeTransfusion, editable,
           (v) => setState(() => _exchangeTransfusion = v), c),
-      _yn('28. PRBC Transfusion', _prbcTransfusion, editable,
-          (v) => setState(() => _prbcTransfusion = v), c),
-      _yn('29. Platelet Transfusion', _plateletTransfusion, editable,
-          (v) => setState(() => _plateletTransfusion = v), c),
-      _yn('30. FFP / Cryo Transfusion', _ffpCryo, editable,
-          (v) => setState(() => _ffpCryo = v), c),
+      _yn('28. PRBC Transfusion', _prbcTransfusion, editable, (v) {
+        setState(() {
+          _hemaPrbcAutofilled = false;
+          _prbcTransfusion = v;
+        });
+      }, c),
+      _yn('29. Platelet Transfusion', _plateletTransfusion, editable, (v) {
+        setState(() {
+          _hemaPlateletAutofilled = false;
+          _plateletTransfusion = v;
+        });
+      }, c),
+      _yn('30. FFP / Cryo Transfusion', _ffpCryo, editable, (v) {
+        setState(() {
+          _hemaFfpAutofilled = false;
+          _ffpCryo = v;
+        });
+      }, c),
     ];
   }
 
