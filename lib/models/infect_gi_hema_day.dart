@@ -56,6 +56,9 @@ class SepsisScreenEntry {
         'value': value,
         'result': result,
       };
+
+  bool get hasData =>
+      value.trim().isNotEmpty || result.trim().isNotEmpty;
 }
 
 class InfectGiHemaDay {
@@ -323,6 +326,10 @@ class InfectGiHemaCompletion {
     if (d.sepsisSuspected == true) {
       keys.add(d.bloodCultureSent);
       if (d.bloodCultureSent == true) keys.add(d.bloodCulturePositive);
+    }
+    keys.add(d.sepsisScreenSent);
+    if (d.sepsisScreenSent == true) {
+      keys.add(d.sepsisScreens.any((e) => e.hasData));
     }
     if (d.meningitis == true) keys.add(d.meningitisType);
 

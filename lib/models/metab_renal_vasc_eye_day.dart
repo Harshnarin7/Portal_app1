@@ -212,7 +212,7 @@ class MetabRenalVascEyeDay {
       return false;
     }
     final n = double.tryParse(s);
-    return n != null && n > 180;
+    return n != null && n > 125;
   }
 
   factory MetabRenalVascEyeDay.fromJson(Map<String, dynamic> json) {

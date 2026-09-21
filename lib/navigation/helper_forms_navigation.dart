@@ -49,14 +49,17 @@ extension HelperFormKindMeta on HelperFormKind {
       };
 
   String get shortTitle => switch (this) {
-        HelperFormKind.minimalMonitoring => 'Minimal Monitoring',
+        HelperFormKind.minimalMonitoring => 'Daily Monitoring Sheet',
         HelperFormKind.respCvNeuro => 'Resp / CV / Neuro',
         HelperFormKind.fio2Auc => 'FiO₂ Logging',
         HelperFormKind.infectGiHema => 'Infection / GI / Hema',
         HelperFormKind.metabRenalVascEye => 'Metab / Renal / Eye',
       };
 
-  String get menuLabel => 'Helper Form $number — $shortTitle';
+  String get menuLabel => switch (this) {
+        HelperFormKind.minimalMonitoring => 'Daily Monitoring Sheet (DMS)',
+        _ => 'Helper $number — $shortTitle',
+      };
 
   IconData get icon => switch (this) {
         HelperFormKind.respCvNeuro => Icons.favorite_rounded,

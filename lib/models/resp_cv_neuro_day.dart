@@ -1,6 +1,6 @@
 // lib/models/resp_cv_neuro_day.dart
 //
-// Helper Form 1 — Resp / CV / Neuro Daily Log.
+// Helper Form 2 — Resp / CV / Neuro Daily Log.
 // Mirrors web RespCVNeuroLog.jsx + backend RespCVNeuroDayCreate 1:1.
 // Numbering: 2.1 Weight, then 1–37 (same as web).
 
@@ -40,6 +40,8 @@ class RespCvNeuroDay {
   bool? pdaSuspected;
   bool? echoDone;
   bool? hsPda;
+  /// Overlay from DMS 5.1.D (pda_agent). Not a visible YN; persisted for Form H.
+  bool? pdaMedicalRx;
   bool? shock;
   bool? vasoactiveSupport;
   List<String> vasoactiveDrugs = [];
@@ -80,6 +82,9 @@ class RespCvNeuroDay {
     'PSV',
     'HFOV',
   ];
+
+  /// SIMV / AC / PSV / HFOV require Endotracheal intubation (#2) = Yes.
+  static const invasiveModes = ['SIMV', 'AC', 'PSV', 'HFOV'];
 
   static const vasoactiveDrugOptions = [
     'Dopamine',
@@ -152,6 +157,7 @@ class RespCvNeuroDay {
     d.pdaSuspected = _asBool(json['pda_suspected']);
     d.echoDone = _asBool(json['echo_done']);
     d.hsPda = _asBool(json['hs_pda']);
+    d.pdaMedicalRx = _asBool(json['pda_medical_rx']);
     d.shock = _asBool(json['shock']);
     d.vasoactiveSupport = _asBool(json['vasoactive_support']);
     d.vasoactiveDrugs = _splitCsv(json['vasoactive_drugs']);
@@ -211,6 +217,7 @@ class RespCvNeuroDay {
     pdaSuspected = src.pdaSuspected;
     echoDone = src.echoDone;
     hsPda = src.hsPda;
+    pdaMedicalRx = src.pdaMedicalRx;
     shock = src.shock;
     vasoactiveSupport = src.vasoactiveSupport;
     vasoactiveDrugs = List.of(src.vasoactiveDrugs);
@@ -255,6 +262,7 @@ class RespCvNeuroDay {
     pdaSuspected = null;
     echoDone = null;
     hsPda = null;
+    pdaMedicalRx = null;
     shock = null;
     vasoactiveSupport = null;
     vasoactiveDrugs = [];
@@ -316,6 +324,7 @@ class RespCvNeuroDay {
       'pda_suspected': pdaSuspected,
       'echo_done': echoDone,
       'hs_pda': hsPda,
+      'pda_medical_rx': pdaMedicalRx,
       'shock': shock,
       'vasoactive_support': vasoactiveSupport,
       'vasoactive_drugs':
@@ -362,6 +371,55 @@ class RespCvNeuroValidators {
       } else if (num < 200 || num > 8000) {
         return '"$entry" is outside the expected 200–8000 g range';
       }
+    }
+    return null;
+  }
+
+  static double? parseWeightToGrams(String entry) {
+    final m = RegExp(r'^(\d+(?:\.\d+)?)\s*(g|kg)?$', caseSensitive: false)
+        .firstMatch(entry.trim());
+    if (m == null) return null;
+    final num = double.tryParse(m.group(1)!);
+    if (num == null) return null;
+    return (m.group(2) ?? 'g').toLowerCase() == 'kg' ? num * 1000 : num;
+  }
+
+  static double? lastWeightGrams(String? str) {
+    if (str == null || str.trim().isEmpty) return null;
+    final entries = str
+        .split(',')
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+    if (entries.isEmpty) return null;
+    return parseWeightToGrams(entries.last);
+  }
+
+  /// Non-blocking vs previous NICU day's last reading. Age is completed
+  /// days on the log date (day1Date vs that day's calendar date).
+  static String? weightChangeWarning({
+    required String todayStr,
+    required String prevStr,
+    int? ageDays,
+  }) {
+    if (ageDays == null || ageDays < 0) return null;
+    final todayG = lastWeightGrams(todayStr);
+    final prevG = lastWeightGrams(prevStr);
+    if (todayG == null || prevG == null || prevG == 0) return null;
+    final pct = ((todayG - prevG) / prevG) * 100;
+    final absPct = pct.abs();
+    final dir = pct > 0 ? 'gain' : 'loss';
+    if (ageDays < 14) {
+      if (absPct > 2) {
+        return 'Weight $dir of ${absPct.toStringAsFixed(1)}% vs yesterday (threshold 2% at age < 2 weeks). Check the reading — save is still allowed.';
+      }
+      return null;
+    }
+    if (pct < 0) {
+      return 'Weight loss of ${absPct.toStringAsFixed(1)}% vs yesterday (any loss is flagged at age ≥ 2 weeks). Check the reading — save is still allowed.';
+    }
+    if (pct >= 2) {
+      return 'Weight gain of ${absPct.toStringAsFixed(1)}% vs yesterday (threshold 2% at age ≥ 2 weeks). Check the reading — save is still allowed.';
     }
     return null;
   }

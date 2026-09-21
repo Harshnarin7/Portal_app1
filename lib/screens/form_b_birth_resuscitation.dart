@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'form_c_resuscitation.dart';
 import '../data/intergrowth_very_preterm.dart';
 import '../models/form_b.dart';
+import '../models/form_c.dart';
 import '../models/birth_resuscitation.dart';
 import '../services/api_service.dart';
 import '../services/forms_api_service.dart';
@@ -13,8 +14,14 @@ import '../theme/app_theme.dart';
 import '../widgets/modern_date_picker.dart';
 import '../widgets/theme_toggle_widget.dart';
 import '../widgets/required_asterisk.dart';
+import '../widgets/field_logic_badge.dart';
 import '../utils/clock_time_24.dart';
 import '../data/form_b_indications.dart';
+import '../models/crf.dart';
+import '../services/pdf_service.dart';
+import 'package:provider/provider.dart';
+import '../providers/auth_provider.dart';
+import '../services/api_client.dart';
 
 // ─── SITE-SPECIFIC RULES for Baby Admission No. / Baby Annual No. ─────────────
 // Mirrors BirthResuscitationForm.jsx BABY_ADMISSION_RULES / BABY_ANNUAL_RULES
@@ -205,6 +212,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   // ── Inline validation flags ────────────────────────────────────────────────
   bool _submitted         = false;
+  bool _isSaved           = false;
+  bool _isEditing         = false;
   bool _babyUidMaxReached = false;
   String _babyUidDuplicateMsg = '';
   Timer? _babyUidCheckTimer;
@@ -219,6 +228,19 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   /// Last INTERGROWTH value we auto-set for Q14 — never clobber a nurse override.
   String? _lastAutoCentile;
+
+  /// Form A formula: locked after an explicit Save, or when the caller asked
+  /// for view-only. `_isEditing` stays false unless an Edit control flips it.
+  bool get _formReadOnly => (_isSaved || widget.viewOnly) && !_isEditing;
+
+  bool get _showEditAction => _isSaved || widget.viewOnly;
+
+  /// Combined Form B print — web Print is gated on a full save; here both
+  /// B1 and B2 must be filled (B2 = explicitly_saved + B4–B6 data).
+  bool get _formBExportEnabled => _isSaved && _b2Complete && !_exportingPdf;
+
+  bool _exportingPdf = false;
+  bool _b2Complete = false;
 
   // ── Auto-strata from Gestation at Randomization (web Form B) ───────────────
   /// Null unless Randomised = Yes and Q12 is known (web does not fall back
@@ -359,6 +381,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   @override
   void initState() {
     super.initState();
+    _isSaved = widget.viewOnly;
+    _isEditing = !_isSaved;
     _screeningDateTime = widget.screeningDateTime.trim();
     // IOG: Baby Admission No. mirrors Baby UID live (matches web's
     // BirthResuscitationForm.jsx useEffect ~L497-502, which keeps
@@ -573,7 +597,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   @override
   void dispose() {
     // Flush local draft so back/swipe dismiss never loses in-progress data.
-    if (!widget.viewOnly && !_isFormBEmpty()) {
+    if (!_formReadOnly && !_isFormBEmpty()) {
       final eid = _enrollmentIdCtrl.text.trim().isNotEmpty
           ? _enrollmentIdCtrl.text.trim()
           : (_randomized == false ? "NR-${widget.screeningId}" : "");
@@ -813,7 +837,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         'enrollmentId=${remote.enrollmentId} '
         'screeningId=${remote.screeningId} '
         'babyUid=${remote.babyUid} '
-        'birthWeight=${remote.birthWeight}',
+        'birthWeight=${remote.birthWeight} '
+        'explicitlySaved=${remote.explicitlySaved}',
       );
     }
 
@@ -826,6 +851,12 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         _applyLocalFormB(existing, overlayOnly: remote != null);
       }
       _syncAutoCentile();
+      // Form A: lock from server explicitly_saved, not from "a row exists".
+      final explicitSaved = remote?.explicitlySaved == true;
+      _isSaved = widget.viewOnly || explicitSaved;
+      _isEditing = !_isSaved;
+      _b2Complete =
+          explicitSaved && remote?.hasB2ClinicalData == true;
     });
   }
 
@@ -941,13 +972,22 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   /// Form B owns Q12/Q23/Q24/Q27 — send explicit nulls so a PUT can clear
   /// stale screening-GA fallback / leftover randomised flags. Form C's
   /// toJson() still omits nulls so it will not wipe these.
-  Map<String, dynamic> _formBJson(BirthResuscitationData d) {
+  ///
+  /// [explicitlySaved] is true only for the Save button (`_onSaveContinue`),
+  /// never for Save for Later / Cancel (`_saveDraft`).
+  Map<String, dynamic> _formBJson(
+    BirthResuscitationData d, {
+    bool explicitlySaved = false,
+  }) {
     final json = d.toJson();
     json['gestation_rand_weeks'] = d.gestationRandWeeks;
     json['gestation_rand_days'] = d.gestationRandDays;
     json['randomised'] = d.randomised;
     json['ppv_required'] = d.ppvRequired;
     json['strata'] = d.strata;
+    if (explicitlySaved) {
+      json['explicitly_saved'] = true;
+    }
     return json;
   }
 
@@ -1078,12 +1118,19 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     await ApiService().saveFormB(formB);
 
     try {
-      await FormsApiService.instance.saveBirthResuscitation(_formBJson(shared));
+      await FormsApiService.instance.saveBirthResuscitation(
+          _formBJson(shared, explicitlySaved: true));
     } catch (e) {
       if (!mounted) return;
       _showMsg("Save failed — check connection and try again. ($e)");
       return;
     }
+
+    if (!mounted) return;
+    setState(() {
+      _isSaved = true;
+      _isEditing = false;
+    });
 
     if (_endParticipation) {
       if (_birthConditionAllNormal) {
@@ -1099,7 +1146,6 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 5),
       ));
-      Navigator.of(context).pop(true);
       return;
     }
 
@@ -1109,7 +1155,6 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         content: const Text("Form B1 saved and synced (not randomised)"),
         backgroundColor: AppTheme.of(context).success,
       ));
-      Navigator.of(context).pop(true);
       return;
     }
 
@@ -1129,7 +1174,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           shared     : shared,
         ),
       ),
-    ).then((result) {
+    ).then((result) async {
+      await _refreshB2Complete();
       if (result == true && mounted) {
         Navigator.of(context).pop(true);
       }
@@ -1498,10 +1544,21 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   // THEME-AWARE HELPERS  (aligned with Form A style)
   // ============================================================
 
-  InputDecoration _input(String label, AppColors c, {String? helper}) {
+  InputDecoration _input(String label, AppColors c,
+      {String? helper, FieldLogicType? logic, String? logicTitle}) {
     final labelStyle = TextStyle(color: c.textSecondary, fontSize: 13);
+    final labelWidget = logic == null
+        ? requiredLabel(label, style: labelStyle)
+        : Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 4,
+            children: [
+              requiredLabel(label, style: labelStyle),
+              FieldLogicBadge(type: logic, title: logicTitle ?? ''),
+            ],
+          );
     return InputDecoration(
-      label        : requiredLabel(label, style: labelStyle),
+      label        : labelWidget,
       helperText   : helper,
       helperStyle  : TextStyle(color: c.textTertiary, fontSize: 11),
       labelStyle   : labelStyle,
@@ -1528,7 +1585,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   }
 
   /// Read-only info tile — identical to Form A style
-  Widget _infoTile(String label, String value, AppColors c) {
+  Widget _infoTile(String label, String value, AppColors c,
+      {FieldLogicType? logic, String? logicTitle}) {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -1537,11 +1595,19 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         border: Border.all(color: c.border),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(label,
-            style: TextStyle(
-                color: c.textTertiary,
-                fontSize: 11,
-                fontWeight: FontWeight.w600)),
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 4,
+          children: [
+            Text(label,
+                style: TextStyle(
+                    color: c.textTertiary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600)),
+            if (logic != null)
+              FieldLogicBadge(type: logic, title: logicTitle ?? ''),
+          ],
+        ),
         const SizedBox(height: 4),
         Text(value,
             style: TextStyle(
@@ -1630,18 +1696,28 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     required AppColors c,
     Color? trueColor,
     Color? falseColor,
+    FieldLogicType? logic,
+    String? logicTitle,
   }) {
     final tColor     = trueColor  ?? c.danger;
     final fColor     = falseColor ?? c.success;
     final showError  = _submitted && value == null;
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      requiredLabel(
-        title,
-        style: TextStyle(
-            color: c.textSecondary,
-            fontSize: 13,
-            fontWeight: FontWeight.w600),
+      Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 4,
+        children: [
+          requiredLabel(
+            title,
+            style: TextStyle(
+                color: c.textSecondary,
+                fontSize: 13,
+                fontWeight: FontWeight.w600),
+          ),
+          if (logic != null)
+            FieldLogicBadge(type: logic, title: logicTitle ?? ''),
+        ],
       ),
       const SizedBox(height: 8),
       Row(children: [
@@ -1841,9 +1917,19 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text("27. Strata (auto, from Gestation at Randomization)",
-                  style: TextStyle(color: c.textTertiary, fontSize: 11,
-                      fontWeight: FontWeight.w600)),
+              Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 4,
+                children: [
+                  Text("27. Strata",
+                      style: TextStyle(color: c.textTertiary, fontSize: 11,
+                          fontWeight: FontWeight.w600)),
+                  const FieldLogicBadge(
+                    type: FieldLogicType.auto,
+                    title: "Auto from Gestation at Randomization",
+                  ),
+                ],
+              ),
               const SizedBox(height: 2),
               Text(_strata ?? "—",
                   style: TextStyle(
@@ -1868,7 +1954,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     return Scaffold(
       backgroundColor: c.bg,
       appBar: _buildAppBar(c),
-      bottomNavigationBar: widget.viewOnly ? null : _buildBottomBar(c),
+      bottomNavigationBar: _formReadOnly ? null : _buildBottomBar(c),
       body: Container(
         decoration: BoxDecoration(
           gradient: LinearGradient(
@@ -1879,39 +1965,59 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           ),
         ),
         child: AbsorbPointer(
-          absorbing: widget.viewOnly,
+          absorbing: _formReadOnly,
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
             child: Form(
               key: _formKey,
               child: Column(children: [
-                if (widget.viewOnly) ...[
+                if (_formReadOnly) ...[
                   Container(
                     width: double.infinity,
-                    margin: const EdgeInsets.only(bottom: 14),
-                    padding: const EdgeInsets.all(12),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
                     decoration: BoxDecoration(
-                      color: c.primarySoft,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: c.primary.withOpacity(0.35)),
+                      color: c.primary.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: c.primary.withOpacity(0.25)),
                     ),
-                    child: Row(children: [
-                      Icon(Icons.visibility_rounded, color: c.primary, size: 18),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text("View only — previously filled Form B1",
-                            style: TextStyle(
-                                color: c.primary,
-                                fontWeight: FontWeight.w700,
-                                fontSize: 13)),
+                    child: Text(
+                      "Saved — tap Edit Form in the header to make changes",
+                      style: TextStyle(
+                        color: c.primary,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
                       ),
-                    ]),
+                    ),
+                  ),
+                ],
+                if (_isEditing && (_isSaved || widget.viewOnly)) ...[
+                  Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: c.warningSoft,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: c.warning.withOpacity(0.35)),
+                    ),
+                    child: Text(
+                      "Editing saved Form B1",
+                      style: TextStyle(
+                        color: c.warning,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
                   ),
                 ],
                 if (_showEndParticipationBanner) ...[
                   _buildEndParticipationBanner(c),
                   const SizedBox(height: 14),
                 ],
+                const FieldLogicLegend(),
                 _buildIdentificationSection(c),
               _buildBirthDetailsSection(c),
               _buildConditionSection(c),
@@ -1951,12 +2057,170 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 fontWeight: FontWeight.w500)),
       ]),
       actions: [
+        Padding(
+          padding: const EdgeInsets.only(right: 2),
+          child: IconButton(
+            tooltip: _formBExportEnabled
+                ? "Export / Share Form B PDF"
+                : "Save Form B1 and Form B2 to export a PDF",
+            onPressed: _formBExportEnabled ? _exportShareFormBPdf : null,
+            icon: _exportingPdf
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: c.primary,
+                    ),
+                  )
+                : Icon(Icons.ios_share_rounded,
+                    color: _formBExportEnabled
+                        ? c.textPrimary
+                        : c.textTertiary,
+                    size: 20),
+          ),
+        ),
+        if (_showEditAction)
+          Padding(
+            padding: const EdgeInsets.only(right: 2),
+            child: IconButton(
+              tooltip: _isEditing ? "Done Editing" : "Edit Form",
+              onPressed: _toggleEditing,
+              icon: Icon(
+                _isEditing ? Icons.check_rounded : Icons.edit_rounded,
+                color: _isEditing ? c.success : c.textPrimary,
+                size: 20,
+              ),
+            ),
+          ),
         const Padding(
           padding: EdgeInsets.only(right: 8),
           child: Center(child: ThemeToggle()),
         ),
       ],
     );
+  }
+
+  void _toggleEditing() {
+    setState(() => _isEditing = !_isEditing);
+    if (_isEditing) _ensureEditableSession();
+  }
+
+  /// Form A restarts 10s autosave here. B1 has no periodic timer — listeners
+  /// stay attached through AbsorbPointer lock — so this is a no-op hook.
+  void _ensureEditableSession() {}
+
+  CRF _crfForPdf() {
+    final parts = widget.motherName.trim().split(RegExp(r'\s+'));
+    final first = parts.isEmpty || parts.first.isEmpty ? '' : parts.first;
+    final surname = parts.length > 1 ? parts.sublist(1).join(' ') : '';
+    return CRF(
+      screeningId: widget.screeningId,
+      site: widget.siteId,
+      siteId: widget.siteId,
+      screeningDateTime: _screeningDateTime,
+      screenedBy: '',
+      motherFirstName: first,
+      motherSurname: surname,
+      husbandFirstName: '',
+      husbandSurname: '',
+      motherPhone: widget.motherPhone,
+      husbandPhone: widget.husbandPhone,
+      maternalUid: widget.maternalUid,
+      hospitalNo: '',
+      gestationWeeks: widget.gestWeeks,
+      gestationDays: widget.gestDays,
+      gestationMethod: '',
+      expectedDeliveryDate: '',
+      gestationKnownInWeeks: widget.gestWeeks > 0,
+      eddKnown: false,
+      exclusion: false,
+      exclusionReason: '',
+      anomalyDetails: '',
+      eligibilityStatus: '',
+      consentStatus: '',
+      consentRefusalReason: '',
+      relationshipToParticipant: '',
+      relationshipOther: '',
+      consentTakenBy: '',
+      enrollmentId: _resolveEnrollmentIdForSync(),
+    );
+  }
+
+  Future<void> _refreshB2Complete() async {
+    final eid = _resolveEnrollmentIdForSync();
+    var complete = false;
+    if (eid.isNotEmpty) {
+      try {
+        final json =
+            await FormsApiService.instance.loadBirthResuscitation(eid);
+        if (json != null) {
+          final d = BirthResuscitationData.fromJson(json);
+          complete = d.explicitlySaved == true && d.hasB2ClinicalData;
+        }
+      } catch (_) {}
+    }
+    if (mounted) setState(() => _b2Complete = complete);
+  }
+
+  Future<String> _loadPiNameForPrint() async {
+    final site = _siteName.trim();
+    if (site.isEmpty) return '';
+    try {
+      final res = await ApiClient.instance.request(
+        'GET',
+        '/sites/${Uri.encodeComponent(site)}/pi-name',
+      );
+      return (res['pi_name'] ?? '').toString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  String _preparedByForPrint() {
+    try {
+      return context.read<AuthProvider>().user?.fullName.trim() ?? '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Future<void> _exportShareFormBPdf() async {
+    if (!_formBExportEnabled) return;
+    setState(() => _exportingPdf = true);
+    try {
+      final eid = _resolveEnrollmentIdForSync();
+      FormC? formC;
+      BirthResuscitationData? birth;
+      try {
+        formC = await ApiService().loadFormC(widget.screeningId);
+      } catch (_) {}
+      if (eid.isNotEmpty) {
+        try {
+          final json =
+              await FormsApiService.instance.loadBirthResuscitation(eid);
+          if (json != null) birth = BirthResuscitationData.fromJson(json);
+        } catch (_) {}
+      }
+      birth ??= eid.isEmpty ? null : _buildBirthPayload(eid);
+      final pi = await _loadPiNameForPrint();
+      if (!mounted) return;
+      await PdfService.shareFormBPdf(
+        crf: _crfForPdf(),
+        formB: _snapshotFormB(enrollmentId: eid),
+        formC: formC,
+        birth: birth,
+        preparedBy: _preparedByForPrint(),
+        piName: pi,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Could not export Form B PDF: $e")),
+      );
+    } finally {
+      if (mounted) setState(() => _exportingPdf = false);
+    }
   }
 
   // ── Sticky bottom bar ──────────────────────────────────────────────────────
@@ -2308,14 +2572,18 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         ),
 
         _infoTile(
-            "11. Gestation at Screening (auto)",
+            "11. Gestation at Screening",
             "${widget.gestWeeks}w ${widget.gestDays}d",
-            c),
+            c,
+            logic: FieldLogicType.carried,
+            logicTitle: "From Form A — Screening"),
         const SizedBox(height: 10),
         _infoTile(
-            "12. Gestation at Randomization (auto from Form A and DOB)",
+            "12. Gestation at Randomization",
             _gestationRandDisplay,
-            c),
+            c,
+            logic: FieldLogicType.auto,
+            logicTitle: "Auto from Form A gestational age and date of birth"),
         const SizedBox(height: 14),
 
         TextFormField(
@@ -2347,7 +2615,10 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 RegExp(r'^\d{0,3}(\.\d{0,2})?$')),
           ],
           decoration:
-              _input("14. Intrauterine Growth Status (centile, auto)", c)
+              _input("14. Intrauterine Growth Status (centile)", c,
+                      logic: FieldLogicType.auto,
+                      logicTitle:
+                          "Auto-calculated from birth weight, GA at randomization and gender — INTERGROWTH-21st Very Preterm")
                   .copyWith(
             hintText: "0–100",
             helperMaxLines: 6,
@@ -2692,6 +2963,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 trueColor : c.success,
                 falseColor: c.danger,
                 c         : c,
+                logic     : FieldLogicType.conditional,
+                logicTitle: "Gates strata (if Yes) and reason not randomized (if No)",
               ),
 
               // ── Randomized = YES ──────────────────────────────────────

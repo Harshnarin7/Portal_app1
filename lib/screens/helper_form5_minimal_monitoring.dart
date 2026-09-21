@@ -1,4 +1,4 @@
-// Helper Form 5 — Minimal Monitoring Log
+// Daily Monitoring Sheet (DMS) — Minimal Monitoring Log
 // Parity with web MinimalMonitoringLog.jsx:
 //   multi-entry blocks + entries_json dual-write
 //   Sheet date dropdown (8:00 cutoff) + GET/PUT .../on/{date}
@@ -19,6 +19,7 @@ import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
 import '../navigation/helper_forms_navigation.dart';
+import '../widgets/helper_patient_header.dart';
 import '../widgets/theme_toggle_widget.dart';
 
 class HelperForm5MinimalMonitoring extends StatefulWidget {
@@ -129,8 +130,15 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
       _ctrls[key] = c;
       return c;
     }
-    if (existing.text != text && !existing.selection.isValid) {
-      existing.text = text;
+    if (existing.text != text) {
+      final composing = existing.value.composing;
+      final inIme = composing.isValid && !composing.isCollapsed;
+      if (!inIme) {
+        existing.value = TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: text.length),
+        );
+      }
     }
     return existing;
   }
@@ -534,8 +542,6 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
     }
     final sheetYmd = _sheetDate!;
     setState(() {
-      _sheet.commitFilledDraftRows(sheetYmd);
-      _ensureAllTrailingDrafts();
       _saving = true;
     });
     try {
@@ -552,6 +558,18 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
       if (!mounted) return;
       final savedDate =
           result['record_date']?.toString() ?? sheetYmd;
+      if (result.isNotEmpty) {
+        for (final c in _ctrls.values) {
+          c.dispose();
+        }
+        _ctrls.clear();
+        _sheet = MinimalMonitoringSheet.fromJson({
+          ...result,
+          'enrollment_id': widget.enrollmentId.trim(),
+        });
+        mmlSanitizeFluidBolusEntries(_sheet.entries);
+        _ensureAllTrailingDrafts();
+      }
       await HelperDayDraftStorage.clearBySheetDate(
         _kMmDraftKey,
         widget.enrollmentId.trim(),
@@ -564,7 +582,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
       );
       setState(() {
         _sheetDate = savedDate;
-        _banner = 'Sheet saved (${mmlFormatDisplayDateYmd(savedDate)})';
+        _banner = 'Sheet saved (${mmlFormatDisplayDateYmd(savedDate)}). This reading stays on the form — use Log another reading to start a new one.';
         _bannerError = false;
         _dirty = false;
       });
@@ -794,7 +812,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
-                        'New reading',
+                        draft.hasClinicalData() ? 'Current reading' : 'New reading',
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w700,
@@ -1126,7 +1144,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
     return Scaffold(
       backgroundColor: c.bg,
       appBar: AppBar(
-        title: const Text('Helper Form 1 — Minimal Monitoring'),
+        title: const Text('Daily Monitoring Sheet (DMS)'),
         actions: [
           HelperFormSwitcherButton(
             current: HelperFormKind.minimalMonitoring,
@@ -1146,94 +1164,70 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
               children: [
                 Container(
                   width: double.infinity,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                   color: c.surface,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.motherName.isEmpty
-                            ? 'Enrollment ${widget.enrollmentId}'
-                            : widget.motherName,
-            style: TextStyle(
-                fontWeight: FontWeight.w700,
-                          color: c.textPrimary,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        () {
-                          final parts = <String>[];
-                          if (widget.babyUid.isNotEmpty) {
-                            parts.add('UID ${widget.babyUid}');
-                          }
-                          if (widget.gestation.isNotEmpty) {
-                            parts.add(widget.gestation);
-                          }
-                          return parts.join(' · ');
-                        }(),
-                        style: TextStyle(color: c.textSecondary, fontSize: 12),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
+                  child: HelperPatientHeader(
+                    formBadge: 'DAILY MONITORING SHEET (DMS)',
+                    formName: 'Minimal Monitoring',
+                    subtitle:
                         'Sheet date — before $kMmlDropdownCutoffHour:00 you can choose yesterday or today; '
-                        'from $kMmlDropdownCutoffHour:00 onward only today. Every section uses this date.',
-                        style: TextStyle(
-                          color: c.textSecondary,
-                          fontSize: 11,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Builder(
-                        builder: (context) {
-                          final opts = mmlDropdownDateOptions();
-                          if (opts.length > 1) {
-                            final selected = _sheetDate != null &&
-                                    opts.any((o) => o.value == _sheetDate)
-                                ? _sheetDate!
-                                : opts.last.value;
-                            return Row(
-                              children: [
-                                Text(
-                                  'Date',
-                                  style: TextStyle(
-                                    color: c.textSecondary,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                DropdownButton<String>(
-                                  value: selected,
-                                  onChanged: _loading
-                                      ? null
-                                      : (v) => _requestSheetDateChange(v),
-                                  items: opts
-                                      .map(
-                                        (o) => DropdownMenuItem(
-                                          value: o.value,
-                                          child: Text(o.label),
-                                        ),
-                                      )
-                                      .toList(),
-                                ),
-                              ],
-                            );
-                          }
-                          return Text(
-                            _sheetDate != null && _sheetDate!.isNotEmpty
-                                ? mmlFormatDisplayDateYmd(_sheetDate!)
-                                : '—',
-                            style: TextStyle(
-                              color: c.primary,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
+                        'from $kMmlDropdownCutoffHour:00 onward only today.',
+                    enrollmentId: widget.enrollmentId,
+                    gestation: widget.gestation,
+                    babyUid: widget.babyUid,
+                    showBoCard: false,
+                    showMotherCard: true,
+                    motherName: widget.motherName,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+                  child: Builder(
+                    builder: (context) {
+                      final opts = mmlDropdownDateOptions();
+                      if (opts.length > 1) {
+                        final selected = _sheetDate != null &&
+                                opts.any((o) => o.value == _sheetDate)
+                            ? _sheetDate!
+                            : opts.last.value;
+                        return Row(
+                          children: [
+                            Text(
+                              'Date',
+                              style: TextStyle(
+                                color: c.textSecondary,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
-                          );
-                        },
-                      ),
-                    ],
+                            const SizedBox(width: 8),
+                            DropdownButton<String>(
+                              value: selected,
+                              onChanged: _loading
+                                  ? null
+                                  : (v) => _requestSheetDateChange(v),
+                              items: opts
+                                  .map(
+                                    (o) => DropdownMenuItem(
+                                      value: o.value,
+                                      child: Text(o.label),
+                                    ),
+                                  )
+                                  .toList(),
+                            ),
+                          ],
+                        );
+                      }
+                      return Text(
+                        _sheetDate != null && _sheetDate!.isNotEmpty
+                            ? mmlFormatDisplayDateYmd(_sheetDate!)
+                            : '—',
+                        style: TextStyle(
+                          color: c.primary,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      );
+                    },
                   ),
                 ),
                 if (_banner != null)
@@ -1414,15 +1408,36 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                   _respModes,
                                   _listOf(e, 'respiratory_modes'),
                                   (v) {
+                                    final prevMode = RespCvNeuroValidators
+                                        .mapCpapMode(
+                                            _listOf(e, 'respiratory_modes'));
+                                    final nextMode =
+                                        RespCvNeuroValidators.mapCpapMode(v);
                                     _setField(
                                         'resp_a', i, 'respiratory_modes', v);
-                                    final m =
-                                        RespCvNeuroValidators.mapCpapMode(v);
-                                    if (m == 'NA') {
+                                    if (prevMode == 'CPAP' &&
+                                        nextMode == 'BOTH') {
+                                      _setField(
+                                          'resp_a',
+                                          i,
+                                          'max_map_cpap_secondary',
+                                          e['max_map_cpap'] ?? '');
+                                      _setField(
+                                          'resp_a', i, 'max_map_cpap', '');
+                                    } else if (prevMode == 'BOTH' &&
+                                        nextMode == 'CPAP') {
+                                      _setField(
+                                          'resp_a',
+                                          i,
+                                          'max_map_cpap',
+                                          e['max_map_cpap_secondary'] ?? '');
+                                      _setField('resp_a', i,
+                                          'max_map_cpap_secondary', '');
+                                    } else if (nextMode == 'NA') {
                                       _setField('resp_a', i, 'max_map_cpap', '');
                                       _setField(
                                           'resp_a', i, 'max_map_cpap_secondary', '');
-                                    } else if (m != 'BOTH') {
+                                    } else if (nextMode != 'BOTH') {
                                       _setField(
                                           'resp_a', i, 'max_map_cpap_secondary', '');
                                     }

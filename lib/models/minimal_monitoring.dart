@@ -310,29 +310,6 @@ class MinimalMonitoringSheet {
   static MmlEntry fresh(Map<String, dynamic> fields) =>
       MmlEntry(fields: Map<String, dynamic>.from(fields));
 
-  static String _nowTimeHm() {
-    final n = DateTime.now();
-    return '${n.hour.toString().padLeft(2, '0')}:${n.minute.toString().padLeft(2, '0')}';
-  }
-
-  /// Web `commitFilledDraftRows` — filled trailing row becomes a saved reading.
-  void commitFilledDraftRows(String sheetDateYmd) {
-    for (final key in kMmlBlockKeys) {
-      final list = entries[key];
-      if (list == null || list.isEmpty) continue;
-      if (!list.last.hasClinicalData()) continue;
-      final template = Map<String, dynamic>.from(
-        emptyEntries()[key]!.first.fields,
-      );
-      list.add(MmlEntry(
-        id: '${DateTime.now().millisecondsSinceEpoch}-$key',
-        date: sheetDateYmd,
-        time: _nowTimeHm(),
-        fields: template,
-      ));
-    }
-  }
-
   /// Persist only rows with clinical data (no date/time-only draft shells).
   Map<String, dynamic> entriesMapForPersist() {
     final out = <String, dynamic>{};

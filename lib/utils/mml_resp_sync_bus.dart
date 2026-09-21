@@ -1,6 +1,6 @@
 import 'dart:async';
 
-/// Notifies Helper 1 when Helper 5 minimal monitoring is saved (5.2.A sync).
+/// Notifies Helper 2 when the Daily Monitoring Sheet is saved (5.2.A sync).
 class MmlRespSavedEvent {
   final String enrollmentId;
   final String sheetYmd;

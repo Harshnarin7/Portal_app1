@@ -61,10 +61,14 @@ class PdfService {
     FormC? formC,
     BirthResuscitationData? birth,
     bool includeFormA = true,
+    bool skipFormB = false,
+    bool skipFormC = false,
     FormAPrintExtras? formAExtras,
   }) async {
-    final hasB = formB != null || _birthHasIdentification(birth);
-    final hasC = formC != null || _birthHasResuscitation(birth);
+    final hasB =
+        !skipFormB && (formB != null || _birthHasIdentification(birth));
+    final hasC =
+        !skipFormC && (formC != null || _birthHasResuscitation(birth));
 
     final pdf = pw.Document();
     final todayLong = DateFormat('dd MMMM yyyy').format(DateTime.now());
@@ -151,6 +155,86 @@ class PdfService {
     await Printing.sharePdf(
       bytes: await file.readAsBytes(),
       filename: '${id}_FormA.pdf',
+    );
+    return file;
+  }
+
+  /// Combined Form B (PrintSummaryB B1–B4 + B6), Form A-style attestation
+  /// (Prepared By / Date / PI name filled), then native share sheet.
+  static Future<File> shareFormBPdf({
+    required CRF crf,
+    FormB? formB,
+    FormC? formC,
+    BirthResuscitationData? birth,
+    String preparedBy = '',
+    String piName = '',
+  }) async {
+    final todayLong = DateFormat('dd MMMM yyyy').format(DateTime.now());
+    final todayShort = DateFormat('dd MMM yyyy').format(DateTime.now());
+    var eid = _firstNonEmpty([
+      formB?.enrollmentId,
+      birth?.enrollmentId,
+      crf.enrollmentId,
+      crf.screeningId,
+    ]);
+    if (eid.isEmpty) eid = 'FormB';
+
+    final pdf = pw.Document();
+    final pages = <pw.Widget>[
+      ..._buildFormB(
+        crf: crf,
+        formB: formB,
+        birth: birth,
+        todayLong: todayLong,
+        todayShort: todayShort,
+        includeClosing: false,
+        docLabel: 'Birth & Resuscitation — Form B',
+        statusLabel: 'Form B Status',
+      ),
+      ..._buildFormC(
+        crf: crf,
+        formB: formB,
+        formC: formC,
+        birth: birth,
+        todayLong: todayLong,
+        todayShort: todayShort,
+        includeHeader: false,
+        includeClosing: false,
+        includeB5: false,
+      ),
+      _formAAttestation(
+        preparedBy: preparedBy,
+        dateText: todayShort,
+        piName: piName,
+      ),
+      _formFooter(
+        'PORTAL Trial · Form B · CRF v1.26',
+        'ID: $eid · Printed: $todayLong',
+      ),
+    ];
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.fromLTRB(28, 24, 28, 28),
+        footer: (ctx) => pw.Align(
+          alignment: pw.Alignment.centerRight,
+          child: pw.Text(
+            'Page ${ctx.pageNumber} of ${ctx.pagesCount}',
+            style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey600),
+          ),
+        ),
+        build: (_) => pages,
+      ),
+    );
+
+    final dir = await getApplicationDocumentsDirectory();
+    final id = crf.screeningId.trim().isEmpty ? 'FormB' : crf.screeningId.trim();
+    final file = File('${dir.path}/${id}_FormB.pdf');
+    await file.writeAsBytes(await pdf.save());
+    await Printing.sharePdf(
+      bytes: await file.readAsBytes(),
+      filename: '${id}_FormB.pdf',
     );
     return file;
   }
@@ -520,6 +604,9 @@ class PdfService {
     BirthResuscitationData? birth,
     required String todayLong,
     required String todayShort,
+    bool includeClosing = true,
+    String docLabel = 'Birth & Resuscitation — Form B1',
+    String statusLabel = 'Form B1 Status',
   }) {
     final eid = _firstNonEmpty([
       formB?.enrollmentId,
@@ -631,7 +718,7 @@ class PdfService {
 
     return [
       _studyHeader(
-        docLabel: 'Birth & Resuscitation — Form B1',
+        docLabel: docLabel,
         meta: [
           ['Enrollment ID', eid.isEmpty ? 'Not assigned' : eid],
           ['Screening ID', crf.screeningId],
@@ -639,7 +726,7 @@ class PdfService {
         ],
       ),
       _rule(),
-      _outcomeBanner('Form B1 Status', outcome),
+      _outcomeBanner(statusLabel, outcome),
       pw.SizedBox(height: 10),
 
       _sectionHd('B1 · Identification'),
@@ -688,11 +775,13 @@ class PdfService {
         if (notRandOther.isNotEmpty) ['Reason — Other', notRandOther],
       ]),
 
-      _signatureArea(),
-      _formFooter(
-        'PORTAL Trial · Form B1 · CRF v1.25',
-        'ID: ${eid.isEmpty ? crf.screeningId : eid} · Printed: $todayShort',
-      ),
+      if (includeClosing) ...[
+        _signatureArea(),
+        _formFooter(
+          'PORTAL Trial · Form B1 · CRF v1.25',
+          'ID: ${eid.isEmpty ? crf.screeningId : eid} · Printed: $todayShort',
+        ),
+      ],
     ];
   }
 
@@ -705,6 +794,9 @@ class PdfService {
     BirthResuscitationData? birth,
     required String todayLong,
     required String todayShort,
+    bool includeHeader = true,
+    bool includeClosing = true,
+    bool includeB5 = true,
   }) {
     final eid = _firstNonEmpty([
       formB?.enrollmentId,
@@ -830,16 +922,18 @@ class PdfService {
     ]);
 
     return [
-      _studyHeader(
-        docLabel: 'Resuscitation Details — Form B2',
-        meta: [
-          ['Enrollment ID', eid.isEmpty ? 'Not assigned' : eid],
-          ['Screening ID', crf.screeningId],
-          ['Print Date', todayLong],
-        ],
-      ),
-      _rule(),
-      pw.SizedBox(height: 8),
+      if (includeHeader) ...[
+        _studyHeader(
+          docLabel: 'Resuscitation Details — Form B2',
+          meta: [
+            ['Enrollment ID', eid.isEmpty ? 'Not assigned' : eid],
+            ['Screening ID', crf.screeningId],
+            ['Print Date', todayLong],
+          ],
+        ),
+        _rule(),
+        pw.SizedBox(height: 8),
+      ],
 
       _sectionHd('B4 · Resuscitation'),
       _kvTable([
@@ -872,7 +966,8 @@ class PdfService {
         ['Time to SpO₂ 80%', timeSpo2],
       ]),
 
-      if (formC != null &&
+      if (includeB5 &&
+          formC != null &&
           (formC.timelineChecks.isNotEmpty ||
               formC.apgarScores.values.any((v) => v.trim().isNotEmpty))) ...[
         _sectionHd('B5 · Minute-wise Intervention Summary'),
@@ -903,11 +998,13 @@ class PdfService {
         ['Blender Unit ID', blenderUnit],
       ]),
 
-      _signatureArea(),
-      _formFooter(
-        'PORTAL Trial · Form B2 · CRF v1.25',
-        'ID: ${eid.isEmpty ? crf.screeningId : eid} · Printed: $todayShort',
-      ),
+      if (includeClosing) ...[
+        _signatureArea(),
+        _formFooter(
+          'PORTAL Trial · Form B2 · CRF v1.25',
+          'ID: ${eid.isEmpty ? crf.screeningId : eid} · Printed: $todayShort',
+        ),
+      ],
     ];
   }
 

@@ -115,7 +115,26 @@ class BirthResuscitationData {
   List<String> blenderInterruptReasons = []; // blender_interrupt_reasons (60.)
   String? blenderStoppedDescription; // blender_stopped_description
 
+  /// Set only by an explicit Save (not Save for Later / autosave). Shared by
+  /// mobile B1 and B2 because they are two screens on one backend row.
+  bool? explicitlySaved;
+
   BirthResuscitationData();
+
+  /// True when this row already has B4–B6 answers. Used so a B1-only Save
+  /// that sets [explicitlySaved] does not freeze an unfilled Form B2.
+  bool get hasB2ClinicalData =>
+      devicePpv != null ||
+      interfaceUsed != null ||
+      intubation != null ||
+      chestCompression != null ||
+      adrenaline != null ||
+      fluidBolus != null ||
+      placentalTransfusion != null ||
+      resusFailure != null ||
+      cordBloodDone != null ||
+      blenderStopped != null ||
+      (reasonExitTrialGas != null && reasonExitTrialGas!.trim().isNotEmpty);
 
   /// Builds the payload for `BirthResuscitationCreate`.
   ///
@@ -217,6 +236,11 @@ class BirthResuscitationData {
           ? ''
           : blenderStoppedDescription,
     };
+    // Match web: only send the key on a real Save. Omitting it on drafts
+    // leaves a previously saved true value untouched (exclude_unset).
+    if (explicitlySaved == true) {
+      map['explicitly_saved'] = true;
+    }
     if (omitNulls) {
       map.removeWhere((_, v) => v == null);
     }
@@ -365,6 +389,7 @@ class BirthResuscitationData {
       d.blenderInterruptReasons = [kBlenderAbruptReason];
     }
     d.blenderStoppedDescription = json['blender_stopped_description'];
+    d.explicitlySaved = json['explicitly_saved'] == true;
     return d;
   }
 }

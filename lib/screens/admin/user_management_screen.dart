@@ -7,7 +7,16 @@ import 'package:flutter/material.dart';
 import '../../services/api_client.dart';
 
 class UserManagementScreen extends StatefulWidget {
-  const UserManagementScreen({super.key});
+  /// Opens the create-user sheet as soon as users finish loading.
+  final bool openCreateOnLoad;
+  /// Banner reminding admin to reset from the ⋮ menu on a user row.
+  final bool highlightReset;
+
+  const UserManagementScreen({
+    super.key,
+    this.openCreateOnLoad = false,
+    this.highlightReset = false,
+  });
   @override
   State<UserManagementScreen> createState() => _UserManagementScreenState();
 }
@@ -31,6 +40,7 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
   bool _loading = true;
   String _searchQuery = '';
   String _roleFilter = 'ALL';
+  bool _openedCreate = false;
 
   final _searchCtrl = TextEditingController();
 
@@ -57,6 +67,12 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
         _loading  = false;
       });
       _applyFilter();
+      if (widget.openCreateOnLoad && !_openedCreate && mounted) {
+        _openedCreate = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _showCreateUserSheet();
+        });
+      }
     } catch (e) {
       setState(() => _loading = false);
       if (mounted) {
@@ -238,6 +254,16 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
         ],
       ),
       body: Column(children: [
+        if (widget.highlightReset)
+          Container(
+            width: double.infinity,
+            color: _warning.withOpacity(0.12),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: const Text(
+              'Open a user’s ⋮ menu and tap Reset password to send a temporary password.',
+              style: TextStyle(fontSize: 12, color: _text1, height: 1.35),
+            ),
+          ),
         // ── Search + filter ────────────────────────────────────────────────
         Container(
           color: _surface,

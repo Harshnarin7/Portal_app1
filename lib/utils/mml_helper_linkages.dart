@@ -1,4 +1,4 @@
-// Minimal Monitoring (Helper 5) → daily helper autofill parsers.
+// Daily Monitoring Sheet (DMS) → Helper 2–5 autofill parsers.
 // Mirrors web RespCVNeuroLog / InfectGIHemaLog / MetabRenalVascEyeLog.
 
 import 'dart:convert';
@@ -6,7 +6,7 @@ import 'dart:convert';
 import '../models/resp_cv_neuro_day.dart';
 
 const mmlGlucoseLowMax = 45.0;
-const mmlGlucoseHighMin = 180.0;
+const mmlGlucoseHighMin = 125.0;
 
 Map<String, dynamic>? parseMmlEntriesJson(dynamic raw) {
   if (raw == null) return null;
@@ -1010,8 +1010,178 @@ bool modesArraysEqual(List<String>? a, List<String>? b) {
       respModesUnionLooksSourced(nb, na);
 }
 
+/// DMS 5.1.C uses Epinephrine/Norepinephrine; Helper 2 pills use Adrenaline/Noradrenaline.
+const vasoactiveDrugNameAliases = {
+  'Epinephrine': 'Adrenaline',
+  'Norepinephrine': 'Noradrenaline',
+};
+
+class MmlListFieldAutofill {
+  final bool hasRows;
+  final List<String> values;
+  const MmlListFieldAutofill({
+    this.hasRows = false,
+    this.values = const [],
+  });
+}
+
+List<String> _mmlListFieldValues(dynamic row, String listKey) {
+  dynamic v;
+  if (row is Map) v = row[listKey];
+  if (v is List) {
+    return v
+        .map((x) => x.toString().trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+  }
+  if (v == null) return const [];
+  return v
+      .toString()
+      .split(',')
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty)
+      .toList();
+}
+
+MmlListFieldAutofill parseMmlListField(
+  Map<String, dynamic> data, {
+  String? helperCalendarDate,
+  required String blockKey,
+  required String listKey,
+  Map<String, String>? valueMap,
+}) {
+  final sheetYmd =
+      _normalizeYmd(data['record_date']) ?? _normalizeYmd(helperCalendarDate);
+  final effectiveDate = _normalizeYmd(helperCalendarDate) ?? sheetYmd;
+  final sheetIsHelperDay = _mmlSheetMatchesHelperDay(data, effectiveDate);
+
+  bool rowOnHelperDay(Map row) {
+    if (sheetIsHelperDay) return true;
+    if (effectiveDate == null || effectiveDate.isEmpty) return true;
+    final ds = _normalizeYmd(row['date']) ?? sheetYmd;
+    if (ds == null || ds.isEmpty) return true;
+    return ds == effectiveDate;
+  }
+
+  final seen = <String>[];
+  void push(String raw) {
+    final mapped = valueMap?[raw] ?? raw;
+    if (mapped.isNotEmpty && !seen.contains(mapped)) seen.add(mapped);
+  }
+
+  final entries = parseMmlEntriesJson(data['entries_json']);
+  final list = entries?[blockKey];
+  if (list is List && list.isNotEmpty) {
+    for (final row in list) {
+      if (row is! Map) continue;
+      final map = Map<String, dynamic>.from(row);
+      if (!rowOnHelperDay(map)) continue;
+      for (final v in _mmlListFieldValues(map, listKey)) {
+        push(v);
+      }
+    }
+  }
+  if (seen.isEmpty && entries == null) {
+    for (final v in _mmlListFieldValues(data, listKey)) {
+      push(v);
+    }
+  }
+  return MmlListFieldAutofill(hasRows: seen.isNotEmpty, values: seen);
+}
+
+MmlListFieldAutofill mergeMmlListFieldAutofill(
+  Iterable<MmlListFieldAutofill?> parts,
+) {
+  final seen = <String>[];
+  var hasRows = false;
+  for (final part in parts) {
+    if (part == null) continue;
+    if (part.hasRows) hasRows = true;
+    for (final v in part.values) {
+      if (v.isNotEmpty && !seen.contains(v)) seen.add(v);
+    }
+  }
+  return MmlListFieldAutofill(
+    hasRows: hasRows || seen.isNotEmpty,
+    values: seen,
+  );
+}
+
 String formatNicuCalendarYmd(DateTime date) {
   return '${date.year.toString().padLeft(4, '0')}-'
       '${date.month.toString().padLeft(2, '0')}-'
       '${date.day.toString().padLeft(2, '0')}';
+}
+
+({String from, String to}) parseMmlTimeRangeStr(dynamic value) {
+  final s = (value ?? '').toString().trim();
+  if (s.isEmpty) return (from: '', to: '');
+  final parts = s
+      .split(RegExp(r'\s*[–—−-]\s*|\s+to\s+', caseSensitive: false))
+      .map((p) => p.trim())
+      .where((p) => p.isNotEmpty)
+      .toList();
+  String toHHmm(String raw) {
+    final m = RegExp(r'^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?$', caseSensitive: false)
+        .firstMatch(raw.trim());
+    if (m == null) return '';
+    var h = int.tryParse(m.group(1)!) ?? -1;
+    final min = m.group(2)!;
+    final ap = (m.group(3) ?? '').toUpperCase();
+    if (ap == 'PM' && h < 12) h += 12;
+    if (ap == 'AM' && h == 12) h = 0;
+    if (h < 0 || h > 23) return '';
+    return '${h.toString().padLeft(2, '0')}:$min';
+  }
+
+  if (parts.length == 1) return (from: toHHmm(parts[0]), to: '');
+  return (from: toHHmm(parts[0]), to: toHHmm(parts[1]));
+}
+
+int? _hhmmToMinutes(String hhmm) {
+  final m = RegExp(r'^(\d{1,2}):(\d{2})').firstMatch(hhmm);
+  if (m == null) return null;
+  return int.parse(m.group(1)!) * 60 + int.parse(m.group(2)!);
+}
+
+/// DMS 5.2.A rows → FiO₂ AUC rectangles for the two 12h windows (web parity).
+({List<Map<String, String>> w1, List<Map<String, String>> w2})
+    buildFio2AucRowsFromRespA(List<Map<String, dynamic>> respARows) {
+  final spans = <({int from, int to, double fio2})>[];
+  for (final row in respARows) {
+    final tr = parseMmlTimeRangeStr(row['time_range']);
+    final fromMin = _hhmmToMinutes(tr.from);
+    final toMin = _hhmmToMinutes(tr.to);
+    if (fromMin == null || toMin == null || toMin <= fromMin) continue;
+    final n = double.tryParse('${row['max_fio2'] ?? ''}');
+    if (n == null) continue;
+    spans.add((from: fromMin, to: toMin, fio2: n));
+  }
+  spans.sort((a, b) => a.from.compareTo(b.from));
+  const boundary = 12 * 60;
+  final w1Spans = <({int from, int to, double fio2})>[];
+  final w2Spans = <({int from, int to, double fio2})>[];
+  for (final s in spans) {
+    if (s.to <= boundary) {
+      w1Spans.add(s);
+    } else if (s.from >= boundary) {
+      w2Spans.add((from: s.from - boundary, to: s.to - boundary, fio2: s.fio2));
+    } else {
+      w1Spans.add((from: s.from, to: boundary, fio2: s.fio2));
+      w2Spans.add((from: 0, to: s.to - boundary, fio2: s.fio2));
+    }
+  }
+  List<Map<String, String>> toRows(List<({int from, int to, double fio2})> list) {
+    return list
+        .map((s) => {
+              'fio2': s.fio2 == s.fio2.roundToDouble()
+                  ? '${s.fio2.round()}'
+                  : '${s.fio2}',
+              'dur':
+                  (((((s.to - s.from) / 60) * 100).round()) / 100).toString(),
+            })
+        .toList();
+  }
+
+  return (w1: toRows(w1Spans), w2: toRows(w2Spans));
 }

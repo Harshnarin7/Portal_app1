@@ -116,11 +116,12 @@ class FormsApiService {
     );
   }
 
-  // ── Helper Forms (2, 3, 4) ────────────────────────────────────────────────
+  // ── Helper Forms (DMS + Helpers 2–5) ──────────────────────────────────────
   // form_type values:
-  //   'resp_cv_neuro'         → Helper Form 1
-  //   'infect_gi_hema'        → Helper Form 3
-  //   'metab_renal_vasc_eye'  → Helper Form 4
+  //   'minimal_monitoring'    → Daily Monitoring Sheet (DMS)
+  //   'resp_cv_neuro'         → Helper 2
+  //   'infect_gi_hema'        → Helper 4
+  //   'metab_renal_vasc_eye'  → Helper 5
 
   Future<void> saveHelperForm({
     required String babyUid,
@@ -259,7 +260,7 @@ class FormsApiService {
     }
   }
 
-  /// Helper Form 1 day summary — FiO₂ AUC builds days from supp_o2=Yes rows
+  /// Helper 2 day summary — FiO₂ AUC builds days from supp_o2=Yes rows
   /// (same as web FiO2AUC.jsx syncDaysFromHelper2).
   Future<List<Map<String, dynamic>>> loadRespCvNeuroSummary(
     String enrollmentId,
@@ -276,7 +277,7 @@ class FormsApiService {
     }
   }
 
-  // ── Helper Form 1 — Resp / CV / Neuro (NICU day log) ─────────────────────
+  // ── Helper 2 — Resp / CV / Neuro (NICU day log) ──────────────────────────
   // Real endpoints match RespCVNeuroLog.jsx — NOT the dead /forms/helper blob.
 
   Future<Map<String, dynamic>?> loadRespCvNeuroDay(
@@ -293,21 +294,34 @@ class FormsApiService {
   }
 
   /// POST upserts if the day already exists (backend create_resp_cv_neuro_day).
+  String _withExpectedUpdatedAt(String path, String? expectedUpdatedAt) {
+    final iso = expectedUpdatedAt?.trim() ?? '';
+    if (iso.isEmpty) return path;
+    final sep = path.contains('?') ? '&' : '?';
+    return '$path${sep}expected_updated_at=${Uri.encodeQueryComponent(iso)}';
+  }
+
   Future<Map<String, dynamic>> saveRespCvNeuroDay(
     Map<String, dynamic> body, {
     bool alreadyExists = false,
+    String? expectedUpdatedAt,
   }) async {
     final eid = body['enrollment_id']?.toString() ?? '';
     final day = body['nicu_day'];
     if (alreadyExists && eid.isNotEmpty && day != null) {
       try {
-        return await ApiClient.instance
-            .put('/resp-cv-neuro/$eid/$day', body: body);
+        return await ApiClient.instance.put(
+          _withExpectedUpdatedAt('/resp-cv-neuro/$eid/$day', expectedUpdatedAt),
+          body: body,
+        );
       } on ApiException catch (e) {
         if (e.statusCode != 404) rethrow;
       }
     }
-    return await ApiClient.instance.post('/resp-cv-neuro/', body: body);
+    return await ApiClient.instance.post(
+      _withExpectedUpdatedAt('/resp-cv-neuro/', expectedUpdatedAt),
+      body: body,
+    );
   }
 
   Future<Map<String, dynamic>> submitRespCvNeuroDay({
@@ -372,18 +386,24 @@ class FormsApiService {
   Future<Map<String, dynamic>> saveInfectGiHemaDay(
     Map<String, dynamic> body, {
     bool alreadyExists = false,
+    String? expectedUpdatedAt,
   }) async {
     final eid = body['enrollment_id']?.toString() ?? '';
     final day = body['nicu_day'];
     if (alreadyExists && eid.isNotEmpty && day != null) {
       try {
-        return await ApiClient.instance
-            .put('/infect-gi-hema/$eid/$day', body: body);
+        return await ApiClient.instance.put(
+          _withExpectedUpdatedAt('/infect-gi-hema/$eid/$day', expectedUpdatedAt),
+          body: body,
+        );
       } on ApiException catch (e) {
         if (e.statusCode != 404) rethrow;
       }
     }
-    return await ApiClient.instance.post('/infect-gi-hema/', body: body);
+    return await ApiClient.instance.post(
+      _withExpectedUpdatedAt('/infect-gi-hema/', expectedUpdatedAt),
+      body: body,
+    );
   }
 
   Future<Map<String, dynamic>> submitInfectGiHemaDay({
@@ -435,19 +455,27 @@ class FormsApiService {
   Future<Map<String, dynamic>> saveMetabRenalVascEyeDay(
     Map<String, dynamic> body, {
     bool alreadyExists = false,
+    String? expectedUpdatedAt,
   }) async {
     final eid = body['enrollment_id']?.toString() ?? '';
     final day = body['nicu_day'];
     if (alreadyExists && eid.isNotEmpty && day != null) {
       try {
-        return await ApiClient.instance
-            .put('/metab-renal-vasc-eye/$eid/$day', body: body);
+        return await ApiClient.instance.put(
+          _withExpectedUpdatedAt(
+            '/metab-renal-vasc-eye/$eid/$day',
+            expectedUpdatedAt,
+          ),
+          body: body,
+        );
       } on ApiException catch (e) {
         if (e.statusCode != 404) rethrow;
       }
     }
-    return await ApiClient.instance
-        .post('/metab-renal-vasc-eye/', body: body);
+    return await ApiClient.instance.post(
+      _withExpectedUpdatedAt('/metab-renal-vasc-eye/', expectedUpdatedAt),
+      body: body,
+    );
   }
 
   Future<Map<String, dynamic>> submitMetabRenalVascEyeDay({

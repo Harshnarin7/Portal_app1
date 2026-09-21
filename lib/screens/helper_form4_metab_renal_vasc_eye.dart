@@ -1,19 +1,25 @@
 // lib/screens/helper_form4_metab_renal_vasc_eye.dart
 //
-// Helper Form 4 — Metab / Renal / Vasc / Eye Daily Log
+// Helper Form 5 — Metab / Renal / Vasc / Eye Daily Log
 // Parity with web MetabRenalVascEyeLog.jsx + Form 2 day-shell UX.
 
 import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/metab_renal_vasc_eye_day.dart';
+import '../services/api_client.dart';
 import '../services/forms_api_service.dart';
 import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
+import '../utils/helper_day_strip.dart';
 import '../utils/helper_dob_day1.dart';
+import '../utils/helper_session.dart';
 import '../utils/mml_helper_linkages.dart';
+import '../utils/mml_resp_sync_bus.dart';
 import '../navigation/helper_forms_navigation.dart';
+import '../widgets/helper_patient_header.dart';
+import '../widgets/helper_recent_day_strip.dart';
 import '../widgets/theme_toggle_widget.dart';
 
 bool _isEmptyGlucoseField(String? v) =>
@@ -58,6 +64,9 @@ class _HelperForm4MetabRenalVascEyeState
   int _totalDays = 14;
   int _activeDay = 1;
   int _todayNicuDay = 1;
+  int _stripStart = 1;
+  int? _dischargeDay;
+  String _babyName = '';
 
   final Map<int, String> _dayStatus = {};
   final Map<int, int> _dayPct = {};
@@ -71,6 +80,7 @@ class _HelperForm4MetabRenalVascEyeState
   DateTime? _overrideUntil;
   bool _dayLoadFailed = false;
   int _loadGen = 0;
+  String? _serverUpdatedAt;
 
   MetabRenalVascEyeDay _model = MetabRenalVascEyeDay(
     enrollmentId: '',
@@ -86,6 +96,7 @@ class _HelperForm4MetabRenalVascEyeState
   String? _mmlSheetDate;
   final Map<String, String?> _lastAutoComputed = {};
   Timer? _glucosePollTimer;
+  StreamSubscription<MmlRespSavedEvent>? _mmlSavedSub;
 
   final _lowGlucoseCtrl = TextEditingController();
   final _hypoEpisodesCtrl = TextEditingController();
@@ -111,11 +122,16 @@ class _HelperForm4MetabRenalVascEyeState
     ]) {
       c.addListener(() => setState(() {}));
     }
+    _mmlSavedSub = MmlRespSyncBus.stream.listen((e) {
+      if (e.enrollmentId != widget.enrollmentId.trim()) return;
+      unawaited(_applyGlucoseAutofill(force: false));
+    });
     _bootstrap();
   }
 
   @override
   void dispose() {
+    _mmlSavedSub?.cancel();
     _glucosePollTimer?.cancel();
     unawaited(_stashCurrentDayDraft());
     for (final c in [
@@ -150,7 +166,7 @@ class _HelperForm4MetabRenalVascEyeState
     return formatNicuCalendarYmd(n);
   }
 
-  /// NICU day being viewed is the current Helper 5 sheet date (web parity).
+  /// NICU day being viewed is the current Daily Monitoring Sheet date (web parity).
   bool get _isActiveDayToday =>
       _activeDayYmd != null &&
       _mmlSheetDate != null &&
@@ -170,8 +186,13 @@ class _HelperForm4MetabRenalVascEyeState
       try {
         final birth = await _api.loadBirthResuscitation(eid);
         final raw = birth?['date_of_birth']?.toString();
+        _babyName = (birth?['baby_name'] ?? '').toString();
         if (raw != null && raw.isNotEmpty) {
           _day1Date = parseIsoDateOnly(raw);
+          _dischargeDay = helperDischargeNicuDay(
+            _day1Date,
+            birth?['discharge_date']?.toString(),
+          );
         } else {
           _banner =
               'Day 1 Date unavailable — Date of Birth not yet recorded in Form B.';
@@ -197,7 +218,23 @@ class _HelperForm4MetabRenalVascEyeState
       _recomputeTodayNicuDay();
       _totalDays = maxDay < 14 ? 14 : maxDay;
       if (_todayNicuDay > _totalDays) _totalDays = _todayNicuDay;
-      _activeDay = _defaultActiveDay();
+      if (_dischargeDay != null && _totalDays > _dischargeDay!) {
+        _totalDays = _dischargeDay!;
+      }
+      final remembered = await readRememberedActiveDay(
+        helperSessionKeyMetabRenalVascEye,
+        eid,
+      );
+      _activeDay = remembered != null &&
+              remembered >= 1 &&
+              remembered <= _todayNicuDay &&
+              (_dischargeDay == null || remembered <= _dischargeDay!)
+          ? remembered
+          : _defaultActiveDay();
+      _stripStart = helperDefaultStripStart(_todayNicuDay);
+      if (_activeDay < _stripStart) {
+        _stripStart = helperDefaultStripStart(_activeDay);
+      }
       try {
         final mml = await _api.loadMinimalMonitoringToday(eid);
         final rd = mml['record_date']?.toString();
@@ -205,7 +242,7 @@ class _HelperForm4MetabRenalVascEyeState
           _mmlSheetDate = rd.substring(0, 10);
         }
       } catch (_) {
-        // Helper 5 optional
+        // DMS optional
       }
     } catch (e) {
       _banner = 'Could not load day summary: $e';
@@ -230,7 +267,9 @@ class _HelperForm4MetabRenalVascEyeState
   }
 
   bool get _isFutureDay =>
-      _day1Date != null && _activeDay > _todayNicuDay;
+      _day1Date != null &&
+      (_activeDay > _todayNicuDay ||
+          (_dischargeDay != null && _activeDay > _dischargeDay!));
 
   /// Informational only — a past day's calendar date no longer forces the
   /// record read-only on its own. Locking is manual, via Submit & Lock
@@ -381,12 +420,14 @@ class _HelperForm4MetabRenalVascEyeState
           _isSubmitted = false;
           _overrideUntil = null;
           _dayLoadFailed = false;
+          _serverUpdatedAt = null;
         } else {
           _recordExists = false;
           _isEditing = true;
           _isSubmitted = false;
           _overrideUntil = null;
           _dayLoadFailed = false;
+          _serverUpdatedAt = null;
         }
       } else {
         _applyDay(MetabRenalVascEyeDay.fromJson(raw));
@@ -395,6 +436,7 @@ class _HelperForm4MetabRenalVascEyeState
         _overrideUntil = _parseUtc(raw['override_unlocked_until']);
         _isEditing = !_isSubmitted || _isOverrideActive;
         _dayLoadFailed = false;
+        _serverUpdatedAt = raw['updated_at']?.toString();
       }
     } catch (e) {
       if (!mounted || gen != _loadGen || day != _activeDay) return;
@@ -581,8 +623,8 @@ class _HelperForm4MetabRenalVascEyeState
     try {
       final ok = await _applyGlucoseAutofill(force: true);
       _toast(ok
-          ? 'Glucose fields refreshed from Helper 1'
-          : 'No matching Helper 1 glucose sheet for this day',
+          ? 'Glucose fields refreshed from Daily Monitoring Sheet'
+          : 'No matching Daily Monitoring Sheet glucose for this day',
           error: !ok);
     } finally {
       if (mounted) setState(() => _glucoseRefreshing = false);
@@ -623,15 +665,32 @@ class _HelperForm4MetabRenalVascEyeState
       return;
     }
     if (_isFieldEditable && _completion.percent > 0) {
-      await _save();
+      final ok = await _save();
+      if (!ok) return;
     }
     await _stashCurrentDayDraft();
     setState(() => _activeDay = day);
+    unawaited(rememberActiveDay(
+      helperSessionKeyMetabRenalVascEye,
+      widget.enrollmentId,
+      day,
+    ));
     await _loadActiveDay();
   }
 
   Future<void> _addDay() async {
-    setState(() => _totalDays += 1);
+    if (_dischargeDay != null) {
+      _toast('Baby is discharged — no further days');
+      return;
+    }
+    final next = _totalDays + 1;
+    if (_day1Date != null && next > _todayNicuDay) {
+      setState(() => _totalDays = next);
+      _toast('Day $next is not available yet');
+      return;
+    }
+    setState(() => _totalDays = next);
+    await _switchDay(next);
   }
 
   Future<void> _copyPrevious() async {
@@ -689,12 +748,17 @@ class _HelperForm4MetabRenalVascEyeState
         savedAt: now,
         savedBy: name,
       );
-      await _api.saveMetabRenalVascEyeDay(body, alreadyExists: _recordExists);
+      final saved = await _api.saveMetabRenalVascEyeDay(
+        body,
+        alreadyExists: _recordExists,
+        expectedUpdatedAt: _serverUpdatedAt,
+      );
       await HelperDayDraftStorage.clear(_kMrveDraftKey, eid, _activeDay);
       final pct = _completion.percent;
       setState(() {
         _recordExists = true;
         _isEditing = !_isSubmitted;
+        _serverUpdatedAt = saved['updated_at']?.toString() ?? _serverUpdatedAt;
         _dayStatus[_activeDay] = pct == 100 ? 'complete' : 'draft';
         _dayPct[_activeDay] = pct;
         _banner = forLater
@@ -704,6 +768,14 @@ class _HelperForm4MetabRenalVascEyeState
       });
       return true;
     } catch (e) {
+      if (e is ApiException && e.statusCode == 409) {
+        setState(() {
+          _banner = e.message;
+          _bannerError = true;
+        });
+        await _loadActiveDay();
+        return false;
+      }
       setState(() {
         _banner = 'Save failed: $e';
         _bannerError = true;
@@ -844,6 +916,15 @@ class _HelperForm4MetabRenalVascEyeState
       appBar: _appBar(c),
       body: Column(
         children: [
+          HelperPatientHeader(
+            formBadge: 'HELPER FORM 5',
+            formName: 'Metab / Renal / Eye Daily Log',
+            subtitle: 'Daily metabolic, renal, vascular & ophthalmology assessment',
+            enrollmentId: widget.enrollmentId,
+            gestation: widget.gestation,
+            babyUid: widget.babyUid,
+            babyName: _babyName,
+          ),
           _day1Bar(c),
           _dayChips(c),
           _statusBanner(c),
@@ -908,7 +989,7 @@ class _HelperForm4MetabRenalVascEyeState
                                         : const Icon(Icons.refresh, size: 16),
                                     label: Text(_glucoseRefreshing
                                         ? 'Refreshing…'
-                                        : 'Refresh from Helper 1'),
+                                        : 'Refresh from Daily Monitoring Sheet'),
                                   )
                                 : null,
                             children: _metabolicFields(c, editable),
@@ -993,7 +1074,7 @@ class _HelperForm4MetabRenalVascEyeState
         _yn('3. Hypoglycemia Rx', _model.hypoglycemiaRx, editable, (v) {
           setState(() => _model.hypoglycemiaRx = v);
         }, c),
-      _glucoseField(c, '4', 'Highest glucose reading (if >180 mg/dL)',
+      _glucoseField(c, '4', 'Highest glucose reading (if >125 mg/dL)',
           _highGlucoseCtrl, editable, 'mg/dL', _glucoseAutofilled['highest_glucose']!),
       if (_hyperRxRequired)
         _yn('5. Hyperglycemia Rx (Insulin)', _model.insulin, editable, (v) {
@@ -1209,7 +1290,7 @@ class _HelperForm4MetabRenalVascEyeState
       c,
       number: number,
       label: label,
-      hint: autofilled ? 'Auto-filled from Helper 1' : null,
+      hint: autofilled ? 'Auto-filled from Daily Monitoring Sheet' : null,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1217,7 +1298,7 @@ class _HelperForm4MetabRenalVascEyeState
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
               child: Text(
-                'Auto-filled from Helper 1',
+                'Auto-filled from Daily Monitoring Sheet',
                 style: TextStyle(
                   color: c.primary,
                   fontSize: 11,
@@ -1324,11 +1405,16 @@ class _HelperForm4MetabRenalVascEyeState
               fontWeight: FontWeight.w800,
               letterSpacing: 1.1,
             ),
+            maxLines: 2,
+            overflow: TextOverflow.visible,
+            softWrap: true,
           ),
           Text(
-            'Metab / Renal / Vasc / Eye · ${widget.motherName.isEmpty ? widget.enrollmentId : widget.motherName}',
+            widget.enrollmentId,
             style: TextStyle(color: c.textTertiary, fontSize: 11),
-            overflow: TextOverflow.ellipsis,
+            maxLines: 2,
+            overflow: TextOverflow.visible,
+            softWrap: true,
           ),
         ],
       ),
@@ -1379,83 +1465,35 @@ class _HelperForm4MetabRenalVascEyeState
   }
 
   Widget _dayChips(AppColors c) {
-    return Container(
-      color: c.surface,
-      height: 72,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        itemCount: _totalDays + 1,
-        itemBuilder: (_, i) {
-          if (i == _totalDays) {
-            return Padding(
-              padding: const EdgeInsets.only(left: 4),
-              child: ActionChip(
-                label: const Text('+ Day'),
-                onPressed: _addDay,
-              ),
-            );
-          }
-          final day = i + 1;
-          final selected = day == _activeDay;
-          final future = _day1Date != null && day > _todayNicuDay;
-          final st = _dayStatus[day] ?? 'empty';
-          final cal = _calendarForDay(day);
-          final dateLabel = cal == null
-              ? ''
-              : '${cal.day} ${_month(cal.month)}';
-          Color dot;
-          switch (st) {
-            case 'submitted':
-              dot = c.success;
-              break;
-            case 'complete':
-              dot = c.primary;
-              break;
-            case 'draft':
-            case 'late':
-              dot = c.warning;
-              break;
-            default:
-              dot = c.border;
-          }
-          return Padding(
-            padding: const EdgeInsets.only(right: 6),
-            child: ChoiceChip(
-              selected: selected,
-              label: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 7,
-                        height: 7,
-                        decoration: BoxDecoration(
-                            color: dot, shape: BoxShape.circle),
-                      ),
-                      const SizedBox(width: 4),
-                      Text('D$day',
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w800, fontSize: 12)),
-                      if (future) ...[
-                        const SizedBox(width: 2),
-                        const Icon(Icons.lock, size: 12),
-                      ],
-                    ],
-                  ),
-                  if (dateLabel.isNotEmpty)
-                    Text(dateLabel,
-                        style: TextStyle(
-                            fontSize: 9, color: c.textTertiary)),
-                ],
-              ),
-              onSelected: future ? null : (_) => _switchDay(day),
-            ),
-          );
-        },
+    final visible = helperVisibleStripDays(
+      stripStart: _stripStart,
+      totalDays: _totalDays,
+      todayNicuDay: _todayNicuDay,
+      dischargeDay: _dischargeDay,
+    );
+    return HelperRecentDayStrip(
+      visibleDays: visible,
+      activeDay: _activeDay,
+      todayNicuDay: _todayNicuDay,
+      day1Date: _day1Date,
+      dayStatus: _dayStatus,
+      dischargeDay: _dischargeDay,
+      showAddDay: _dischargeDay == null,
+      canShowEarlier: _stripStart > 1,
+      onShowEarlier: () {
+        setState(() {
+          _stripStart = (_stripStart - kMobileDayStripWindow) < 1
+              ? 1
+              : _stripStart - kMobileDayStripWindow;
+        });
+      },
+      missedDays: helperMissedDaysInWindow(
+        visibleDays: visible,
+        todayNicuDay: _todayNicuDay,
+        dayStatus: _dayStatus,
       ),
+      onSelect: _switchDay,
+      onAddDay: _addDay,
     );
   }
 

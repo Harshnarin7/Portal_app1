@@ -6,10 +6,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/forms_api_service.dart';
 import '../theme/app_theme.dart';
 import '../navigation/helper_forms_navigation.dart';
+import '../utils/helper_day_strip.dart';
+import '../utils/helper_dob_day1.dart';
+import '../utils/mml_helper_linkages.dart';
 import '../widgets/theme_toggle_widget.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Helper Form 2 — FiO₂ AUC
+// Helper Form 3 — FiO₂ AUC
 // Parity with web frontend-app/src/FiO2AUC.jsx
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -80,6 +83,12 @@ class _FiO2Day {
         rows.any((r) => r.fio2.trim().isNotEmpty);
     return hasFio2(w1) || hasFio2(w2);
   }
+
+  static bool windowIsBlank(List<_FiO2Row> rows) {
+    if (rows.isEmpty) return true;
+    if (rows.length == 1 && rows.first.fio2.trim().isEmpty) return true;
+    return false;
+  }
 }
 
 class HelperFiO2AUC extends StatefulWidget {
@@ -115,6 +124,9 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
   /// (e.g. Supplemental O₂ flipped to No) are not wiped.
   List<Map<String, dynamic>> _lastServerLogs = [];
   Timer? _autoSaveTimer;
+  DateTime? _day1Date;
+  bool _showAllFio2Days = false;
+  int? _dmsPrefillingDay;
 
   @override
   void initState() {
@@ -147,6 +159,11 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       'widget.gestation=${widget.gestation}',
     );
     setState(() => _loading = true);
+    try {
+      final birth =
+          await _api.loadBirthResuscitation(widget.enrollmentId.trim());
+      _day1Date = parseIsoDateOnly(birth?['date_of_birth']?.toString());
+    } catch (_) {}
     await _syncDaysFromHelper2(preserveLocal: true, showToast: false);
     if (mounted) setState(() => _loading = false);
   }
@@ -170,7 +187,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
 
     try {
       final summary = await _api.loadRespCvNeuroSummary(eid);
-      // FiO₂ AUC days = Helper Form 1 days with Supplemental O₂ = Yes
+      // FiO₂ AUC days = Helper 2 days with Supplemental O₂ = Yes
       // (not Surfactant — that was the incorrect gate).
       final oxygenDays = summary
           .where((s) => _isTruthyFlag(s['supp_o2']))
@@ -236,7 +253,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         }
       }
 
-      // Union: Helper 1 Supplemental O₂=Yes days + any day that already has
+      // Union: Helper 2 Supplemental O₂=Yes days + any day that already has
       // FiO₂ values (so flipping O₂ to No never hides/drops entered AUC).
       final dayNums = <int>{...oxygenDays};
       for (final l in mergedLogs) {
@@ -415,6 +432,74 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
   bool _isDayLocked(int index) {
     if (index <= 0) return false;
     return !_days[index - 1].isComplete;
+  }
+
+  List<_FiO2Day> get _visibleDays {
+    if (_showAllFio2Days || _days.length <= kMobileDayStripWindow) {
+      return _days;
+    }
+    return _days.sublist(_days.length - kMobileDayStripWindow);
+  }
+
+  Future<void> _prefillDayFromDms(int dayNum) async {
+    final eid = widget.enrollmentId.trim();
+    if (eid.isEmpty || _day1Date == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text(
+            "Need the baby's Date of Birth (Form B) before prefilling from DMS"),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    final cal = calendarDateForNicuDay(_day1Date, dayNum);
+    if (cal == null) return;
+    final ymd = formatIsoDateOnly(cal);
+    setState(() => _dmsPrefillingDay = dayNum);
+    try {
+      final payload = await _api.loadMinimalMonitoringOnDate(eid, ymd);
+      final rows = parseRespAEntries(payload, helperCalendarDate: ymd);
+      final built = buildFio2AucRowsFromRespA(rows);
+      final day = _days.firstWhere((d) => d.day == dayNum);
+      final canW1 = built.w1.isNotEmpty && _FiO2Day.windowIsBlank(day.w1);
+      final canW2 = built.w2.isNotEmpty && _FiO2Day.windowIsBlank(day.w2);
+      if (!canW1 && !canW2) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            (built.w1.isNotEmpty || built.w2.isNotEmpty)
+                ? 'That window already has entries — clear it first to prefill from DMS'
+                : 'No Daily Monitoring Sheet respiratory readings found for this day',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ));
+        return;
+      }
+      setState(() {
+        if (canW1) {
+          day.w1 = built.w1
+              .map((r) => _FiO2Row(fio2: r['fio2'] ?? '', dur: r['dur'] ?? ''))
+              .toList();
+        }
+        if (canW2) {
+          day.w2 = built.w2
+              .map((r) => _FiO2Row(fio2: r['fio2'] ?? '', dur: r['dur'] ?? ''))
+              .toList();
+        }
+        _dirty = true;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text(
+            'Prefilled from Daily Monitoring Sheet — review and adjust as needed'),
+        behavior: SnackBarBehavior.floating,
+      ));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Could not load Daily Monitoring Sheet for this day'),
+        behavior: SnackBarBehavior.floating,
+      ));
+    } finally {
+      if (mounted) setState(() => _dmsPrefillingDay = null);
+    }
   }
 
   void _addRow(_FiO2Day day, bool isW1) {
@@ -745,9 +830,23 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
                     const SizedBox(height: 12),
                     _kpiStrip(c),
                     const SizedBox(height: 14),
-                    ...List.generate(_days.length, (i) {
-                      final day = _days[i];
-                      final locked = _isDayLocked(i);
+                    if (!_showAllFio2Days &&
+                        _days.length > kMobileDayStripWindow)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: () =>
+                              setState(() => _showAllFio2Days = true),
+                          child: Text(
+                            'Show earlier O₂ days (${_days.length - kMobileDayStripWindow} hidden)',
+                          ),
+                        ),
+                      ),
+                    ...List.generate(_visibleDays.length, (i) {
+                      final day = _visibleDays[i];
+                      final fullIdx =
+                          _days.indexWhere((d) => d.day == day.day);
+                      final locked = _isDayLocked(fullIdx);
                       return _dayCard(c, day, locked);
                     }),
                     const SizedBox(height: 10),
@@ -950,6 +1049,19 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
                     ],
                   ),
                 ),
+                if (!locked)
+                  TextButton(
+                    onPressed: _dmsPrefillingDay == day.day
+                        ? null
+                        : () => _prefillDayFromDms(day.day),
+                    child: _dmsPrefillingDay == day.day
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('DMS', style: TextStyle(fontSize: 11)),
+                  ),
                 if (day.isComplete)
                   Icon(Icons.check_circle_rounded,
                       color: c.success, size: 20)

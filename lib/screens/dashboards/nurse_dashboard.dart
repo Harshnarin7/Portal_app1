@@ -16,6 +16,7 @@ import '../../services/pdf_service.dart';
 import '../../services/screening_api_service.dart';
 import '../../services/forms_api_service.dart';
 import '../../utils/screening_status.dart';
+import '../../services/api_client.dart';
 import '../admin/user_management_screen.dart';
 import '../screening_form.dart';
 import '../form_b_birth_resuscitation.dart';
@@ -117,7 +118,7 @@ class AdminDashboard extends StatelessWidget {
     return DashboardShell(
       user: user,
       pages: [_AdminHome(user: user), _UserMgmtPage(user: user),
-              _ph('Sites'), _ph('Audit')],
+              const _SitesPage(), const _AuditLogPage()],
       navItems: const [
         BottomNavigationBarItem(icon: Icon(Icons.home_outlined),
             activeIcon: Icon(Icons.home_rounded), label: 'Home'),
@@ -213,8 +214,19 @@ class _AdminHomeState extends State<_AdminHome> {
         (Icons.history_rounded,'View audit log','Full action history',const Color(0xFF7C3AED)),
       ])
         GestureDetector(
-          onTap: () { if (item.$2 == 'Create new user') Navigator.push(context,
-              MaterialPageRoute(builder:(_)=>const UserManagementScreen())); },
+          onTap: () {
+            if (item.$2 == 'Create new user') {
+              Navigator.push(context, MaterialPageRoute(
+                builder: (_) => const UserManagementScreen(openCreateOnLoad: true)));
+            } else if (item.$2 == 'Add new site') {
+              DashboardNavigator.of(context).goToTab(2);
+            } else if (item.$2 == 'Reset user password') {
+              Navigator.push(context, MaterialPageRoute(
+                builder: (_) => const UserManagementScreen(highlightReset: true)));
+            } else if (item.$2 == 'View audit log') {
+              DashboardNavigator.of(context).goToTab(3);
+            }
+          },
           child: Container(
             margin: const EdgeInsets.only(bottom:8),
             padding: const EdgeInsets.symmetric(horizontal:12, vertical:11),
@@ -669,7 +681,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                 },
                 completed: formCDone,
               ),
-              _buildActionTile(ctx, 'Helper Form 1 — Minimal Monitoring', Icons.monitor_heart_outlined, helpersEnabled,
+              _buildActionTile(ctx, 'Daily Monitoring Sheet (DMS)', Icons.monitor_heart_outlined, helpersEnabled,
                 () {
                   final eid = c.enrollmentId.isNotEmpty
                       ? c.enrollmentId
@@ -684,7 +696,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                           : c.maternalUid,
                     )));
                 }),
-              _buildActionTile(ctx, 'Helper Form 2 — Resp/CV/Neuro', Icons.favorite_rounded, helpersEnabled,
+              _buildActionTile(ctx, 'Helper 2 — Resp/CV/Neuro', Icons.favorite_rounded, helpersEnabled,
                 () {
                   final eid = c.enrollmentId.isNotEmpty
                       ? c.enrollmentId
@@ -700,7 +712,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                       site: c.site.isNotEmpty ? c.site : 'PGIMER',
                     )));
                 }),
-              _buildActionTile(ctx, 'Helper Form 3 — FiO₂ Logging', Icons.air_rounded, helpersEnabled,
+              _buildActionTile(ctx, 'Helper 3 — FiO₂ Logging', Icons.air_rounded, helpersEnabled,
                 () {
                   final eid = c.enrollmentId.isNotEmpty
                       ? c.enrollmentId
@@ -715,7 +727,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                           : c.maternalUid,
                     )));
                 }),
-              _buildActionTile(ctx, 'Helper Form 4 — Infection/GI/Hema', Icons.bloodtype_rounded, helpersEnabled,
+              _buildActionTile(ctx, 'Helper 4 — Infection/GI/Hema', Icons.bloodtype_rounded, helpersEnabled,
                 () {
                   final eid = c.enrollmentId.isNotEmpty
                       ? c.enrollmentId
@@ -730,7 +742,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                           : c.maternalUid,
                     )));
                 }),
-              _buildActionTile(ctx, 'Helper Form 5 — Metab/Renal/Eye', Icons.visibility_rounded, helpersEnabled,
+              _buildActionTile(ctx, 'Helper 5 — Metab/Renal/Eye', Icons.visibility_rounded, helpersEnabled,
                 () {
                   final eid = c.enrollmentId.isNotEmpty
                       ? c.enrollmentId
@@ -814,7 +826,9 @@ Widget _buildActionTile(
   );
 }
 
-/// Lists previously saved forms and opens them in read-only mode.
+/// Lists previously saved forms. Lock state is decided by each form from
+/// `explicitly_saved` (a draft record must stay editable). `viewOnly` is
+/// omitted for B1/B2 so a row existing is not treated as a full save.
 Future<void> showFilledFormsSheet(
   BuildContext context,
   CRF c, {
@@ -903,7 +917,6 @@ Future<void> showFilledFormsSheet(
                         gestDays: c.gestationDays,
                         siteId: c.site.isNotEmpty ? c.site : c.siteId,
                         screeningDateTime: c.screeningDateTime,
-                        viewOnly: true,
                       ),
                     ),
                   );
@@ -934,7 +947,6 @@ Future<void> showFilledFormsSheet(
                             ? formB!.babyUid
                             : c.maternalUid,
                         formB: formB,
-                        viewOnly: true,
                       ),
                     ),
                   );
@@ -999,7 +1011,14 @@ Future<void> exportPatientPdf(BuildContext context, CRF c) async {
 class _NursePatientsPage extends StatefulWidget {
   final UserProfile user;
   final ValueNotifier<String>? filterNotifier;
-  const _NursePatientsPage({required this.user, this.filterNotifier});
+  final String heading;
+  final String? lockedFilter;
+  const _NursePatientsPage({
+    required this.user,
+    this.filterNotifier,
+    this.heading = 'All patients',
+    this.lockedFilter,
+  });
   @override
   State<_NursePatientsPage> createState() => _NursePatientsPageState();
 }
@@ -1012,7 +1031,8 @@ class _NursePatientsPageState extends State<_NursePatientsPage> with RouteAware 
 
   @override void initState() {
     super.initState();
-    _filter = _normalizeFilter(widget.filterNotifier?.value ?? 'All');
+    _filter = widget.lockedFilter ??
+        _normalizeFilter(widget.filterNotifier?.value ?? 'All');
     widget.filterNotifier?.addListener(_onExternalFilter);
     _load();
   }
@@ -1102,7 +1122,7 @@ class _NursePatientsPageState extends State<_NursePatientsPage> with RouteAware 
       child: ListView(
           padding: const EdgeInsets.fromLTRB(16,16,16,100),
           children: [
-            Text('All patients', style: const TextStyle(
+            Text(widget.heading, style: const TextStyle(
                 fontSize: 18, fontWeight: FontWeight.w800, color: _kText1)),
             const SizedBox(height: 3),
             Text('${_all.length} total · site-scoped', style: const TextStyle(
@@ -1126,6 +1146,7 @@ class _NursePatientsPageState extends State<_NursePatientsPage> with RouteAware 
               ),
             ),
             const SizedBox(height: 12),
+            if (widget.lockedFilter == null)
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Row(children: [
@@ -1568,90 +1589,11 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
     );
   }
 
-  Future<void> _showExportPdfPicker() async {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator(color: _kPrimary)),
-    );
-    List<CRF> all;
-    try {
-      all = await fetchPatientCrfs(piiLimit: 40, ownSite: _ownSiteListFilter(widget.user));
-    } catch (_) {
-      all = _crfs;
-    }
-    if (!mounted) return;
-    Navigator.of(context, rootNavigator: true).pop();
-
-    if (all.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('No patients to export yet.'),
-      ));
-      return;
-    }
-
-    await showModalBottomSheet(
-      context: context,
-      backgroundColor: _kSurface,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Row(children: [
-              Icon(Icons.picture_as_pdf_rounded, color: _kDanger, size: 20),
-              SizedBox(width: 8),
-              Text('Export PDF',
-                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: _kText1)),
-            ]),
-            const SizedBox(height: 4),
-            const Align(
-              alignment: Alignment.centerLeft,
-              child: Text('Choose a patient to generate their CRF PDF',
-                  style: TextStyle(fontSize: 11.5, color: _kText3)),
-            ),
-            const SizedBox(height: 12),
-            ConstrainedBox(
-              constraints: BoxConstraints(
-                maxHeight: MediaQuery.of(ctx).size.height * 0.55,
-              ),
-              child: ListView.separated(
-                shrinkWrap: true,
-                itemCount: all.length.clamp(0, 40),
-                separatorBuilder: (_, __) => const Divider(height: 1),
-                itemBuilder: (_, i) {
-                  final c = all[i];
-                  final name = patientDisplayName(c);
-                  return ListTile(
-                    leading: const Icon(Icons.picture_as_pdf_outlined, color: _kDanger),
-                    title: Text(name.isEmpty ? c.screeningId : name,
-                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: _kText1)),
-                    subtitle: Text(c.screeningId,
-                        style: const TextStyle(fontSize: 11, color: _kText3)),
-                    trailing: const Icon(Icons.download_rounded, color: _kText3, size: 18),
-                    onTap: () async {
-                      Navigator.pop(ctx);
-                      await exportPatientPdf(context, c);
-                    },
-                  );
-                },
-              ),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                widget.onOpenPatients(filter: 'All');
-              },
-              child: const Text('Browse all patients',
-                  style: TextStyle(fontWeight: FontWeight.w700)),
-            ),
-          ]),
-        ),
-      ),
-    );
-  }
+  Future<void> _showExportPdfPicker() => showExportPdfPicker(
+        context,
+        widget.user,
+        onBrowseAll: () => widget.onOpenPatients(filter: 'All'),
+      );
 
   Widget _st(String l,int v,Color c,IconData i, VoidCallback onTap) => Expanded(child:
     Material(color:_kSurface, borderRadius:BorderRadius.circular(16),
@@ -1761,100 +1703,530 @@ class _NurseHomeState extends State<_NurseHome> with RouteAware {
 
 }
 
+String _statFilter(String label) => switch (label) {
+  'Enrolled' => 'Eligible',
+  'Excluded' => 'Not Eligible',
+  'Pending' => 'Pending',
+  _ => 'All',
+};
+
+void _openNewScreening(BuildContext context) {
+  Navigator.push(context, MaterialPageRoute(
+      builder: (_) => const ScreeningForm(loadDraft: false)));
+}
+
+void _openPatientsFromHome(
+  ValueNotifier<int> tab,
+  ValueNotifier<String> filter, {
+  String status = 'All',
+  int tabIndex = 1,
+}) {
+  filter.value = status;
+  tab.value = tabIndex;
+}
+
+Future<void> pickPatientThenAct(
+  BuildContext context,
+  UserProfile user, {
+  String title = 'Select a patient',
+  String? statusFilter,
+}) async {
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const Center(child: CircularProgressIndicator(color: _kPrimary)),
+  );
+  List<CRF> all;
+  try {
+    all = await fetchPatientCrfs(piiLimit: 40, ownSite: _ownSiteListFilter(user));
+  } catch (_) {
+    all = [];
+  }
+  if (!context.mounted) return;
+  Navigator.of(context, rootNavigator: true).pop();
+  if (statusFilter != null) {
+    all = all.where((c) {
+      return switch (statusFilter) {
+        'Eligible' => _isEligible(c),
+        'Pending' => _isPending(c),
+        'Not Eligible' => _isNotEligible(c),
+        'Screen Failure' => _isScreenFailure(c),
+        _ => true,
+      };
+    }).toList();
+  }
+  if (all.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(statusFilter == null
+          ? 'No patients yet.'
+          : 'No patients in this list yet.'),
+    ));
+    return;
+  }
+  await showModalBottomSheet(
+    context: context,
+    backgroundColor: _kSurface,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+    builder: (ctx) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(title, style: const TextStyle(
+                fontWeight: FontWeight.w800, fontSize: 15, color: _kText1)),
+          ),
+          const SizedBox(height: 12),
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(ctx).size.height * 0.55,
+            ),
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: all.length.clamp(0, 40),
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (_, i) {
+                final c = all[i];
+                return ListTile(
+                  title: Text(
+                    patientDisplayName(c) == 'Name pending'
+                        ? c.screeningId
+                        : patientDisplayName(c),
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w700, fontSize: 13, color: _kText1),
+                  ),
+                  subtitle: Text(
+                    '${c.screeningId} · ${patientStatusLabel(c)}',
+                    style: const TextStyle(fontSize: 11, color: _kText3),
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded, color: _kText3),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    showPatientActionsSheet(context, c);
+                  },
+                );
+              },
+            ),
+          ),
+        ]),
+      ),
+    ),
+  );
+}
+
+Future<void> showExportPdfPicker(
+  BuildContext context,
+  UserProfile user, {
+  VoidCallback? onBrowseAll,
+}) async {
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const Center(child: CircularProgressIndicator(color: _kPrimary)),
+  );
+  List<CRF> all;
+  try {
+    all = await fetchPatientCrfs(piiLimit: 40, ownSite: _ownSiteListFilter(user));
+  } catch (_) {
+    all = [];
+  }
+  if (!context.mounted) return;
+  Navigator.of(context, rootNavigator: true).pop();
+  if (all.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('No patients to export yet.'),
+    ));
+    return;
+  }
+  await showModalBottomSheet(
+    context: context,
+    backgroundColor: _kSurface,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+    builder: (ctx) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Row(children: [
+            Icon(Icons.picture_as_pdf_rounded, color: _kDanger, size: 20),
+            SizedBox(width: 8),
+            Text('Export PDF',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: _kText1)),
+          ]),
+          const SizedBox(height: 4),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text('Choose a patient to generate their CRF PDF',
+                style: TextStyle(fontSize: 11.5, color: _kText3)),
+          ),
+          const SizedBox(height: 12),
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(ctx).size.height * 0.55,
+            ),
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: all.length.clamp(0, 40),
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (_, i) {
+                final c = all[i];
+                final name = patientDisplayName(c);
+                return ListTile(
+                  leading: const Icon(Icons.picture_as_pdf_outlined, color: _kDanger),
+                  title: Text(name.isEmpty ? c.screeningId : name,
+                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: _kText1)),
+                  subtitle: Text(c.screeningId,
+                      style: const TextStyle(fontSize: 11, color: _kText3)),
+                  trailing: const Icon(Icons.download_rounded, color: _kText3, size: 18),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    await exportPatientPdf(context, c);
+                  },
+                );
+              },
+            ),
+          ),
+          if (onBrowseAll != null)
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                onBrowseAll();
+              },
+              child: const Text('Browse all patients',
+                  style: TextStyle(fontWeight: FontWeight.w700)),
+            ),
+        ]),
+      ),
+    ),
+  );
+}
+
 // ── PI DASHBOARD ─────────────────────────────────────────────────────────────
-class PIDashboard extends StatelessWidget {
+class PIDashboard extends StatefulWidget {
   const PIDashboard({super.key});
+  @override
+  State<PIDashboard> createState() => _PIDashboardState();
+}
+
+class _PIDashboardState extends State<PIDashboard> {
+  final _tab = ValueNotifier<int>(0);
+  final _filter = ValueNotifier<String>('All');
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    _filter.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = context.read<AuthProvider>().user!;
-    return DashboardShell(user:user,
-      pages:[_SD(user:user,title:'PI Dashboard',
-        subtitle:'Approve forms, view site data and reports',
-        color:_kSuccess,
-        actions:['Forms to approve','Open queries','Site report','Verify forms']),
-        _ph('Patients'), _ph('Reports')],
-      navItems:const[
-        BottomNavigationBarItem(icon:Icon(Icons.home_outlined),
-            activeIcon:Icon(Icons.home_rounded),label:'Home'),
-        BottomNavigationBarItem(icon:Icon(Icons.people_outline),
-            activeIcon:Icon(Icons.people_rounded),label:'Patients'),
-        BottomNavigationBarItem(icon:Icon(Icons.assessment_outlined),
-            activeIcon:Icon(Icons.assessment_rounded),label:'Reports'),
-      ]);
+    return DashboardShell(
+      user: user,
+      tabIndex: _tab,
+      pages: [
+        _SD(
+          user: user,
+          title: 'PI Dashboard',
+          subtitle: 'Approve forms, view site data and reports',
+          color: _kSuccess,
+          actions: const ['Forms to approve', 'Open queries', 'Site report', 'Verify forms'],
+          onStatTap: (label) => _openPatientsFromHome(_tab, _filter, status: _statFilter(label)),
+          onAction: (a) {
+            switch (a) {
+              case 'Forms to approve':
+              case 'Verify forms':
+                pickPatientThenAct(context, user,
+                    title: 'Select a patient to review', statusFilter: 'Eligible');
+              case 'Open queries':
+                pickPatientThenAct(context, user,
+                    title: 'Pending cases', statusFilter: 'Pending');
+              case 'Site report':
+                _tab.value = 2;
+            }
+          },
+        ),
+        _NursePatientsPage(user: user, filterNotifier: _filter),
+        _ReportsPage(
+          user: user,
+          onOpenPatients: () => _openPatientsFromHome(_tab, _filter),
+        ),
+      ],
+      navItems: const [
+        BottomNavigationBarItem(icon: Icon(Icons.home_outlined),
+            activeIcon: Icon(Icons.home_rounded), label: 'Home'),
+        BottomNavigationBarItem(icon: Icon(Icons.people_outline),
+            activeIcon: Icon(Icons.people_rounded), label: 'Patients'),
+        BottomNavigationBarItem(icon: Icon(Icons.assessment_outlined),
+            activeIcon: Icon(Icons.assessment_rounded), label: 'Reports'),
+      ],
+    );
   }
 }
 
 // ── SCIENTIST DASHBOARD ───────────────────────────────────────────────────────
-class ScientistDashboard extends StatelessWidget {
+class ScientistDashboard extends StatefulWidget {
   const ScientistDashboard({super.key});
+  @override
+  State<ScientistDashboard> createState() => _ScientistDashboardState();
+}
+
+class _ScientistDashboardState extends State<ScientistDashboard> {
+  final _tab = ValueNotifier<int>(0);
+  final _filter = ValueNotifier<String>('Pending');
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    _filter.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = context.read<AuthProvider>().user!;
-    return DashboardShell(user:user,
-      pages:[_SD(user:user,title:'Scientist Dashboard',
-        subtitle:'Monitor data quality and generate reports',
-        color:const Color(0xFF534AB7),
-        actions:['Review Form B1','Missing Helper Form 3',
-                 'Download site report','Raise query']),
-        _ph('Quality'), _ph('Reports')],
-      navItems:const[
-        BottomNavigationBarItem(icon:Icon(Icons.home_outlined),
-            activeIcon:Icon(Icons.home_rounded),label:'Home'),
-        BottomNavigationBarItem(icon:Icon(Icons.analytics_outlined),
-            activeIcon:Icon(Icons.analytics_rounded),label:'Quality'),
-        BottomNavigationBarItem(icon:Icon(Icons.description_outlined),
-            activeIcon:Icon(Icons.description_rounded),label:'Reports'),
-      ]);
+    return DashboardShell(
+      user: user,
+      tabIndex: _tab,
+      pages: [
+        _SD(
+          user: user,
+          title: 'Scientist Dashboard',
+          subtitle: 'Monitor data quality and generate reports',
+          color: const Color(0xFF534AB7),
+          actions: const [
+            'Review Form B1',
+            'Missing Helper Form 3',
+            'Download site report',
+            'Raise query',
+          ],
+          onStatTap: (label) {
+            _filter.value = _statFilter(label);
+            _tab.value = 1;
+          },
+          onAction: (a) {
+            switch (a) {
+              case 'Review Form B1':
+                pickPatientThenAct(context, user,
+                    title: 'Review Form B1', statusFilter: 'Eligible');
+              case 'Missing Helper Form 3':
+                pickPatientThenAct(context, user,
+                    title: 'Open helper forms', statusFilter: 'Eligible');
+              case 'Download site report':
+                showExportPdfPicker(context, user,
+                    onBrowseAll: () => _openPatientsFromHome(_tab, _filter, status: 'All'));
+              case 'Raise query':
+                pickPatientThenAct(context, user, title: 'Raise query — pick a patient');
+            }
+          },
+        ),
+        _NursePatientsPage(
+          user: user,
+          filterNotifier: _filter,
+          heading: 'Data quality',
+          lockedFilter: 'Pending',
+        ),
+        _ReportsPage(
+          user: user,
+          onOpenPatients: () => _openPatientsFromHome(_tab, _filter, status: 'All'),
+        ),
+      ],
+      navItems: const [
+        BottomNavigationBarItem(icon: Icon(Icons.home_outlined),
+            activeIcon: Icon(Icons.home_rounded), label: 'Home'),
+        BottomNavigationBarItem(icon: Icon(Icons.analytics_outlined),
+            activeIcon: Icon(Icons.analytics_rounded), label: 'Quality'),
+        BottomNavigationBarItem(icon: Icon(Icons.description_outlined),
+            activeIcon: Icon(Icons.description_rounded), label: 'Reports'),
+      ],
+    );
   }
 }
 
 // ── DEO DASHBOARD ─────────────────────────────────────────────────────────────
-class DEODashboard extends StatelessWidget {
+class DEODashboard extends StatefulWidget {
   const DEODashboard({super.key});
+  @override
+  State<DEODashboard> createState() => _DEODashboardState();
+}
+
+class _DEODashboardState extends State<DEODashboard> {
+  final _tab = ValueNotifier<int>(0);
+  final _queueFilter = ValueNotifier<String>('Pending');
+  final _doneFilter = ValueNotifier<String>('Eligible');
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    _queueFilter.dispose();
+    _doneFilter.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = context.read<AuthProvider>().user!;
-    return DashboardShell(user:user,
-      pages:[_SD(user:user,title:'DEO Dashboard',
-        subtitle:'Data entry queue for your site',
-        color:_kWarning,
-        actions:['Form A (Priority)','Helper Form 1',
-                 'Form B1','Form B2 (Fix required)']),
-        _ph('Queue'), _ph('Done')],
-      navItems:const[
-        BottomNavigationBarItem(icon:Icon(Icons.home_outlined),
-            activeIcon:Icon(Icons.home_rounded),label:'Home'),
-        BottomNavigationBarItem(icon:Icon(Icons.inbox_outlined),
-            activeIcon:Icon(Icons.inbox_rounded),label:'Queue'),
-        BottomNavigationBarItem(icon:Icon(Icons.check_circle_outline),
-            activeIcon:Icon(Icons.check_circle_rounded),label:'Done'),
-      ]);
+    return DashboardShell(
+      user: user,
+      tabIndex: _tab,
+      pages: [
+        _SD(
+          user: user,
+          title: 'DEO Dashboard',
+          subtitle: 'Data entry queue for your site',
+          color: _kWarning,
+          actions: const [
+            'Form A (Priority)',
+            'Daily Monitoring Sheet',
+            'Form B1',
+            'Form B2 (Fix required)',
+          ],
+          onStatTap: (label) {
+            if (label == 'Enrolled') {
+              _tab.value = 2;
+            } else {
+              _tab.value = 1;
+            }
+          },
+          onAction: (a) {
+            switch (a) {
+              case 'Form A (Priority)':
+                _openNewScreening(context);
+              case 'Daily Monitoring Sheet':
+              case 'Form B1':
+              case 'Form B2 (Fix required)':
+                pickPatientThenAct(context, user,
+                    title: a, statusFilter: 'Eligible');
+            }
+          },
+        ),
+        _NursePatientsPage(
+          user: user,
+          filterNotifier: _queueFilter,
+          heading: 'Entry queue',
+          lockedFilter: 'Pending',
+        ),
+        _NursePatientsPage(
+          user: user,
+          filterNotifier: _doneFilter,
+          heading: 'Completed',
+          lockedFilter: 'Eligible',
+        ),
+      ],
+      navItems: const [
+        BottomNavigationBarItem(icon: Icon(Icons.home_outlined),
+            activeIcon: Icon(Icons.home_rounded), label: 'Home'),
+        BottomNavigationBarItem(icon: Icon(Icons.inbox_outlined),
+            activeIcon: Icon(Icons.inbox_rounded), label: 'Queue'),
+        BottomNavigationBarItem(icon: Icon(Icons.check_circle_outline),
+            activeIcon: Icon(Icons.check_circle_rounded), label: 'Done'),
+      ],
+      fab: Builder(
+        builder: (ctx) => FloatingActionButton.extended(
+          backgroundColor: _kPrimary,
+          foregroundColor: Colors.white,
+          icon: const Icon(Icons.person_add_alt_1_rounded, size: 20),
+          label: const Text('New Screening',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+          onPressed: () => _openNewScreening(ctx),
+        ),
+      ),
+    );
   }
 }
 
 // ── MONITOR DASHBOARD ─────────────────────────────────────────────────────────
-class MonitorDashboard extends StatelessWidget {
+class MonitorDashboard extends StatefulWidget {
   const MonitorDashboard({super.key});
+  @override
+  State<MonitorDashboard> createState() => _MonitorDashboardState();
+}
+
+class _MonitorDashboardState extends State<MonitorDashboard> {
+  final _tab = ValueNotifier<int>(0);
+  final _queryFilter = ValueNotifier<String>('Pending');
+  final _sdvFilter = ValueNotifier<String>('Eligible');
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    _queryFilter.dispose();
+    _sdvFilter.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = context.read<AuthProvider>().user!;
-    return DashboardShell(user:user,
-      pages:[_SD(user:user,title:'Monitor Dashboard',
-        subtitle:'Read-only view across all trial sites',
-        color:const Color(0xFF5F5E5A),
-        actions:['Query — PGIMER','SDV review — Aurangabad',
-                 'Protocol deviation','Schedule site visit']),
-        _ph('Queries'), _ph('SDV'), _ph('Audit')],
-      navItems:const[
-        BottomNavigationBarItem(icon:Icon(Icons.home_outlined),
-            activeIcon:Icon(Icons.home_rounded),label:'Home'),
-        BottomNavigationBarItem(icon:Icon(Icons.flag_outlined),
-            activeIcon:Icon(Icons.flag_rounded),label:'Queries'),
-        BottomNavigationBarItem(icon:Icon(Icons.fact_check_outlined),
-            activeIcon:Icon(Icons.fact_check_rounded),label:'SDV'),
-        BottomNavigationBarItem(icon:Icon(Icons.history_outlined),
-            activeIcon:Icon(Icons.history_rounded),label:'Audit'),
-      ]);
+    return DashboardShell(
+      user: user,
+      tabIndex: _tab,
+      pages: [
+        _SD(
+          user: user,
+          title: 'Monitor Dashboard',
+          subtitle: 'Read-only view across all trial sites',
+          color: const Color(0xFF5F5E5A),
+          actions: const [
+            'Query — PGIMER',
+            'SDV review — Aurangabad',
+            'Protocol deviation',
+            'Schedule site visit',
+          ],
+          onStatTap: (label) {
+            if (label == 'Enrolled') {
+              _tab.value = 2;
+            } else if (label == 'Pending') {
+              _tab.value = 1;
+            } else {
+              pickPatientThenAct(context, user,
+                  title: 'Patients', statusFilter: _statFilter(label));
+            }
+          },
+          onAction: (a) {
+            switch (a) {
+              case 'Query — PGIMER':
+                _tab.value = 1;
+              case 'SDV review — Aurangabad':
+                _tab.value = 2;
+              case 'Protocol deviation':
+                pickPatientThenAct(context, user,
+                    title: 'Screen failures / deviations',
+                    statusFilter: 'Screen Failure');
+              case 'Schedule site visit':
+                pickPatientThenAct(context, user, title: 'Site caseload');
+            }
+          },
+        ),
+        _NursePatientsPage(
+          user: user,
+          filterNotifier: _queryFilter,
+          heading: 'Open queries',
+          lockedFilter: 'Pending',
+        ),
+        _NursePatientsPage(
+          user: user,
+          filterNotifier: _sdvFilter,
+          heading: 'SDV review',
+          lockedFilter: 'Eligible',
+        ),
+        const _AuditLogPage(),
+      ],
+      navItems: const [
+        BottomNavigationBarItem(icon: Icon(Icons.home_outlined),
+            activeIcon: Icon(Icons.home_rounded), label: 'Home'),
+        BottomNavigationBarItem(icon: Icon(Icons.flag_outlined),
+            activeIcon: Icon(Icons.flag_rounded), label: 'Queries'),
+        BottomNavigationBarItem(icon: Icon(Icons.fact_check_outlined),
+            activeIcon: Icon(Icons.fact_check_rounded), label: 'SDV'),
+        BottomNavigationBarItem(icon: Icon(Icons.history_outlined),
+            activeIcon: Icon(Icons.history_rounded), label: 'Audit'),
+      ],
+    );
   }
 }
 
@@ -1864,87 +2236,548 @@ class _SD extends StatefulWidget {
   final String title, subtitle;
   final Color color;
   final List<String> actions;
-  const _SD({required this.user,required this.title,required this.subtitle,
-    required this.color,required this.actions});
+  final void Function(String action)? onAction;
+  final void Function(String statLabel)? onStatTap;
+  const _SD({
+    required this.user,
+    required this.title,
+    required this.subtitle,
+    required this.color,
+    required this.actions,
+    this.onAction,
+    this.onStatTap,
+  });
   @override
   State<_SD> createState() => _SDState();
 }
 
 class _SDState extends State<_SD> {
-  Map<String,dynamic> _stats = {};
-  @override void initState() { super.initState(); _load(); }
+  Map<String, dynamic> _stats = {};
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
   Future<void> _load() async {
     try {
       final s = await ScreeningApiService.instance.getStats();
       if (mounted) setState(() => _stats = s);
     } catch (_) {}
   }
+
   @override
   Widget build(BuildContext context) {
-    final t=_stats['total']??0; final e=_stats['enrolled']??0;
-    final x=_stats['excluded']??0; final p=_stats['pending']??0;
+    final t = _stats['total'] ?? 0;
+    final e = _stats['enrolled'] ?? 0;
+    final x = _stats['excluded'] ?? 0;
+    final p = _stats['pending'] ?? 0;
     final stats = _stats.isEmpty
-        ? [('--','Screened'),('--','Enrolled'),('--','Excluded'),('--','Pending')]
-        : [('$t','Screened'),('$e','Enrolled'),('$x','Excluded'),('$p','Pending')];
-    return ListView(padding:const EdgeInsets.fromLTRB(16,16,16,40),children:[
+        ? [('--', 'Screened'), ('--', 'Enrolled'), ('--', 'Excluded'), ('--', 'Pending')]
+        : [('$t', 'Screened'), ('$e', 'Enrolled'), ('$x', 'Excluded'), ('$p', 'Pending')];
+    return ListView(padding: const EdgeInsets.fromLTRB(16, 16, 16, 40), children: [
       Container(
-        padding:const EdgeInsets.all(16),
-        decoration:BoxDecoration(color:widget.color,
-            borderRadius:BorderRadius.circular(16)),
-        child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-          Text(widget.title,style:const TextStyle(color:Colors.white,
-              fontWeight:FontWeight.w700,fontSize:16)),
-          const SizedBox(height:4),
-          Text(widget.subtitle,style:const TextStyle(
-              color:Colors.white70,fontSize:11)),
-          const SizedBox(height:10),
-          if (widget.user.siteName!=null)
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+            color: widget.color, borderRadius: BorderRadius.circular(16)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(widget.title,
+              style: const TextStyle(
+                  color: Colors.white, fontWeight: FontWeight.w700, fontSize: 16)),
+          const SizedBox(height: 4),
+          Text(widget.subtitle,
+              style: const TextStyle(color: Colors.white70, fontSize: 11)),
+          const SizedBox(height: 10),
+          if (widget.user.siteName != null)
             Container(
-              padding:const EdgeInsets.symmetric(horizontal:8,vertical:3),
-              decoration:BoxDecoration(
-                  color:Colors.white.withOpacity(0.15),
-                  borderRadius:BorderRadius.circular(6)),
-              child:Text(widget.user.siteName!,
-                  style:const TextStyle(color:Colors.white,fontSize:10))),
-        ])),
-      const SizedBox(height:14),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(6)),
+              child: Text(widget.user.siteName!,
+                  style: const TextStyle(color: Colors.white, fontSize: 10))),
+        ]),
+      ),
+      const SizedBox(height: 14),
       GridView.count(
-        crossAxisCount:2,shrinkWrap:true,
-        physics:const NeverScrollableScrollPhysics(),
-        crossAxisSpacing:9,mainAxisSpacing:9,childAspectRatio:2.0,
-        children:stats.map((s)=>Container(
-          padding:const EdgeInsets.all(12),
-          decoration:BoxDecoration(color:_kSurface,
-              borderRadius:BorderRadius.circular(12),
-              border:Border.all(color:widget.color.withOpacity(0.2))),
-          child:Column(crossAxisAlignment:CrossAxisAlignment.start,
-            mainAxisAlignment:MainAxisAlignment.center,children:[
-            Text(s.$1,style:TextStyle(fontSize:22,
-                fontWeight:FontWeight.w800,color:widget.color)),
-            Text(s.$2,style:const TextStyle(fontSize:10,color:_kText3)),
-          ]),
-        )).toList()),
-      const SizedBox(height:14),
-      const Text('Action items',style:TextStyle(fontSize:13,
-          fontWeight:FontWeight.w700,color:_kText1)),
-      const SizedBox(height:8),
-      ...widget.actions.map((a)=>Container(
-        margin:const EdgeInsets.only(bottom:8),
-        padding:const EdgeInsets.symmetric(horizontal:12,vertical:11),
-        decoration:BoxDecoration(color:_kSurface,
-            borderRadius:BorderRadius.circular(12),
-            border:Border.all(color:_kBorder)),
-        child:Row(children:[
-          Container(width:6,height:6,decoration:BoxDecoration(
-              color:widget.color,shape:BoxShape.circle)),
-          const SizedBox(width:10),
-          Expanded(child:Text(a,style:const TextStyle(
-              fontSize:12,color:_kText1))),
-          const Icon(Icons.chevron_right_rounded,color:_kText3,size:16),
-        ]))),
+        crossAxisCount: 2,
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        crossAxisSpacing: 9,
+        mainAxisSpacing: 9,
+        childAspectRatio: 2.0,
+        children: stats
+            .map((s) => Material(
+                  color: _kSurface,
+                  borderRadius: BorderRadius.circular(12),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: widget.onStatTap == null ? null : () => widget.onStatTap!(s.$2),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: widget.color.withOpacity(0.2)),
+                      ),
+                      child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(s.$1,
+                                style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                    color: widget.color)),
+                            Text(s.$2,
+                                style: const TextStyle(fontSize: 10, color: _kText3)),
+                          ]),
+                    ),
+                  ),
+                ))
+            .toList(),
+      ),
+      const SizedBox(height: 14),
+      const Text('Action items',
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _kText1)),
+      const SizedBox(height: 8),
+      ...widget.actions.map((a) => Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Material(
+            color: _kSurface,
+            borderRadius: BorderRadius.circular(12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: widget.onAction == null ? null : () => widget.onAction!(a),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+                decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: _kBorder)),
+                child: Row(children: [
+                  Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                          color: widget.color, shape: BoxShape.circle)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                      child: Text(a,
+                          style: const TextStyle(fontSize: 12, color: _kText1))),
+                  Icon(Icons.chevron_right_rounded,
+                      color: _kText3.withOpacity(0.6), size: 16),
+                ]),
+              ),
+            ),
+            ),
+          )),
     ]);
   }
 }
 
-Widget _ph(String l) => Center(child:Text(l,
-    style:const TextStyle(color:_kText3,fontSize:16)));
+const _kTrialSites = <(String, String)>[
+  ('PGIMER', 'Chandigarh'),
+  ('GMCH', 'Chandigarh'),
+  ('GMCH-A', 'Aurangabad'),
+  ('AMC', 'Dibrugarh'),
+  ('IOG', 'Chennai'),
+  ('AFMC', 'Pune'),
+];
+
+class _SitesPage extends StatefulWidget {
+  const _SitesPage();
+  @override
+  State<_SitesPage> createState() => _SitesPageState();
+}
+
+class _SitesPageState extends State<_SitesPage> {
+  List<Map<String, dynamic>> _staff = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final rows = await ApiClient.instance.getList('/admin/site-staff');
+      _staff = rows.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+    } catch (_) {
+      _staff = [];
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  List<Map<String, dynamic>> _staffFor(String site) => _staff
+      .where((s) => s['site_name'] == site && s['is_active'] != false)
+      .toList();
+
+  Future<void> _addStaff(String site) async {
+    final nameCtrl = TextEditingController();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Add staff',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        content: TextField(
+          controller: nameCtrl,
+          autofocus: true,
+          decoration: InputDecoration(
+            labelText: 'Full name',
+            hintText: 'Name as it should appear on forms',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Add',
+                style: TextStyle(fontWeight: FontWeight.w700, color: _kPrimary)),
+          ),
+        ],
+      ),
+    );
+    final name = nameCtrl.text.trim();
+    nameCtrl.dispose();
+    if (saved != true || name.isEmpty) return;
+    try {
+      await ApiClient.instance.post('/admin/site-staff', body: {
+        'site_name': site,
+        'name': name,
+        'role': 'screener',
+      });
+      await _load();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Added $name at $site'),
+          backgroundColor: _kSuccess,
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not add staff: $e'),
+          backgroundColor: _kDanger,
+        ));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        children: [
+          const Text('Trial centres',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _kText1)),
+          const SizedBox(height: 4),
+          const Text(
+            'The six PORTAL sites are pre-registered. Open a centre to view or add screeners.',
+            style: TextStyle(fontSize: 12, color: _kText3, height: 1.35),
+          ),
+          const SizedBox(height: 14),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 40),
+              child: Center(child: CircularProgressIndicator(color: _kPrimary)),
+            )
+          else
+            ..._kTrialSites.map((site) {
+              final staff = _staffFor(site.$1);
+              return Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                decoration: BoxDecoration(
+                  color: _kSurface,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: _kBorder),
+                ),
+                child: ExpansionTile(
+                  tilePadding: const EdgeInsets.symmetric(horizontal: 14),
+                  childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+                  title: Text(site.$1,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w700, fontSize: 14, color: _kText1)),
+                  subtitle: Text('${site.$2} · ${staff.length} staff',
+                      style: const TextStyle(fontSize: 11, color: _kText3)),
+                  children: [
+                    if (staff.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 8),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text('No staff listed yet',
+                              style: TextStyle(fontSize: 12, color: _kText3)),
+                        ),
+                      )
+                    else
+                      ...staff.map((s) => ListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            title: Text('${s['name'] ?? ''}',
+                                style: const TextStyle(fontSize: 13, color: _kText1)),
+                            subtitle: Text('${s['role'] ?? 'screener'}',
+                                style: const TextStyle(fontSize: 11, color: _kText3)),
+                          )),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () => _addStaff(site.$1),
+                        icon: const Icon(Icons.person_add_alt_1_rounded, size: 16),
+                        label: const Text('Add staff'),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+}
+
+class _AuditLogPage extends StatefulWidget {
+  const _AuditLogPage();
+  @override
+  State<_AuditLogPage> createState() => _AuditLogPageState();
+}
+
+class _AuditLogPageState extends State<_AuditLogPage> {
+  List<Map<String, dynamic>> _rows = [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final rows = await ApiClient.instance.getList('/audit/?limit=80');
+      _rows = rows.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+    } catch (e) {
+      _error = e.toString();
+      _rows = [];
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  String _when(dynamic raw) {
+    final s = raw?.toString() ?? '';
+    if (s.isEmpty) return '';
+    final dt = DateTime.tryParse(s);
+    if (dt == null) return s;
+    final local = dt.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(local.day)}/${two(local.month)}/${local.year} ${two(local.hour)}:${two(local.minute)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        children: [
+          const Text('Audit log',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _kText1)),
+          const SizedBox(height: 4),
+          const Text('Recent form and record changes',
+              style: TextStyle(fontSize: 12, color: _kText3)),
+          const SizedBox(height: 14),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 40),
+              child: Center(child: CircularProgressIndicator(color: _kPrimary)),
+            )
+          else if (_error != null)
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: _kSurface,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: _kBorder),
+              ),
+              child: Text(
+                _error!.contains('403')
+                    ? 'Your role cannot view the audit trail on this account.'
+                    : 'Could not load audit log.\n$_error',
+                style: const TextStyle(fontSize: 13, color: _kText3, height: 1.4),
+              ),
+            )
+          else if (_rows.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 40),
+              child: Center(
+                  child: Text('No audit entries yet',
+                      style: TextStyle(color: _kText3, fontSize: 13))),
+            )
+          else
+            ..._rows.map((row) {
+              final action = (row['action'] ?? '').toString();
+              final table = (row['table_name'] ?? '').toString();
+              final who = (row['username'] ?? '').toString();
+              final sid = (row['screening_id'] ?? row['enrollment_id'] ?? '').toString();
+              return Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: _kSurface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: _kBorder),
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(action.isEmpty ? table : '$action · $table',
+                      style: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w700, color: _kText1)),
+                  const SizedBox(height: 3),
+                  Text(
+                    [
+                      if (who.isNotEmpty) who,
+                      if (sid.isNotEmpty) sid,
+                      _when(row['created_at']),
+                    ].where((s) => s.isNotEmpty).join(' · '),
+                    style: const TextStyle(fontSize: 11, color: _kText3),
+                  ),
+                ]),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReportsPage extends StatefulWidget {
+  final UserProfile user;
+  final VoidCallback onOpenPatients;
+  const _ReportsPage({required this.user, required this.onOpenPatients});
+  @override
+  State<_ReportsPage> createState() => _ReportsPageState();
+}
+
+class _ReportsPageState extends State<_ReportsPage> {
+  Map<String, dynamic> _stats = {};
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final s = await ScreeningApiService.instance.getStats();
+      if (mounted) setState(() {
+        _stats = s;
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = [
+      ('Screened', '${_stats['total'] ?? 0}', _kPrimary, Icons.people_alt_rounded),
+      ('Eligible', '${_stats['enrolled'] ?? 0}', _kSuccess, Icons.check_circle_rounded),
+      ('Excluded', '${_stats['excluded'] ?? 0}', _kDanger, Icons.block_rounded),
+      ('Pending', '${_stats['pending'] ?? 0}', _kWarning, Icons.pending_rounded),
+    ];
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        children: [
+          const Text('Site report',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: _kText1)),
+          const SizedBox(height: 4),
+          Text(
+            widget.user.siteName == null
+                ? 'Recruitment snapshot across accessible sites'
+                : 'Recruitment snapshot · ${widget.user.siteName}',
+            style: const TextStyle(fontSize: 12, color: _kText3),
+          ),
+          const SizedBox(height: 14),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 40),
+              child: Center(child: CircularProgressIndicator(color: _kPrimary)),
+            )
+          else
+            ...items.map((it) => Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: _kSurface,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: _kBorder),
+                  ),
+                  child: Row(children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: it.$3.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(it.$4, color: it.$3, size: 20),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                        child: Text(it.$1,
+                            style: const TextStyle(
+                                fontSize: 14, fontWeight: FontWeight.w700, color: _kText1))),
+                    Text(it.$2,
+                        style: TextStyle(
+                            fontSize: 22, fontWeight: FontWeight.w800, color: it.$3)),
+                  ]),
+                )),
+          const SizedBox(height: 8),
+          ElevatedButton.icon(
+            onPressed: () => showExportPdfPicker(context, widget.user,
+                onBrowseAll: widget.onOpenPatients),
+            icon: const Icon(Icons.picture_as_pdf_rounded, size: 18),
+            label: const Text('Export patient PDF',
+                style: TextStyle(fontWeight: FontWeight.w700)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _kPrimary,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: widget.onOpenPatients,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _kPrimary,
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              side: const BorderSide(color: _kBorder),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+            child: const Text('Open patients',
+                style: TextStyle(fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+}

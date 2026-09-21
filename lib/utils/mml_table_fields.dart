@@ -1,4 +1,4 @@
-// Summary table columns for Helper 5 — mirrors web MinimalMonitoringLog.jsx
+// Summary table columns for Daily Monitoring Sheet — mirrors web MinimalMonitoringLog.jsx
 // BLOCK_FIELDS + tableFieldsForBlock().
 
 import '../models/minimal_monitoring.dart';

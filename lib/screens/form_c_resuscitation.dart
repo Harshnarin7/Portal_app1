@@ -2,12 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/api_service.dart';
 import '../services/forms_api_service.dart';
+import '../services/screening_api_service.dart';
 import '../models/form_c.dart';
 import '../models/birth_resuscitation.dart';
 import '../models/form_b.dart';
 import '../theme/app_theme.dart';
 import '../widgets/theme_toggle_widget.dart';
 import '../widgets/required_asterisk.dart';
+import '../widgets/field_logic_badge.dart';
+import '../models/crf.dart';
+import '../services/pdf_service.dart';
+import 'package:provider/provider.dart';
+import '../providers/auth_provider.dart';
+import '../services/api_client.dart';
 
 String? blenderLetterFromEnrollmentId(String? enrollmentId) {
   final parts = (enrollmentId ?? "").trim().toUpperCase().split("-");
@@ -102,6 +109,19 @@ class _FormCResuscitationDetailsState
   String? _blenderLetter;       // 61. A/B/C/D
 
   bool _submitted = false;
+  bool _isSaved = false;
+  bool _isEditing = false;
+
+  /// Form A formula, with a B2-owned-fields guard: B1 and B2 share one
+  /// `explicitly_saved` column, so a B1-only Save must not freeze an empty B2.
+  bool get _formReadOnly => (_isSaved || widget.viewOnly) && !_isEditing;
+
+  bool get _showEditAction => _isSaved || widget.viewOnly;
+
+  /// Combined Form B print after B1 and B2 are both filled.
+  bool get _formBExportEnabled => _isSaved && !_exportingPdf;
+
+  bool _exportingPdf = false;
 
   // Live range errors for cord blood gases (match web BirthResuscitationForm).
   String? _phLiveError;
@@ -128,6 +148,8 @@ class _FormCResuscitationDetailsState
   @override
   void initState() {
     super.initState();
+    _isSaved = widget.viewOnly;
+    _isEditing = !_isSaved;
     for (final row in _timelineRows) {
       _timeline[row] = {for (final m in _timelineMins) m: null};
     }
@@ -142,24 +164,39 @@ class _FormCResuscitationDetailsState
   }
 
   Future<void> _hydrateAll() async {
+    BirthResuscitationData? lockSource;
     if (widget.shared != null) {
       _applyBirthData(widget.shared!);
+      lockSource = widget.shared;
     } else {
-      await _hydrateFromServerOrSkip();
+      lockSource = await _hydrateFromServerOrSkip();
     }
+    _applyLockFromRecord(lockSource);
     await _overlayLocalFormC();
+    if (mounted) setState(() {});
   }
 
-  Future<void> _hydrateFromServerOrSkip() async {
+  void _applyLockFromRecord(BirthResuscitationData? d) {
+    final explicitSaved = d?.explicitlySaved == true;
+    // Shared column with B1: only lock B2 when this row already has B4–B6 data.
+    final b2OnRecord = d?.hasB2ClinicalData == true;
+    _isSaved = widget.viewOnly || (explicitSaved && b2OnRecord);
+    _isEditing = !_isSaved;
+  }
+
+  Future<BirthResuscitationData?> _hydrateFromServerOrSkip() async {
     final eid = _resolveFormCEnrollmentId();
-    if (eid.isEmpty) return;
+    if (eid.isEmpty) return null;
     try {
       final remote =
           await FormsApiService.instance.loadBirthResuscitation(eid);
       if (remote != null && mounted) {
-        _applyBirthData(BirthResuscitationData.fromJson(remote));
+        final data = BirthResuscitationData.fromJson(remote);
+        _applyBirthData(data);
+        return data;
       }
     } catch (_) {}
+    return null;
   }
 
   Future<void> _overlayLocalFormC() async {
@@ -481,7 +518,7 @@ class _FormCResuscitationDetailsState
 
   @override
   void dispose() {
-    if (!widget.viewOnly && !_isFormCEmpty()) {
+    if (!_formReadOnly && !_isFormCEmpty()) {
       _api.saveFormC(_snapshotFormC());
     }
     for (final c in [
@@ -1151,20 +1188,23 @@ class _FormCResuscitationDetailsState
       await _api.saveFormC(formC);
       // Backend save — merged Form B1 + B2 payload via shared model
       try {
-        await FormsApiService.instance
-            .saveBirthResuscitation(data.toJson());
+        final json = data.toJson();
+        json['explicitly_saved'] = true;
+        await FormsApiService.instance.saveBirthResuscitation(json);
       } catch (e) {
         if (!mounted) return;
         _showMsg("Save failed — check connection and try again. ($e)");
         return;
       }
       if (!mounted) return;
+      setState(() {
+        _isSaved = true;
+        _isEditing = false;
+      });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: const Text("Form B2 saved successfully"),
         backgroundColor: AppTheme.of(context).success,
       ));
-      // Return to dashboard (pop Form B2; Form B1 also pops when result == true).
-      Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
       _showMsg("Failed to save: $e");
@@ -1444,12 +1484,21 @@ class _FormCResuscitationDetailsState
 
   Widget _pillRadio(String title, List<String> options, String? value,
       void Function(String) onChanged, AppColors c,
-      {bool showError = false, bool enabled = true}) {
+      {bool showError = false, bool enabled = true,
+       FieldLogicType? logic, String? logicTitle}) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      requiredLabel(
-        title,
-        style: TextStyle(
-            color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
+      Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 4,
+        children: [
+          requiredLabel(
+            title,
+            style: TextStyle(
+                color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          if (logic != null)
+            FieldLogicBadge(type: logic, title: logicTitle ?? ''),
+        ],
       ),
       const SizedBox(height: 8),
       Wrap(spacing: 8, runSpacing: 8, children: options.map((opt) {
@@ -1616,16 +1665,26 @@ class _FormCResuscitationDetailsState
     String emptyHint = "Tap to select (HH:MM:SS)",
     String Function(Duration d)? formatDuration,
     String? errorText,
+    FieldLogicType? logic,
+    String? logicTitle,
   }) {
     final filled    = ctrl.text.isNotEmpty;
     final showError = errorText != null || (_submitted && isRequired && !filled);
     final fmt = formatDuration ?? _fmtDuration;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      requiredLabel(
-        label,
-        style: TextStyle(
-            color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
-        required: isRequired,
+      Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 4,
+        children: [
+          requiredLabel(
+            label,
+            style: TextStyle(
+                color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
+            required: isRequired,
+          ),
+          if (logic != null)
+            FieldLogicBadge(type: logic, title: logicTitle ?? ''),
+        ],
       ),
       const SizedBox(height: 6),
       GestureDetector(
@@ -1684,10 +1743,21 @@ class _FormCResuscitationDetailsState
         (_cordClampedAtDisplay.isNotEmpty ||
             _cordClampTimeCtrl.text.trim().isNotEmpty);
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(
-        "44. Cord clamping time from birth (sec)",
-        style: TextStyle(
-            color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
+      Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 4,
+        children: [
+          Text(
+            "44. Cord clamping time from birth (sec)",
+            style: TextStyle(
+                color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          FieldLogicBadge(
+            type: FieldLogicType.auto,
+            title:
+                "Auto from 9. Time of Birth + 43. Cord clamped at — or type here to auto-fill 43",
+          ),
+        ],
       ),
       const SizedBox(height: 4),
       Text(
@@ -1950,18 +2020,30 @@ class _FormCResuscitationDetailsState
                 padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: TextFormField(
                   controller  : _apgarCtrls[m],
+                  enabled     : !_formReadOnly,
+                  readOnly    : _formReadOnly,
                   textAlign   : TextAlign.center,
                   keyboardType: TextInputType.number,
                   inputFormatters: [
                     LengthLimitingTextInputFormatter(2),
                     _ApgarOneToTenFormatter(),
                   ],
-                  style: TextStyle(color: c.textPrimary, fontSize: 13),
+                  onChanged: (_) {
+                    // Do not clear or lock later minutes when this score
+                    // is ≥ 7 — the baby can deteriorate (e.g. 8 at 5 min,
+                    // 4 at 15 min).
+                    setState(() {});
+                  },
+                  style: TextStyle(
+                    color: _apgarTextColor(_apgarCtrls[m]!.text, c),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
                   decoration: InputDecoration(
                     isDense    : true,
                     filled     : true,
-                    fillColor  : c.surfaceAlt,
-                    hintText   : "1–10",
+                    fillColor  : _apgarFillColor(_apgarCtrls[m]!.text, c),
+                    hintText   : "0–10",
                     hintStyle  : TextStyle(color: c.textTertiary, fontSize: 12),
                     contentPadding: const EdgeInsets.symmetric(
                         vertical: 8, horizontal: 6),
@@ -1974,6 +2056,9 @@ class _FormCResuscitationDetailsState
                     focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
                         borderSide: BorderSide(color: c.warning, width: 1.5)),
+                    disabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(color: c.border)),
                   ),
                 ),
               ),
@@ -1982,6 +2067,22 @@ class _FormCResuscitationDetailsState
         ),
       ]),
     );
+  }
+
+  Color _apgarFillColor(String raw, AppColors c) {
+    final n = int.tryParse(raw.trim());
+    if (n == null) return c.surfaceAlt;
+    if (n <= 3) return const Color(0xFFFEE2E2);
+    if (n <= 6) return const Color(0xFFFEF3C7);
+    return const Color(0xFFDCFCE7);
+  }
+
+  Color _apgarTextColor(String raw, AppColors c) {
+    final n = int.tryParse(raw.trim());
+    if (n == null) return c.textPrimary;
+    if (n <= 3) return const Color(0xFF991B1B);
+    if (n <= 6) return const Color(0xFF92400E);
+    return const Color(0xFF166534);
   }
 
   Widget _ynrCell(String row, int min, String? cur, AppColors c) {
@@ -2028,7 +2129,7 @@ class _FormCResuscitationDetailsState
     return Scaffold(
       backgroundColor    : c.bg,
       appBar             : _buildAppBar(c),
-      bottomNavigationBar: widget.viewOnly ? null : _buildBottomBar(c),
+      bottomNavigationBar: _formReadOnly ? null : _buildBottomBar(c),
       body: Container(
         decoration: BoxDecoration(
           gradient: LinearGradient(
@@ -2037,35 +2138,55 @@ class _FormCResuscitationDetailsState
           ),
         ),
         child: AbsorbPointer(
-          absorbing: widget.viewOnly,
+          absorbing: _formReadOnly,
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
             child: Form(
               key: _formKey,
               child: Column(children: [
-                if (widget.viewOnly) ...[
+                if (_formReadOnly) ...[
                   Container(
                     width: double.infinity,
-                    margin: const EdgeInsets.only(bottom: 14),
-                    padding: const EdgeInsets.all(12),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
                     decoration: BoxDecoration(
-                      color: c.primarySoft,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: c.primary.withOpacity(0.35)),
+                      color: c.primary.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: c.primary.withOpacity(0.25)),
                     ),
-                    child: Row(children: [
-                      Icon(Icons.visibility_rounded, color: c.primary, size: 18),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text("View only — previously filled Form B2",
-                            style: TextStyle(
-                                color: c.primary,
-                                fontWeight: FontWeight.w700,
-                                fontSize: 13)),
+                    child: Text(
+                      "Saved — tap Edit Form in the header to make changes",
+                      style: TextStyle(
+                        color: c.primary,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
                       ),
-                    ]),
+                    ),
                   ),
                 ],
+                if (_isEditing && (_isSaved || widget.viewOnly)) ...[
+                  Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: c.warningSoft,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: c.warning.withOpacity(0.35)),
+                    ),
+                    child: Text(
+                      "Editing saved Form B2",
+                      style: TextStyle(
+                        color: c.warning,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                ],
+                const FieldLogicLegend(),
                 _buildResuscitationSection(c),
                 _buildTimelineSection(c),
                 _buildCordBloodSection(c),
@@ -2099,10 +2220,167 @@ class _FormCResuscitationDetailsState
                 fontWeight: FontWeight.w500)),
       ]),
       actions: [
+        Padding(
+          padding: const EdgeInsets.only(right: 2),
+          child: IconButton(
+            tooltip: _formBExportEnabled
+                ? "Export / Share Form B PDF"
+                : "Save Form B1 and Form B2 to export a PDF",
+            onPressed: _formBExportEnabled ? _exportShareFormBPdf : null,
+            icon: _exportingPdf
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: c.primary,
+                    ),
+                  )
+                : Icon(Icons.ios_share_rounded,
+                    color: _formBExportEnabled
+                        ? c.textPrimary
+                        : c.textTertiary,
+                    size: 20),
+          ),
+        ),
+        if (_showEditAction)
+          Padding(
+            padding: const EdgeInsets.only(right: 2),
+            child: IconButton(
+              tooltip: _isEditing ? "Done Editing" : "Edit Form",
+              onPressed: _toggleEditing,
+              icon: Icon(
+                _isEditing ? Icons.check_rounded : Icons.edit_rounded,
+                color: _isEditing ? c.success : c.textPrimary,
+                size: 20,
+              ),
+            ),
+          ),
         const Padding(padding: EdgeInsets.only(right: 8),
             child: Center(child: ThemeToggle())),
       ],
     );
+  }
+
+  void _toggleEditing() {
+    setState(() => _isEditing = !_isEditing);
+    if (_isEditing) _ensureEditableSession();
+  }
+
+  /// Form A restarts 10s autosave here. B2 has no periodic timer — listeners
+  /// stay attached through AbsorbPointer lock — so this is a no-op hook.
+  void _ensureEditableSession() {}
+
+  CRF _crfForPdf() {
+    final parts = widget.motherName.trim().split(RegExp(r'\s+'));
+    final first = parts.isEmpty || parts.first.isEmpty ? '' : parts.first;
+    final surname = parts.length > 1 ? parts.sublist(1).join(' ') : '';
+    final gw = widget.shared?.gestationWeeks ?? 0;
+    final gd = widget.shared?.gestationDays ?? 0;
+    final wMatch =
+        RegExp(r'(\d+)\s*w', caseSensitive: false).firstMatch(widget.gestation);
+    final dMatch =
+        RegExp(r'(\d+)\s*d', caseSensitive: false).firstMatch(widget.gestation);
+    final weeks = wMatch != null ? int.parse(wMatch.group(1)!) : gw;
+    final days = dMatch != null ? int.parse(dMatch.group(1)!) : gd;
+    return CRF(
+      screeningId: widget.screeningId,
+      site: '',
+      siteId: '',
+      screeningDateTime: '',
+      screenedBy: '',
+      motherFirstName: first,
+      motherSurname: surname,
+      husbandFirstName: '',
+      husbandSurname: '',
+      motherPhone: '',
+      husbandPhone: '',
+      maternalUid: '',
+      hospitalNo: '',
+      gestationWeeks: weeks,
+      gestationDays: days,
+      gestationMethod: '',
+      expectedDeliveryDate: '',
+      gestationKnownInWeeks: weeks > 0,
+      eddKnown: false,
+      exclusion: false,
+      exclusionReason: '',
+      anomalyDetails: '',
+      eligibilityStatus: '',
+      consentStatus: '',
+      consentRefusalReason: '',
+      relationshipToParticipant: '',
+      relationshipOther: '',
+      consentTakenBy: '',
+      enrollmentId: _resolveFormCEnrollmentId(),
+    );
+  }
+
+  Future<String> _loadPiNameForPrint() async {
+    String site = '';
+    try {
+      site = context.read<AuthProvider>().user?.siteName?.trim() ?? '';
+    } catch (_) {}
+    if (site.isEmpty) {
+      try {
+        final clinical = await ScreeningApiService.instance
+            .getScreening(widget.screeningId);
+        site = (clinical?['site_name'] ?? clinical?['site'] ?? '')
+            .toString()
+            .trim();
+      } catch (_) {}
+    }
+    if (site.isEmpty) return '';
+    try {
+      final res = await ApiClient.instance.request(
+        'GET',
+        '/sites/${Uri.encodeComponent(site)}/pi-name',
+      );
+      return (res['pi_name'] ?? '').toString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  String _preparedByForPrint() {
+    try {
+      return context.read<AuthProvider>().user?.fullName.trim() ?? '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Future<void> _exportShareFormBPdf() async {
+    if (!_formBExportEnabled) return;
+    setState(() => _exportingPdf = true);
+    try {
+      final eid = _resolveFormCEnrollmentId();
+      BirthResuscitationData? birth = widget.shared;
+      if (eid.isNotEmpty) {
+        try {
+          final json =
+              await FormsApiService.instance.loadBirthResuscitation(eid);
+          if (json != null) birth = BirthResuscitationData.fromJson(json);
+        } catch (_) {}
+      }
+      final pi = await _loadPiNameForPrint();
+      if (!mounted) return;
+      await PdfService.shareFormBPdf(
+        crf: _crfForPdf(),
+        formB: widget.formB,
+        formC: _snapshotFormC(),
+        birth: birth,
+        preparedBy: _preparedByForPrint(),
+        piName: pi,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Could not export Form B PDF: $e")),
+      );
+    } finally {
+      if (mounted) setState(() => _exportingPdf = false);
+    }
   }
 
   Widget _buildBottomBar(AppColors c) {
@@ -2290,6 +2568,8 @@ class _FormCResuscitationDetailsState
           ctrl    : _timeToRespCtrl,
           c       : c,
           onPick  : () => _pickDuration(context),
+          logic   : FieldLogicType.validated,
+          logicTitle: "Must be ≤ 57. Total time from APGAR timer",
           errorText: _spontaneousExceedsApgar()
               ? "Must be ≤ 57. Total time from APGAR timer"
               : null,
@@ -2428,11 +2708,14 @@ class _FormCResuscitationDetailsState
             hint: "1–100"),
 
         _durationTile(
-          label: "57. Total time (MM:SS) from APGAR timer",
+          label: "57. Total time (MM:SS)",
           ctrl: _totalTimeCtrl,
           c: c,
           emptyHint: "Tap to select (MM:SS)",
           formatDuration: _fmtMmSs,
+          logic: FieldLogicType.validated,
+          logicTitle:
+              "From APGAR timer. Cross-checked against field B4 (Time to spontaneous respiratory efforts) — must be ≥ that value",
           onPick: () => _pickDurationMmSs(
             context,
             initial: _parseMmSs(_totalTimeCtrl.text),
@@ -2534,19 +2817,21 @@ class _FormCResuscitationDetailsState
                 keyboardType: TextInputType.multiline),
           const SizedBox(height: 8),
         ],
-        _pillRadio("61. Blender Unit ID * (auto, from Enrollment ID)",
+        _pillRadio("61. Blender Unit ID *",
             ["A", "B", "C", "D"],
             _blenderLetter,
             (v) => setState(() => _blenderLetter = v), c,
             showError: _submitted && _blenderLetter == null,
-            enabled: false),
+            enabled: false,
+            logic: FieldLogicType.auto,
+            logicTitle: "Auto from Enrollment ID"),
       ],
       c,
     );
   }
 }
 
-/// Apgar score: digits only, values 1–10 (allows "01"–"09"; blocks 0 / >10).
+/// Apgar score: digits only, values 0–10 (allows "01"–"09"; blocks >10).
 class _ApgarOneToTenFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(
@@ -2557,7 +2842,7 @@ class _ApgarOneToTenFormatter extends TextInputFormatter {
     if (t.isEmpty) return newValue;
     if (!RegExp(r'^\d{1,2}$').hasMatch(t)) return oldValue;
     final n = int.tryParse(t);
-    if (n == null || n < 1 || n > 10) return oldValue;
+    if (n == null || n < 0 || n > 10) return oldValue;
     return newValue;
   }
 }

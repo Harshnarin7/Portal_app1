@@ -231,7 +231,9 @@ class ApiClient {
       }).where((s) => s.isNotEmpty).join('; ');
     }
     if (d is Map) {
-      return (d['msg'] ?? d['message'] ?? d).toString();
+      final m = d['message'] ?? d['msg'] ?? d['detail'];
+      if (m != null) return m.toString();
+      return d.toString();
     }
     return d.toString();
   }

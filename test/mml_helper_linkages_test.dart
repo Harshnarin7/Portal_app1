@@ -196,7 +196,7 @@ void main() {
     });
   });
 
-  group('5.2.B resp_b → Helper 1 #8–#10', () {
+  group('5.2.B resp_b → Helper 2 #8–#10', () {
     test('ignores flat ph/pao2 0 when entries_json has resp_b rows', () {
       final entriesJson = {
         'resp_b': [
@@ -246,7 +246,7 @@ void main() {
     });
   });
 
-  group('5.2.C resp_c → Helper 1 #13–#15', () {
+  group('5.2.C resp_c → Helper 2 #13–#15', () {
     test('ignores flat apnea_episodes 0 when entries_json has resp_c', () {
       final entriesJson = {
         'resp_c': [
@@ -302,7 +302,7 @@ void main() {
     });
   });
 
-  group('5.2.A resp_a → Helper 1 #3–#5', () {
+  group('5.2.A resp_a → Helper 2 #3–#5', () {
     test('daily union and maxima across four readings', () {
       final entriesJson = {
         'resp_a': [
