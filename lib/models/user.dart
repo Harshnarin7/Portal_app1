@@ -13,25 +13,45 @@ enum UserRole {
   monitor;
 
   static UserRole fromString(String s) {
-    switch (s.toUpperCase()) {
-      case 'ADMIN':     return UserRole.admin;
-      case 'PI':        return UserRole.pi;
-      case 'SCIENTIST': return UserRole.scientist;
-      case 'NURSE':     return UserRole.nurse;
-      case 'DEO':       return UserRole.deo;
-      case 'MONITOR':   return UserRole.monitor;
-      default:          return UserRole.nurse;
+    switch (s.toUpperCase().replaceAll('-', '_')) {
+      case 'ADMIN':
+      case 'SUPERADMIN':
+      case 'SUPER_ADMIN':
+        return UserRole.admin;
+      case 'PI':
+      case 'SITE_PI':
+        return UserRole.pi;
+      case 'SCIENTIST':
+      case 'PROJECT_SCIENTIST':
+      case 'GLOBAL_SCIENTIST':
+      case 'SITE_SCIENTIST':
+        return UserRole.scientist;
+      case 'NURSE':
+        return UserRole.nurse;
+      case 'DEO':
+        return UserRole.deo;
+      case 'MONITOR':
+      case 'PII_OFFICER':
+        return UserRole.monitor;
+      default:
+        return UserRole.nurse;
     }
   }
 
   String get displayName {
     switch (this) {
-      case UserRole.admin:     return 'Super Admin';
-      case UserRole.pi:        return 'Principal Investigator';
-      case UserRole.scientist: return 'Project Scientist';
-      case UserRole.nurse:     return 'Research Nurse';
-      case UserRole.deo:       return 'Data Entry Operator';
-      case UserRole.monitor:   return 'Monitor';
+      case UserRole.admin:
+        return 'Super Admin';
+      case UserRole.pi:
+        return 'Principal Investigator';
+      case UserRole.scientist:
+        return 'Project Scientist';
+      case UserRole.nurse:
+        return 'Research Nurse';
+      case UserRole.deo:
+        return 'Data Entry Operator';
+      case UserRole.monitor:
+        return 'Monitor';
     }
   }
 
@@ -43,8 +63,7 @@ enum UserRole {
       this == UserRole.nurse || this == UserRole.admin;
 
   /// Whether this role can approve / lock forms.
-  bool get canApprove =>
-      this == UserRole.pi || this == UserRole.admin;
+  bool get canApprove => this == UserRole.pi || this == UserRole.admin;
 
   /// Whether this role has read-only access.
   bool get isReadOnly => this == UserRole.monitor;
@@ -77,49 +96,46 @@ class UserProfile {
 
   factory UserProfile.fromJson(Map<String, dynamic> json) {
     return UserProfile(
-      id:                  json['id'] as String,
-      username:            json['username'] as String,
-      email:               json['email'] as String,
-      fullName:            json['full_name'] as String,
-      mobile:              json['mobile'] as String?,
-      role:                UserRole.fromString(json['role'] as String),
-      siteId:              json['site_id'] as String?,
-      siteName:            json['site_name'] as String?,
-      mustChangePassword:  json['must_change_password'] as bool? ?? false,
-      lastLoginAt:         json['last_login_at'] != null
-                             ? DateTime.tryParse(json['last_login_at'] as String)
-                             : null,
+      id: json['id'] as String,
+      username: json['username'] as String,
+      email: json['email'] as String,
+      fullName: json['full_name'] as String,
+      mobile: json['mobile'] as String?,
+      role: UserRole.fromString(json['role'] as String),
+      siteId: json['site_id'] as String?,
+      siteName: json['site_name'] as String?,
+      mustChangePassword: json['must_change_password'] as bool? ?? false,
+      lastLoginAt: json['last_login_at'] != null
+          ? DateTime.tryParse(json['last_login_at'] as String)
+          : null,
     );
   }
 
   Map<String, dynamic> toJson() => {
-    'id':                   id,
-    'username':             username,
-    'email':                email,
-    'full_name':            fullName,
-    'mobile':               mobile,
-    'role':                 role.name.toUpperCase(),
-    'site_id':              siteId,
-    'site_name':            siteName,
+    'id': id,
+    'username': username,
+    'email': email,
+    'full_name': fullName,
+    'mobile': mobile,
+    'role': role.name.toUpperCase(),
+    'site_id': siteId,
+    'site_name': siteName,
     'must_change_password': mustChangePassword,
-    'last_login_at':        lastLoginAt?.toIso8601String(),
+    'last_login_at': lastLoginAt?.toIso8601String(),
   };
 
-  UserProfile copyWith({
-    bool? mustChangePassword,
-    String? siteName,
-  }) {
+  UserProfile copyWith({bool? mustChangePassword, String? siteName}) {
     return UserProfile(
-      id:                 id,
-      username:           username,
-      email:              email,
-      fullName:           fullName,
-      mobile:             mobile,
-      role:               role,
-      siteId:             siteId,
-      siteName:           siteName ?? this.siteName,
+      id: id,
+      username: username,
+      email: email,
+      fullName: fullName,
+      mobile: mobile,
+      role: role,
+      siteId: siteId,
+      siteName: siteName ?? this.siteName,
       mustChangePassword: mustChangePassword ?? this.mustChangePassword,
-      lastLoginAt:        lastLoginAt,
+      lastLoginAt: lastLoginAt,
     );
   }
 }

@@ -1,6 +1,23 @@
 /// Mobile day strip shows only recent NICU days (not Day 1 → today).
 const kMobileDayStripWindow = 7;
 
+/// Day-chip status. Backend often stores `draft` until Submit even at 100%;
+/// the strip must show `complete` (not orange partial) once every field is
+/// answered.
+String helperDayDisplayStatus(String? submissionStatus, int? completionPct) {
+  final st = (submissionStatus ?? '').trim().toLowerCase();
+  final pct = completionPct ?? 0;
+  if (st == 'submitted') return 'submitted';
+  if (pct >= 100 || st == 'complete') return 'complete';
+  if (st == 'late') return 'late';
+  if (st == 'draft' || st == 'partial') return 'draft';
+  if (pct > 0) return 'draft';
+  return st.isEmpty ? 'empty' : st;
+}
+
+String helperDaySaveStatus(int completionPct) =>
+    completionPct >= 100 ? 'complete' : 'draft';
+
 int helperDefaultStripStart(int todayNicuDay, {int window = kMobileDayStripWindow}) {
   if (todayNicuDay < 1) return 1;
   final start = todayNicuDay - window + 1;

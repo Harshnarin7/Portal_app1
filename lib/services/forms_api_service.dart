@@ -79,8 +79,11 @@ class FormsApiService {
   Future<Map<String, dynamic>?> loadBirthResuscitation(
     String enrollmentId,
   ) async {
+    final eid = enrollmentId.trim();
+    if (eid.isEmpty) return null;
     try {
-      return await ApiClient.instance.get('/birth-resuscitation/$enrollmentId');
+      return await ApiClient.instance
+          .get('/birth-resuscitation/${Uri.encodeComponent(eid)}');
     } on ApiException catch (e) {
       if (e.statusCode == 404) return null;
       rethrow;
@@ -244,6 +247,25 @@ class FormsApiService {
       '/minimal-monitoring/$enrollmentId/on/$onDate',
       body: body,
     );
+  }
+
+  /// Most recent DMS 5.7.A Weight (kg) on or before [asOfDate].
+  /// Backend converts `growth_a[].weight_g` grams → kg. Null if none.
+  Future<double?> loadLatestWeightKg(
+    String enrollmentId,
+    String asOfDate,
+  ) async {
+    try {
+      final res = await ApiClient.instance.get(
+        '/minimal-monitoring/$enrollmentId/latest-weight-kg/$asOfDate',
+      );
+      final v = res['weight_kg'];
+      if (v is num) return v.toDouble();
+      if (v == null) return null;
+      return double.tryParse(v.toString());
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<Map<String, dynamic>?> loadFiO2(String enrollmentId) async {

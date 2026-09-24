@@ -34,7 +34,7 @@ class _BottomNavState extends State<BottomNav> {
     await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => const ScreeningForm(loadDraft: false),
+        builder: (_) => ScreeningForm(key: UniqueKey(), loadDraft: false),
       ),
     );
 

@@ -176,6 +176,7 @@ const kMmlBlockKeys = [
   'neuro_a',
   'neuro_b',
   'heme_a',
+  'growth_a',
 ];
 
 class MmlEntry {
@@ -267,10 +268,12 @@ class MmlEntry {
     );
   }
 
-  /// True when at least one clinical field is filled (ignores id/date/time).
+  /// True when at least one clinical field is filled (ignores id/date/time
+  /// and web flowsheet `slot_time`, which is not a reading).
   bool hasClinicalData() {
-    for (final v in fields.values) {
-      if (_mmlValueAnswered(v)) return true;
+    for (final e in fields.entries) {
+      if (e.key == 'slot_time') continue;
+      if (_mmlValueAnswered(e.value)) return true;
     }
     return false;
   }
@@ -300,6 +303,9 @@ class MinimalMonitoringSheet {
   String? savedAt;
   String? savedBy;
 
+  /// Web `weight_frequency_hours` — 12 or 24. Cadence for 5.7.A Weight.
+  int weightFrequencyHours = 24;
+
   /// Block key → list of entries (same shape as web emptyEntries()).
   Map<String, List<MmlEntry>> entries = {};
 
@@ -311,9 +317,11 @@ class MinimalMonitoringSheet {
       MmlEntry(fields: Map<String, dynamic>.from(fields));
 
   /// Persist only rows with clinical data (no date/time-only draft shells).
+  /// Includes unknown web-only blocks so a mobile save cannot wipe them.
   Map<String, dynamic> entriesMapForPersist() {
     final out = <String, dynamic>{};
-    for (final k in kMmlBlockKeys) {
+    final keys = <String>{...kMmlBlockKeys, ...entries.keys};
+    for (final k in keys) {
       out[k] = (entries[k] ?? [])
           .where((e) => e.hasClinicalData())
           .map((e) => e.toJson())
@@ -400,6 +408,7 @@ class MinimalMonitoringSheet {
             'prbc_volume': '',
           })
         ],
+        'growth_a': [fresh({'weight_g': ''})],
       };
 
   static List<String> _splitList(dynamic v) {
@@ -442,6 +451,19 @@ class MinimalMonitoringSheet {
           final base = emptyEntries();
           for (final k in base.keys) {
             final list = parsed[k];
+            if (list is List && list.isNotEmpty) {
+              base[k] = list
+                  .whereType<Map>()
+                  .map((e) =>
+                      MmlEntry.fromJson(Map<String, dynamic>.from(e)))
+                  .toList();
+            }
+          }
+          // Keep web-only blocks (and any future keys) so PUT cannot wipe them.
+          for (final rawKey in parsed.keys) {
+            final k = rawKey.toString();
+            if (base.containsKey(k)) continue;
+            final list = parsed[rawKey];
             if (list is List && list.isNotEmpty) {
               base[k] = list
                   .whereType<Map>()
@@ -530,6 +552,8 @@ class MinimalMonitoringSheet {
     s.submissionStatus = json['submission_status']?.toString();
     s.savedAt = json['saved_at']?.toString();
     s.savedBy = json['saved_by']?.toString();
+    final freq = _asInt(json['weight_frequency_hours']) ?? 24;
+    s.weightFrequencyHours = (freq == 12 || freq == 24) ? freq : 24;
     s.entries = hydrate(json);
     return s;
   }
@@ -627,6 +651,7 @@ class MinimalMonitoringSheet {
       'transfusion_products': _listToString(hA['transfusion_products']),
       'transfusion_count': _asInt(hA['transfusion_count']),
       'prbc_volume': _asNum(hA['prbc_volume']),
+      'weight_frequency_hours': weightFrequencyHours,
       'entries_json': jsonEncode(entriesMap),
       'submission_status': 'draft',
       'saved_at': DateTime.now().toUtc().toIso8601String(),

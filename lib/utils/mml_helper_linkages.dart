@@ -8,6 +8,37 @@ import '../models/resp_cv_neuro_day.dart';
 const mmlGlucoseLowMax = 45.0;
 const mmlGlucoseHighMin = 125.0;
 
+/// Helper 4 #15 effective weight (kg).
+/// Latest DMS 5.7.A (`growth_a.weight_g` / 1000) is used only once it has
+/// recovered to/past birth weight; otherwise stay on birth weight (grams/1000).
+/// Falls back to whichever of the two is available.
+double? effectiveFeedWeightKg({
+  double? dmsWeightKg,
+  double? birthWeightGrams,
+}) {
+  final birthKg = (birthWeightGrams != null && birthWeightGrams > 0)
+      ? birthWeightGrams / 1000.0
+      : null;
+  if (dmsWeightKg != null && birthKg != null) {
+    return dmsWeightKg >= birthKg ? dmsWeightKg : birthKg;
+  }
+  return birthKg ?? dmsWeightKg;
+}
+
+/// #15 Feed Volume ml/kg/d = cumulative ml ÷ effective kg, 1 decimal.
+double? feedVolumeMlPerKgDay(double? cumVolMl, double? effectiveWeightKg) {
+  if (cumVolMl == null || effectiveWeightKg == null || !(effectiveWeightKg > 0)) {
+    return null;
+  }
+  return ((cumVolMl / effectiveWeightKg) * 10).round() / 10.0;
+}
+
+String formatFeedVolumeMlPerKgDay(double v) {
+  final tenths = (v * 10).round();
+  if (tenths % 10 == 0) return '${tenths ~/ 10}';
+  return (tenths / 10).toString();
+}
+
 Map<String, dynamic>? parseMmlEntriesJson(dynamic raw) {
   if (raw == null) return null;
   dynamic entries = raw;

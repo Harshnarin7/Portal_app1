@@ -3,6 +3,20 @@
 
 import 'package:flutter/material.dart';
 
+/// Study inclusion window (web ScreeningForm.jsx / backend require_ga_in_inclusion_window).
+const int kGaMinTotalDays = 25 * 7;
+const int kGaMaxTotalDays = 31 * 7 + 6;
+
+const String kGaNoRecordMessage =
+    'Gestational age is outside the study window (25 weeks 0 days to 31 weeks 6 days). '
+    'A screening ID is not assigned and the record is not saved.';
+
+bool gaInInclusionWindow(int? weeks, int days) {
+  if (weeks == null) return false;
+  final total = weeks * 7 + days;
+  return total >= kGaMinTotalDays && total <= kGaMaxTotalDays;
+}
+
 String computeScreeningStatus({
   required int? gestationWeeks,
   int gestationDays = 0,

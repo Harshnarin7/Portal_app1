@@ -21,6 +21,7 @@ import 'form_b_birth_resuscitation.dart';
 import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
+import '../models/user.dart';
 import '../services/screening_api_service.dart';
 import '../services/forms_api_service.dart';
 import '../services/api_client.dart';
@@ -32,6 +33,7 @@ import '../theme/theme_notifier.dart';
 import '../widgets/theme_toggle_widget.dart';
 import '../widgets/required_asterisk.dart';
 import '../utils/clock_time_24.dart';
+import '../utils/gestation_age.dart';
 
 /// Form A eligibility window (matches web ScreeningForm.jsx).
 const int _kEligibleGestMinTotalDays = 25 * 7;
@@ -45,9 +47,20 @@ String screeningCounterKey(String site) => "screening_counter_$site";
 const String draftIndexKey = "screening_draft_keys";
 String _userRole = "admin";
 
+/// Removes an on-device Form A draft. Does not delete the server screening.
+Future<void> deleteLocalScreeningDraft(String key) async {
+  if (key.trim().isEmpty) return;
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.remove(key);
+  final keys = prefs.getStringList(draftIndexKey) ?? [];
+  keys.remove(key);
+  await prefs.setStringList(draftIndexKey, keys);
+}
+
 class ScreeningForm extends StatefulWidget {
   final bool loadDraft;
   final String? draftKey;
+
   /// Open an already-saved screening in read-only mode (View filled forms).
   final bool viewOnly;
   final String? existingScreeningId;
@@ -66,7 +79,6 @@ class ScreeningForm extends StatefulWidget {
 
 class _ScreeningFormState extends State<ScreeningForm>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
-
   final _formKey = GlobalKey<FormState>();
   final ApiService _api = ApiService();
   Set<String> _previousYesExclusions = {};
@@ -75,6 +87,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   bool _proceedToConsent = false;
   bool _consentPopupShown = false;
   String _duplicateWarn = "";
+
   /// Live (as-you-type) hospital admission validation — same as web handleChange/blur.
   String? _hospitalNoLiveError;
 
@@ -117,6 +130,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   final GlobalKey _icfSignatureBoundaryKey = GlobalKey();
   List<Offset?> _icfSignaturePoints = [];
   String? _icfSignatureBase64;
+
   /// Same field as web `consent_signature_captured_at` (ISO), shown as "Signed …".
   String? _icfSignatureCapturedAt;
 
@@ -125,6 +139,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   Timer? _draftDebounce;
   Timer? _gestationUiDebounce;
   final ScrollController _formScrollController = ScrollController();
+
   /// True while the nurse is drawing on a signature pad — parent scroll is frozen.
   bool _icfSigningActive = false;
 
@@ -132,22 +147,22 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   bool _idAssigned = false;
   bool _exportingPdf = false;
+
   /// Web `isSaved` — after a successful save, or when reopening a stored record.
   bool _isSaved = false;
+
   /// Web `isEditing` — unlocks a saved/view-only Form A.
   bool _isEditing = false;
   bool _draftListenersAttached = false;
   // Derived from _exclusionAnswers — never store a separate bool that can
   // drift (that caused "All options No" while field 23 showed Yes).
-  bool get _exclusionPresent =>
-      _exclusionAnswers.values.any((v) => v == "Yes");
+  bool get _exclusionPresent => _exclusionAnswers.values.any((v) => v == "Yes");
   bool _loadingExisting = false;
 
   bool get _canShowClinicalDecision =>
       _gestationKnownInWeeks == true || _eddKnown == true;
 
-  bool get _allExclusionsAnswered =>
-      !_exclusionAnswers.values.contains(null);
+  bool get _allExclusionsAnswered => !_exclusionAnswers.values.contains(null);
 
   bool get _allExclusionsNo =>
       _allExclusionsAnswered &&
@@ -157,7 +172,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       _gestationKnownInWeeks == false && _eddKnown == false;
 
   bool get _canSaveAndClose {
-    if (_gestationKnownInWeeks == false && _eddKnown == false) return true;
+    if (_gaEndedParticipation) return false;
     if (_assignedScreeningId == null) return false;
     if (_screeningDateTimeCtrl.text.trim().isEmpty) return false;
     if (_selectedSite.isEmpty) return false;
@@ -166,28 +181,34 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (_consentStatus == "No" && _consentRefusalReasons.isEmpty) return false;
     if (_consentStatus == "No" &&
         _consentRefusalReasons.contains("Other") &&
-        _consentRefusalOtherText.trim().isEmpty) return false;
+        _consentRefusalOtherText.trim().isEmpty)
+      return false;
 
-    if (_consentStatus == "Not approached" && _notApproachedReasons.isEmpty) return false;
+    if (_consentStatus == "Not approached" && _notApproachedReasons.isEmpty)
+      return false;
     if (_consentStatus == "Not approached" &&
         _notApproachedReasons.contains("Other") &&
-        _notApproachedOtherText.trim().isEmpty) return false;
+        _notApproachedOtherText.trim().isEmpty)
+      return false;
 
     if (_consentStatus != "Select" && _videoPisShown == "Select") return false;
 
     if (_gestationKnownInWeeks == true || _eddKnown == true) {
       if (_gestationKnownInWeeks == false &&
           _eddKnown == true &&
-          _expectedDeliveryCtrl.text.trim().isEmpty) return false;
+          _expectedDeliveryCtrl.text.trim().isEmpty)
+        return false;
       if (!_validateExclusionCompleted()) return false;
       if (!_validateExclusionSubOptions()) return false;
       if (!_exclusionPresent) {
         if (_consentStatus == "Select") return false;
         if (_relationshipToParticipant == "Select") return false;
         if (_relationshipToParticipant == "Other" &&
-            _relationshipOtherText.trim().isEmpty) return false;
+            _relationshipOtherText.trim().isEmpty)
+          return false;
         if (_consentTakenBy == "Select") return false;
-        final needsSigs = _consentStatus == "Yes" ||
+        final needsSigs =
+            _consentStatus == "Yes" ||
             _consentStatus == "No" ||
             _consentStatus == "Trial run";
         if (needsSigs && !_attestationSignaturesComplete()) return false;
@@ -219,7 +240,8 @@ class _ScreeningFormState extends State<ScreeningForm>
   bool _isFormCompletelyEmpty() {
     // Include A1/gestation + exclusions + consent so filling only GA still drafts
     // (previously GA-only work was lost on back / kill before 60s timer).
-    final hasIdentity = _motherFirstCtrl.text.trim().isNotEmpty ||
+    final hasIdentity =
+        _motherFirstCtrl.text.trim().isNotEmpty ||
         _motherSurnameCtrl.text.trim().isNotEmpty ||
         _husbandFirstCtrl.text.trim().isNotEmpty ||
         _husbandSurnameCtrl.text.trim().isNotEmpty ||
@@ -227,7 +249,8 @@ class _ScreeningFormState extends State<ScreeningForm>
         _husbandPhoneCtrl.text.trim().isNotEmpty ||
         _maternalUidCtrl.text.trim().isNotEmpty ||
         _hospitalNoCtrl.text.trim().isNotEmpty;
-    final hasGestation = _gestationKnownInWeeks != null ||
+    final hasGestation =
+        _gestationKnownInWeeks != null ||
         _gaSource != null ||
         _lmpCtrl.text.trim().isNotEmpty ||
         _expectedDeliveryCtrl.text.trim().isNotEmpty ||
@@ -235,19 +258,29 @@ class _ScreeningFormState extends State<ScreeningForm>
             _gestWeeksCtrl.text.trim() != "0") ||
         _gaAssessmentMethod != "Select";
     final hasExclusion = _exclusionAnswers.values.any((v) => v != null);
-    final hasConsent = _consentStatus != "Select" ||
+    final hasConsent =
+        _consentStatus != "Select" ||
         _proceedToConsent ||
         _consentTakenBy != "Select";
-    final hasMeta = _screeningDateTimeCtrl.text.trim().isNotEmpty ||
-        (_assignedScreeningId != null && _assignedScreeningId!.isNotEmpty);
-    return !(hasIdentity || hasGestation || hasExclusion || hasConsent || hasMeta);
+    // Do not treat the auto-filled screening datetime as "user has started
+    // the form" — that used to create LOCAL draft IDs on a blank New Screening.
+    final hasMeta =
+        _assignedScreeningId != null &&
+        _assignedScreeningId!.isNotEmpty &&
+        _serverConfirmedId;
+    return !(hasIdentity ||
+        hasGestation ||
+        hasExclusion ||
+        hasConsent ||
+        hasMeta);
   }
 
   /// Web Print is gated on `isSaved`. Enable once a real (non-local) screening
   /// ID exists — including view-only reopen of a saved record.
   bool get _formAExportEnabled {
     if (_loadingExisting || _exportingPdf) return false;
-    final id = (_assignedScreeningId ?? widget.existingScreeningId ?? "").trim();
+    final id = (_assignedScreeningId ?? widget.existingScreeningId ?? "")
+        .trim();
     if (id.isEmpty || id.contains("-LOCAL-")) return false;
     return _serverConfirmedId || widget.viewOnly || _isSaved;
   }
@@ -258,51 +291,54 @@ class _ScreeningFormState extends State<ScreeningForm>
   bool get _showEditAction => _isSaved || widget.viewOnly || _serverConfirmedId;
 
   // Controllers
-  final TextEditingController _screeningIdCtrl   = TextEditingController();
-  final TextEditingController _enrollmentIdCtrl  = TextEditingController();
-  final TextEditingController _motherFirstCtrl   = TextEditingController();
+  final TextEditingController _screeningIdCtrl = TextEditingController();
+  final TextEditingController _enrollmentIdCtrl = TextEditingController();
+  final TextEditingController _motherFirstCtrl = TextEditingController();
   final TextEditingController _motherSurnameCtrl = TextEditingController();
-  final TextEditingController _husbandFirstCtrl  = TextEditingController();
-  final TextEditingController _husbandSurnameCtrl= TextEditingController();
-  final TextEditingController _motherPhoneCtrl   = TextEditingController();
-  final TextEditingController _husbandPhoneCtrl  = TextEditingController();
-  final TextEditingController _maternalUidCtrl   = TextEditingController();
-  final TextEditingController _hospitalNoCtrl    = TextEditingController();
-  final TextEditingController _gestWeeksCtrl     = TextEditingController();
-  final TextEditingController _gestDaysCtrl      = TextEditingController();
+  final TextEditingController _husbandFirstCtrl = TextEditingController();
+  final TextEditingController _husbandSurnameCtrl = TextEditingController();
+  final TextEditingController _motherPhoneCtrl = TextEditingController();
+  final TextEditingController _husbandPhoneCtrl = TextEditingController();
+  final TextEditingController _maternalUidCtrl = TextEditingController();
+  final TextEditingController _hospitalNoCtrl = TextEditingController();
+  final TextEditingController _gestWeeksCtrl = TextEditingController();
+  final TextEditingController _gestDaysCtrl = TextEditingController();
   final TextEditingController _expectedDeliveryCtrl = TextEditingController();
-  final TextEditingController _lmpCtrl           = TextEditingController();
+  final TextEditingController _lmpCtrl = TextEditingController();
   final TextEditingController _screeningDateTimeCtrl = TextEditingController();
-  final TextEditingController _screenedByCtrl    = TextEditingController(text: "Select");
+  final TextEditingController _screenedByCtrl = TextEditingController(
+    text: "Select",
+  );
 
   final Map<String, String?> _exclusionAnswers = {
-    "INSUFFICIENT" : null,
+    "INSUFFICIENT": null,
     "RESUSCITATION": null,
-    "ANOMALY"      : null,
-    "HYDROPS"      : null,
-    "IUFD"         : null,
+    "ANOMALY": null,
+    "HYDROPS": null,
+    "IUFD": null,
   };
 
-  String _insufficientReason  = "";
+  String _insufficientReason = "";
   Set<String> _resuscitationReasons = {}; // multi-select — was a single String
-  String _resuscitationOther  = "";
-  String _anomalyDetails      = "";
-  String _hydropsType         = "";
+  String _resuscitationOther = "";
+  String _anomalyDetails = "";
+  String _hydropsType = "";
 
-  String _consentStatus              = "Select";
+  String _consentStatus = "Select";
+
   /// ISO datetime for consent — set once when consent becomes Yes/Trial run.
   String? _consentDateTimeIso;
-  String _gaAssessmentMethod         = "Select";
-  String _relationshipToParticipant  = "Select";
-  String _relationshipOtherText      = "";
+  String _gaAssessmentMethod = "Select";
+  String _relationshipToParticipant = "Select";
+  String _relationshipOtherText = "";
 
   final Map<String, String> _siteMap = {
     "PGIMER": "01",
-    "GMCH"  : "02",
-    "IOG"   : "03",
-    "AFMC"  : "04",
+    "GMCH": "02",
+    "IOG": "03",
+    "AFMC": "04",
     "GMCH-A": "05",
-    "AMC"   : "06",
+    "AMC": "06",
   };
 
   List<String> _siteScreeners = [];
@@ -418,7 +454,11 @@ class _ScreeningFormState extends State<ScreeningForm>
   String? _screeningDateValidator(String? value) {
     if (value == null || value.trim().isEmpty) return "Required";
     try {
-      final segs = value.trim().split(RegExp(r'\s+')).where((s) => s != '|').toList();
+      final segs = value
+          .trim()
+          .split(RegExp(r'\s+'))
+          .where((s) => s != '|')
+          .toList();
       final parts = splitDdMmYyyy(segs.first);
       if (parts == null) return "Invalid date format";
       final selectedDate = DateTime(
@@ -428,7 +468,8 @@ class _ScreeningFormState extends State<ScreeningForm>
       );
       final today = DateTime.now();
       final todayDate = DateTime(today.year, today.month, today.day);
-      if (selectedDate.isAfter(todayDate)) return "Screening date cannot be in the future";
+      if (selectedDate.isAfter(todayDate))
+        return "Screening date cannot be in the future";
       return null;
     } catch (_) {
       return "Invalid date format";
@@ -483,11 +524,18 @@ class _ScreeningFormState extends State<ScreeningForm>
     final existingId = widget.existingScreeningId?.trim();
     if (existingId != null && existingId.isNotEmpty) {
       await _loadExistingScreening(existingId);
+      await _overlayLocalDraftIfServerSparse(existingId);
       return;
     }
     if (widget.loadDraft && widget.draftKey != null) {
       _currentDraftKey = widget.draftKey;
       await _loadDraftIfExists();
+    }
+    if (!mounted) return;
+    // Match web BLANK_FORM: new / draft-empty screens default datetime to now
+    // so LMP/EDD GA is anchored even before the user opens the picker.
+    if (_screeningDateTimeCtrl.text.trim().isEmpty) {
+      _screeningDateTimeCtrl.text = formatDdMmYyyyPipeHHmm(DateTime.now());
     }
   }
 
@@ -510,8 +558,9 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   String _isoToDdMmYyyyHHmm(String? iso) {
     if (iso == null || iso.trim().isEmpty) return "";
-    final m = RegExp(r'^(\d{4})-(\d{2})-(\d{2})[T\s](\d{1,2}):(\d{2})')
-        .firstMatch(iso.trim());
+    final m = RegExp(
+      r'^(\d{4})-(\d{2})-(\d{2})[T\s](\d{1,2}):(\d{2})',
+    ).firstMatch(iso.trim());
     if (m != null) {
       final dt = DateTime(
         int.parse(m.group(1)!),
@@ -556,7 +605,8 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (t.isEmpty) return null;
     if (t.contains('structural') || t.contains('anomal')) return "ANOMALY";
     if (t.contains('hydrops')) return "HYDROPS";
-    if (t.contains('resuscitation') || t.contains('forego')) return "RESUSCITATION";
+    if (t.contains('resuscitation') || t.contains('forego'))
+      return "RESUSCITATION";
     if (t.contains('insufficient')) return "INSUFFICIENT";
     if (t.contains('iufd')) return "IUFD";
     return null;
@@ -583,7 +633,9 @@ class _ScreeningFormState extends State<ScreeningForm>
   Future<void> _loadExistingScreening(String screeningId) async {
     setState(() => _loadingExisting = true);
     try {
-      final clinical = await ScreeningApiService.instance.getScreening(screeningId);
+      final clinical = await ScreeningApiService.instance.getScreening(
+        screeningId,
+      );
       final pii = await ScreeningApiService.instance.getPii(screeningId);
       if (!mounted) return;
       if (clinical == null) {
@@ -627,35 +679,44 @@ class _ScreeningFormState extends State<ScreeningForm>
         _idAssigned = true;
         _serverConfirmedId = true;
         _selectedSite = (clinical['site_name'] ?? _selectedSite).toString();
-        final scrDt = _isoToDdMmYyyyHHmm(clinical['screening_datetime']?.toString());
+        final scrDt = _isoToDdMmYyyyHHmm(
+          clinical['screening_datetime']?.toString(),
+        );
         _screeningDateTimeCtrl.text = _normalizeScreeningDisplay24(scrDt);
         _screenedByCtrl.text = (clinical['screened_by'] ?? '').toString();
         _motherFirstCtrl.text = _stripDraftPii(
-            pii?['mother_first_name'] ?? clinical['mother_first_name']);
+          pii?['mother_first_name'] ?? clinical['mother_first_name'],
+        );
         _motherSurnameCtrl.text = _stripDraftPii(
-            pii?['mother_surname'] ?? clinical['mother_surname']);
+          pii?['mother_surname'] ?? clinical['mother_surname'],
+        );
         _husbandFirstCtrl.text = _stripDraftPii(
-            pii?['husband_first_name'] ?? clinical['husband_first_name']);
+          pii?['husband_first_name'] ?? clinical['husband_first_name'],
+        );
         _husbandSurnameCtrl.text = _stripDraftPii(
-            pii?['husband_surname'] ?? clinical['husband_surname']);
+          pii?['husband_surname'] ?? clinical['husband_surname'],
+        );
         _motherPhoneCtrl.text =
-            (pii?['mother_contact'] ?? clinical['mother_contact'] ?? '').toString();
+            (pii?['mother_contact'] ?? clinical['mother_contact'] ?? '')
+                .toString();
         _husbandPhoneCtrl.text =
-            (pii?['husband_contact'] ?? clinical['husband_contact'] ?? '').toString();
+            (pii?['husband_contact'] ?? clinical['husband_contact'] ?? '')
+                .toString();
         _maternalUidCtrl.text =
             (pii?['maternal_uid'] ?? clinical['maternal_uid'] ?? '').toString();
-        _hospitalNoCtrl.text = (pii?['hospital_admission_number'] ??
-                clinical['hospital_admission_number'] ??
-                '')
-            .toString();
+        _hospitalNoCtrl.text =
+            (pii?['hospital_admission_number'] ??
+                    clinical['hospital_admission_number'] ??
+                    '')
+                .toString();
         _gestationKnownInWeeks = gestKnown == "Yes"
             ? true
             : gestKnown == "No"
-                ? false
-                : ((clinical['gestation_method']?.toString().trim().isNotEmpty ==
-                        true)
-                    ? true
-                    : ((clinical['lmp_date'] != null ||
+            ? false
+            : ((clinical['gestation_method']?.toString().trim().isNotEmpty ==
+                      true)
+                  ? true
+                  : ((clinical['lmp_date'] != null ||
                             clinical['expected_delivery_date'] != null)
                         ? false
                         : null));
@@ -669,10 +730,12 @@ class _ScreeningFormState extends State<ScreeningForm>
         }
         _gestWeeksCtrl.text = clinical['gestation_weeks']?.toString() ?? "";
         _gestDaysCtrl.text = clinical['gestation_days']?.toString() ?? "0";
-        _gaAssessmentMethod =
-            _unmapGestationMethod(clinical['gestation_method']?.toString());
-        _expectedDeliveryCtrl.text =
-            _isoToDdMmYyyy(clinical['expected_delivery_date']?.toString());
+        _gaAssessmentMethod = _unmapGestationMethod(
+          clinical['gestation_method']?.toString(),
+        );
+        _expectedDeliveryCtrl.text = _isoToDdMmYyyy(
+          clinical['expected_delivery_date']?.toString(),
+        );
         _lmpCtrl.text = _isoToDdMmYyyy(clinical['lmp_date']?.toString());
         _exclusionAnswers
           ..clear()
@@ -682,13 +745,19 @@ class _ScreeningFormState extends State<ScreeningForm>
             ? (clinical['reason_for_insufficient_time'] ?? '').toString()
             : "";
         final resus = yesKeys.contains("RESUSCITATION")
-            ? (clinical['decision_forego_resuscitation_reason'] ?? '').toString()
+            ? (clinical['decision_forego_resuscitation_reason'] ?? '')
+                  .toString()
             : "";
         _resuscitationReasons = resus.isEmpty
             ? {}
-            : resus.split(RegExp(r'[,;]')).map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+            : resus
+                  .split(RegExp(r'[,;]'))
+                  .map((e) => e.trim())
+                  .where((e) => e.isNotEmpty)
+                  .toSet();
         _resuscitationOther = yesKeys.contains("RESUSCITATION")
-            ? (clinical['decision_forego_resuscitation_reason_other'] ?? '').toString()
+            ? (clinical['decision_forego_resuscitation_reason_other'] ?? '')
+                  .toString()
             : "";
         _anomalyDetails = yesKeys.contains("ANOMALY")
             ? (clinical['major_structural_anomalies_if_yes'] ?? '').toString()
@@ -699,24 +768,35 @@ class _ScreeningFormState extends State<ScreeningForm>
         _hydropsType = hydrops;
         final consent = (clinical['consent_given'] ?? '').toString();
         _consentStatus = consent.isNotEmpty ? consent : "Select";
-        final consentDt = (clinical['consent_datetime'] ?? '').toString().trim();
+        final consentDt = (clinical['consent_datetime'] ?? '')
+            .toString()
+            .trim();
         _consentDateTimeIso = consentDt.isNotEmpty ? consentDt : null;
         final rel = (clinical['relationship_to_participant'] ?? '').toString();
         _relationshipToParticipant = rel.isNotEmpty ? rel : "Select";
-        _relationshipOtherText =
-            (clinical['relationship_other'] ?? '').toString();
+        _relationshipOtherText = (clinical['relationship_other'] ?? '')
+            .toString();
         final takenBy = (clinical['consent_taken_by'] ?? '').toString();
         _consentTakenBy = takenBy.isNotEmpty ? takenBy : "Select";
-        final refuse = (clinical['reason_for_consent_refusal'] ?? '').toString();
+        final refuse = (clinical['reason_for_consent_refusal'] ?? '')
+            .toString();
         _consentRefusalReasons = refuse.isEmpty
             ? {}
-            : refuse.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+            : refuse
+                  .split(',')
+                  .map((e) => e.trim())
+                  .where((e) => e.isNotEmpty)
+                  .toSet();
         _consentRefusalOtherText =
             (clinical['reason_for_consent_refusal_other'] ?? '').toString();
         final notApp = (clinical['reason_not_approached'] ?? '').toString();
         _notApproachedReasons = notApp.isEmpty
             ? {}
-            : notApp.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+            : notApp
+                  .split(',')
+                  .map((e) => e.trim())
+                  .where((e) => e.isNotEmpty)
+                  .toSet();
         _notApproachedOtherText =
             (clinical['reason_not_approached_other'] ?? '').toString();
         final video = (clinical['video_pis_shown'] ?? '').toString();
@@ -724,22 +804,25 @@ class _ScreeningFormState extends State<ScreeningForm>
         // Autofill: if this patient's record already has a signature, load it
         // so the nurse sees it immediately instead of a blank pad.
         final sigImg = (clinical['consent_signature_image'] ?? '').toString();
-        final sigLeg = (clinical['consent_obtained_by_signature'] ?? '').toString();
+        final sigLeg = (clinical['consent_obtained_by_signature'] ?? '')
+            .toString();
         var sig = sigImg.isNotEmpty ? sigImg : sigLeg;
         if (sig.startsWith('data:image') && sig.contains(',')) {
           sig = sig.split(',').last;
         }
         _icfSignatureBase64 = sig.isNotEmpty ? sig : null;
         _icfSignaturePoints = [];
-        final capturedRaw =
-            (clinical['consent_signature_captured_at'] ?? '').toString().trim();
+        final capturedRaw = (clinical['consent_signature_captured_at'] ?? '')
+            .toString()
+            .trim();
         _icfSignatureCapturedAt = capturedRaw.isNotEmpty
             ? capturedRaw
             : (sig.isNotEmpty && consentDt.isNotEmpty ? consentDt : null);
         final explicitSaved = clinical['explicitly_saved'] == true;
         _isSaved = widget.viewOnly || explicitSaved;
         _isEditing = !_isSaved;
-        _proceedToConsent = (exclusionAnswers.values.every((v) => v == "No") &&
+        _proceedToConsent =
+            (exclusionAnswers.values.every((v) => v == "No") &&
                 !exclusionAnswers.values.contains(null)) ||
             _consentStatus != "Select";
         _previousYesExclusions = yesKeys;
@@ -749,9 +832,9 @@ class _ScreeningFormState extends State<ScreeningForm>
     } catch (e) {
       if (!mounted) return;
       setState(() => _loadingExisting = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load screening: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load screening: $e')));
     }
   }
 
@@ -759,10 +842,20 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (_draftListenersAttached) return;
     _draftListenersAttached = true;
     final ctrls = [
-      _motherFirstCtrl, _motherSurnameCtrl, _husbandFirstCtrl, _husbandSurnameCtrl,
-      _motherPhoneCtrl, _husbandPhoneCtrl, _maternalUidCtrl, _hospitalNoCtrl,
-      _gestWeeksCtrl, _gestDaysCtrl, _lmpCtrl, _expectedDeliveryCtrl,
-      _screeningDateTimeCtrl, _screenedByCtrl,
+      _motherFirstCtrl,
+      _motherSurnameCtrl,
+      _husbandFirstCtrl,
+      _husbandSurnameCtrl,
+      _motherPhoneCtrl,
+      _husbandPhoneCtrl,
+      _maternalUidCtrl,
+      _hospitalNoCtrl,
+      _gestWeeksCtrl,
+      _gestDaysCtrl,
+      _lmpCtrl,
+      _expectedDeliveryCtrl,
+      _screeningDateTimeCtrl,
+      _screenedByCtrl,
     ];
     for (final c in ctrls) {
       c.addListener(_scheduleDraftSave);
@@ -837,9 +930,15 @@ class _ScreeningFormState extends State<ScreeningForm>
     final userSite = user?.siteName?.trim() ?? "";
 
     String? lockedSite;
-    if (_userRole == "site" && prefsSite.isNotEmpty) {
+    final isAdmin = user?.role == UserRole.admin;
+    final scientistUnlocked =
+        user?.role == UserRole.scientist && userSite.isEmpty;
+    if (_userRole == "site" && prefsSite.isNotEmpty && !isAdmin) {
       lockedSite = prefsSite;
-    } else if (user != null && !user.role.isGlobal && userSite.isNotEmpty) {
+    } else if (user != null &&
+        !isAdmin &&
+        !scientistUnlocked &&
+        userSite.isNotEmpty) {
       lockedSite = userSite;
     }
 
@@ -848,8 +947,11 @@ class _ScreeningFormState extends State<ScreeningForm>
         _siteLocked = lockedSite != null;
         if (lockedSite != null) {
           _selectedSite = lockedSite;
-          // Never wipe an in-progress / draft screening ID on reopen.
-          if (!widget.loadDraft) {
+          // Never wipe an in-progress / existing screening ID on reopen.
+          if (!widget.loadDraft &&
+              (widget.existingScreeningId ?? '').trim().isEmpty &&
+              !_serverConfirmedId &&
+              !_idAssigned) {
             _screeningIdCtrl.clear();
             _idAssigned = false;
           }
@@ -887,7 +989,10 @@ class _ScreeningFormState extends State<ScreeningForm>
       final list = await ApiClient.instance.getList(
         '/sites/${Uri.encodeComponent(_selectedSite)}/screeners',
       );
-      final names = list.map((e) => e.toString()).where((s) => s.trim().isNotEmpty).toList();
+      final names = list
+          .map((e) => e.toString())
+          .where((s) => s.trim().isNotEmpty)
+          .toList();
       if (!mounted) return;
       setState(() => _siteScreeners = names);
       // Match web: autofill screened_by only when site-locked AND login name is on the roster.
@@ -899,7 +1004,10 @@ class _ScreeningFormState extends State<ScreeningForm>
       if (cur.isNotEmpty && cur != "Select") return;
       String? match;
       for (final n in names) {
-        if (n.trim().toLowerCase() == target) { match = n; break; }
+        if (n.trim().toLowerCase() == target) {
+          match = n;
+          break;
+        }
       }
       if (match != null) {
         setState(() => _screenedByCtrl.text = match!);
@@ -914,11 +1022,14 @@ class _ScreeningFormState extends State<ScreeningForm>
   Future<void> _checkDuplicateMotherName() async {
     final name = _motherFirstCtrl.text.trim();
     if (name.isEmpty || _selectedSite.isEmpty) {
-      if (_duplicateWarn.isNotEmpty && mounted) setState(() => _duplicateWarn = "");
+      if (_duplicateWarn.isNotEmpty && mounted)
+        setState(() => _duplicateWarn = "");
       return;
     }
     try {
-      final patients = await ScreeningApiService.instance.getPatients(limit: 200);
+      final patients = await ScreeningApiService.instance.getPatients(
+        limit: 200,
+      );
       final currentId = _assignedScreeningId;
       final hits = <String>[];
       for (final p in patients) {
@@ -926,7 +1037,8 @@ class _ScreeningFormState extends State<ScreeningForm>
         if (currentId != null && sid == currentId) continue;
         // PII may be absent from list payload — batch not needed for warning; web uses dedicated search.
         final mf = (p['mother_first_name'] ?? '').toString().trim();
-        if (mf.toLowerCase() == name.toLowerCase()) hits.add(sid.isEmpty ? '?' : sid);
+        if (mf.toLowerCase() == name.toLowerCase())
+          hits.add(sid.isEmpty ? '?' : sid);
       }
       // Also check via PII batch for recent patients when list is de-identified
       if (hits.isEmpty) {
@@ -961,40 +1073,35 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   // ── GESTATION HELPERS ──────────────────────────────────────────────────────
 
-  DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
-
-  /// Calendar-day difference (b − a), matching web `calendarDaysBetween`.
-  int _calendarDaysBetween(DateTime a, DateTime b) {
-    final a0 = _dateOnly(a);
-    final b0 = _dateOnly(b);
-    return b0.difference(a0).inDays;
+  DateTime _gaAsOfDate() {
+    final iso = _ddmmyyyyHHmmToIso(_screeningDateTimeCtrl.text);
+    if (iso != null) {
+      final parsed = DateTime.tryParse(iso);
+      if (parsed != null) return parsed;
+    }
+    return DateTime.now();
   }
 
-  /// Naegele: EDD = LMP + 280 days.
-  DateTime _eddFromLmp(DateTime lmp) => _dateOnly(lmp).add(const Duration(days: 280));
+  /// Naegele: EDD = LMP + 9 calendar months + 7 days.
+  DateTime _eddFromLmp(DateTime lmp) => eddFromLmp(lmp);
 
-  /// GA from LMP (preferred when LMP is known) — completed weeks/days since LMP.
+  /// GA from LMP — completed weeks/days as of screening_datetime (not now).
   void _setGestationFromLmp(DateTime lmp) {
-    final gestDays = _calendarDaysBetween(lmp, DateTime.now());
-    final safe = gestDays < 0 ? 0 : gestDays;
-    _gestWeeksCtrl.text = (safe ~/ 7).toString();
-    _gestDaysCtrl.text = (safe % 7).toString();
+    final ga = gestAgeFromLmp(lmp, _gaAsOfDate());
+    if (ga == null) return;
+    _gestWeeksCtrl.text = ga.weeks.toString();
+    _gestDaysCtrl.text = ga.days.toString();
   }
 
-  /// Match web `gestAgeFromEdd` — GA = 280 − (EDD − today).
+  /// Match web `gestAgeFromEdd` — inverse Naegele, then LMP arithmetic.
   void _setGestationFromEdd(DateTime edd) {
-    final daysUntilEdd = _calendarDaysBetween(DateTime.now(), edd);
-    var gestDays = 280 - daysUntilEdd;
-    if (gestDays < 0) gestDays = 0;
-    _gestWeeksCtrl.text = (gestDays ~/ 7).toString();
-    _gestDaysCtrl.text = (gestDays % 7).toString();
+    final ga = gestAgeFromEdd(edd, _gaAsOfDate());
+    if (ga == null) return;
+    _gestWeeksCtrl.text = ga.weeks.toString();
+    _gestDaysCtrl.text = ga.days.toString();
   }
 
-  void _recalculateGestationFromEDD(DateTime edd) {
-    setState(() => _setGestationFromEdd(edd));
-  }
-
-  /// Direct GA entry (Q1 = Yes): keep weeks/days within 25+0–31+6 only.
+  /// Direct GA entry (Q1 = Yes): 25 weeks 0 days – 31 weeks 6 days.
   void _normalizeDirectGestationEntry() {
     if (_gestationKnownInWeeks != true) return;
     final weeksStr = _gestWeeksCtrl.text.trim();
@@ -1005,18 +1112,14 @@ class _ScreeningFormState extends State<ScreeningForm>
 
     var days = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
 
-    // Allow typing "2" on the way to "25"; clamp once two digits or already ≥25.
     if (weeksStr.length >= 2 || weeks >= _kEligibleGestMinWeeks) {
       if (weeks < _kEligibleGestMinWeeks) weeks = _kEligibleGestMinWeeks;
       if (weeks > _kEligibleGestMaxWeeks) weeks = _kEligibleGestMaxWeeks;
-    } else {
-      return;
     }
-
     if (days < 0) days = 0;
     if (days > 6) days = 6;
 
-    var t = weeks * 7 + days;
+    final t = weeks * 7 + days;
     if (t < _kEligibleGestMinTotalDays) {
       weeks = _kEligibleGestMinWeeks;
       days = 0;
@@ -1024,16 +1127,19 @@ class _ScreeningFormState extends State<ScreeningForm>
       weeks = _kEligibleGestMaxWeeks;
       days = 6;
     }
-
-    _gestWeeksCtrl.text = weeks.toString();
-    _gestDaysCtrl.text = days.toString();
+    if (_gestWeeksCtrl.text != weeks.toString()) {
+      _gestWeeksCtrl.text = weeks.toString();
+    }
+    if (_gestDaysCtrl.text != days.toString()) {
+      _gestDaysCtrl.text = days.toString();
+    }
   }
 
   // Eligibility range matches web ScreeningForm.jsx getEligibilityStatus():
   // eligible = 25w0d .. 31w6d inclusive (t < 25*7 => low, t > 31*7+6 => high)
   bool _isGestationOutOfRange() {
     final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
-    final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
+    final days = int.tryParse(_gestDaysCtrl.text) ?? 0;
     final t = weeks * 7 + days;
     if (_gestWeeksCtrl.text.trim().isEmpty) return false;
     if (t < _kEligibleGestMinTotalDays) return true;
@@ -1048,7 +1154,7 @@ class _ScreeningFormState extends State<ScreeningForm>
       return _gestationKnownInWeeks == true;
     }
     final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
-    final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
+    final days = int.tryParse(_gestDaysCtrl.text) ?? 0;
     final t = weeks * 7 + days;
     if (t < _kEligibleGestMinTotalDays) return false;
     if (t > _kEligibleGestMaxTotalDays) return false;
@@ -1058,10 +1164,10 @@ class _ScreeningFormState extends State<ScreeningForm>
   void _resetGestationSection() {
     setState(() {
       _gestationKnownInWeeks = null;
-      _eddKnown              = null;
-      _gaSource              = null;
-      _gestWeeksCtrl.text    = "";
-      _gestDaysCtrl.text     = "0";
+      _eddKnown = null;
+      _gaSource = null;
+      _gestWeeksCtrl.text = "";
+      _gestDaysCtrl.text = "0";
       _expectedDeliveryCtrl.clear();
       _lmpCtrl.clear();
       _gaAssessmentMethod = "Select";
@@ -1072,13 +1178,13 @@ class _ScreeningFormState extends State<ScreeningForm>
     setState(() {
       _exclusionAnswers.updateAll((key, value) => null);
       _previousYesExclusions.clear();
-      _proceedToConsent   = false;
-      _consentPopupShown  = false;
-      _insufficientReason  = "";
+      _proceedToConsent = false;
+      _consentPopupShown = false;
+      _insufficientReason = "";
       _resuscitationReasons = {};
-      _resuscitationOther  = "";
-      _anomalyDetails      = "";
-      _hydropsType         = "";
+      _resuscitationOther = "";
+      _anomalyDetails = "";
+      _hydropsType = "";
     });
   }
 
@@ -1090,11 +1196,16 @@ class _ScreeningFormState extends State<ScreeningForm>
         .where((e) => e.value == "Yes")
         .map((e) => e.key)
         .toSet();
-    final List<String> currentYesLabels = currentYesKeys.map(_exclusionLabel).toList();
+    final List<String> currentYesLabels = currentYesKeys
+        .map(_exclusionLabel)
+        .toList();
 
     // _exclusionPresent is derived from answers — no separate assignment.
 
-    final bool yesSetChanged = !setEquals(currentYesKeys, _previousYesExclusions);
+    final bool yesSetChanged = !setEquals(
+      currentYesKeys,
+      _previousYesExclusions,
+    );
 
     if (allAnswered && currentYesKeys.isNotEmpty && yesSetChanged) {
       _previousYesExclusions = Set.from(currentYesKeys);
@@ -1105,30 +1216,57 @@ class _ScreeningFormState extends State<ScreeningForm>
           barrierDismissible: false,
           builder: (_) => AlertDialog(
             backgroundColor: c.surface,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: Row(children: [
-              Icon(Icons.block_rounded, color: c.danger, size: 20),
-              const SizedBox(width: 8),
-              Text("Exclusion Criteria Present",
-                  style: TextStyle(color: c.danger, fontWeight: FontWeight.w800, fontSize: 15)),
-            ]),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            title: Row(
+              children: [
+                Icon(Icons.block_rounded, color: c.danger, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  "Exclusion Criteria Present",
+                  style: TextStyle(
+                    color: c.danger,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15,
+                  ),
+                ),
+              ],
+            ),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text("The following exclusion criteria are present:",
-                    style: TextStyle(color: c.textSecondary, fontSize: 13)),
+                Text(
+                  "The following exclusion criteria are present:",
+                  style: TextStyle(color: c.textSecondary, fontSize: 13),
+                ),
                 const SizedBox(height: 10),
                 ...currentYesLabels.map(
                   (e) => Padding(
                     padding: const EdgeInsets.only(bottom: 6),
-                    child: Row(children: [
-                      Container(width: 6, height: 6, decoration: BoxDecoration(
-                          shape: BoxShape.circle, color: c.danger)),
-                      const SizedBox(width: 8),
-                      Expanded(child: Text(e,
-                          style: TextStyle(color: c.textPrimary, fontSize: 13))),
-                    ]),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: c.danger,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            e,
+                            style: TextStyle(
+                              color: c.textPrimary,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -1136,8 +1274,12 @@ class _ScreeningFormState extends State<ScreeningForm>
             actions: [
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
-                    backgroundColor: c.danger, foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                  backgroundColor: c.danger,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
                 onPressed: () => Navigator.pop(context),
                 child: const Text("OK"),
               ),
@@ -1156,23 +1298,30 @@ class _ScreeningFormState extends State<ScreeningForm>
 
     if (currentYesKeys.isEmpty) _previousYesExclusions.clear();
     if (!_allExclusionsNo) {
-      _proceedToConsent  = false;
+      _proceedToConsent = false;
       _consentPopupShown = false;
     }
   }
 
   String _exclusionLabel(String key) {
     switch (key) {
-      case "ANOMALY"      : return "Major structural anomalies";
-      case "HYDROPS"      : return "Fetal Hydrops";
-      case "RESUSCITATION": return "Decision to forego resuscitation";
-      case "INSUFFICIENT" : return "Insufficient time for antenatal consent";
-      case "IUFD"         : return "Intrauterine Fetal Death (IUFD)";
-      default             : return key;
+      case "ANOMALY":
+        return "Major structural anomalies";
+      case "HYDROPS":
+        return "Fetal Hydrops";
+      case "RESUSCITATION":
+        return "Decision to forego resuscitation";
+      case "INSUFFICIENT":
+        return "Insufficient time for antenatal consent";
+      case "IUFD":
+        return "Intrauterine Fetal Death (IUFD)";
+      default:
+        return key;
     }
   }
 
-  bool _validateExclusionCompleted() => !_exclusionAnswers.values.contains(null);
+  bool _validateExclusionCompleted() =>
+      !_exclusionAnswers.values.contains(null);
 
   bool _validateExclusionSubOptions() {
     for (final entry in _exclusionAnswers.entries) {
@@ -1183,7 +1332,9 @@ class _ScreeningFormState extends State<ScreeningForm>
           break;
         case "RESUSCITATION":
           if (_resuscitationReasons.isEmpty) return false;
-          if (_resuscitationReasons.contains("Other") && _resuscitationOther.trim().isEmpty) return false;
+          if (_resuscitationReasons.contains("Other") &&
+              _resuscitationOther.trim().isEmpty)
+            return false;
           break;
         case "ANOMALY":
           if (_anomalyDetails.trim().isEmpty) return false;
@@ -1204,10 +1355,20 @@ class _ScreeningFormState extends State<ScreeningForm>
   // assigns the ID. We do the same here so the ID the nurse sees matches the
   // one the web portal will show for the same record.
 
-  bool _serverConfirmedId = false; // true once the backend has assigned a real ID
+  bool _serverConfirmedId =
+      false; // true once the backend has assigned a real ID
   String? _enrollmentId;
 
+  /// Offline placeholder (`01-LOCAL-0001`) or empty — never PUT this ID.
+  bool _isLocalPlaceholderScreeningId(String? sid) {
+    final s = (sid ?? '').trim();
+    if (s.isEmpty) return true;
+    return s.toUpperCase().contains('LOCAL');
+  }
+
   Future<void> _assignScreeningIdIfNeeded() async {
+    if (_gaEndedParticipation) return;
+    if (!_gaInInclusionWindowNow()) return;
     if (_idAssigned) return;
     if (_isFormCompletelyEmpty()) return;
     if (_selectedSite.isEmpty || !_siteMap.containsKey(_selectedSite)) return;
@@ -1220,11 +1381,11 @@ class _ScreeningFormState extends State<ScreeningForm>
         final resp = await _syncToBackend(isDraft: true);
         final sid = resp?['screening_id']?.toString();
         if (sid != null && sid.isNotEmpty) {
-          _assignedScreeningId  = sid;
+          _assignedScreeningId = sid;
           _screeningIdCtrl.text = sid;
-          _enrollmentId          = resp?['enrollment_id']?.toString();
-          _serverConfirmedId     = true;
-          _idAssigned            = true;
+          _enrollmentId = resp?['enrollment_id']?.toString();
+          _serverConfirmedId = true;
+          _idAssigned = true;
           if (mounted) setState(() {});
           return;
         }
@@ -1234,9 +1395,9 @@ class _ScreeningFormState extends State<ScreeningForm>
     }
 
     final prefs = await SharedPreferences.getInstance();
-    final key   = screeningCounterKey(_selectedSite);
-    final last  = prefs.getInt(key) ?? 0;
-    final next  = last + 1;
+    final key = screeningCounterKey(_selectedSite);
+    final last = prefs.getInt(key) ?? 0;
+    final next = last + 1;
     _assignedScreeningId = "$siteCode-LOCAL-${next.toString().padLeft(4, '0')}";
     _screeningIdCtrl.text = _assignedScreeningId!;
     await prefs.setInt(key, next);
@@ -1266,11 +1427,16 @@ class _ScreeningFormState extends State<ScreeningForm>
   /// exact values the webform/backend use.
   String? _mapGestationMethod(String v) {
     switch (v) {
-      case "LMP":               return "LMP";
-      case "Early USG (<24w)":  return "Early USG";
-      case "Fundal Height":     return "Fundal Height";
-      case "Method not known":  return "Unknown";
-      default:                  return null; // "Select"
+      case "LMP":
+        return "LMP";
+      case "Early USG (<24w)":
+        return "Early USG";
+      case "Fundal Height":
+        return "Fundal Height";
+      case "Method not known":
+        return "Unknown";
+      default:
+        return null; // "Select"
     }
   }
 
@@ -1278,19 +1444,26 @@ class _ScreeningFormState extends State<ScreeningForm>
   /// webform stores in `exclusion_reasons` (comma-separated).
   String _exclusionLabelForSync(String key) {
     switch (key) {
-      case "ANOMALY":        return "Structural anomaly";
-      case "HYDROPS":        return "Fetal hydrops";
-      case "RESUSCITATION":  return "Forego resuscitation";
-      case "INSUFFICIENT":   return "Insufficient time";
-      case "IUFD":            return "IUFD";
-      default:                return key;
+      case "ANOMALY":
+        return "Structural anomaly";
+      case "HYDROPS":
+        return "Fetal hydrops";
+      case "RESUSCITATION":
+        return "Forego resuscitation";
+      case "INSUFFICIENT":
+        return "Insufficient time";
+      case "IUFD":
+        return "IUFD";
+      default:
+        return key;
     }
   }
 
   Future<Uint8List?> _exportIcfSignaturePng() async {
     try {
-      final boundary = _icfSignatureBoundaryKey.currentContext
-          ?.findRenderObject() as RenderRepaintBoundary?;
+      final boundary =
+          _icfSignatureBoundaryKey.currentContext?.findRenderObject()
+              as RenderRepaintBoundary?;
       if (boundary == null) return null;
       final image = await boundary.toImage(pixelRatio: 2.0);
       final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
@@ -1394,7 +1567,8 @@ class _ScreeningFormState extends State<ScreeningForm>
     const sites = {'PGIMER', 'GMCH'};
     if (sites.contains(_selectedSite)) return true;
     try {
-      final loginSite = context.read<AuthProvider>().user?.siteName?.trim() ?? '';
+      final loginSite =
+          context.read<AuthProvider>().user?.siteName?.trim() ?? '';
       return sites.contains(loginSite);
     } catch (_) {
       return false;
@@ -1418,13 +1592,15 @@ class _ScreeningFormState extends State<ScreeningForm>
       }
 
       try {
-        final data =
-            await rootBundle.load('assets/documents/PIS_ICF_$langSuffix.pdf');
+        final data = await rootBundle.load(
+          'assets/documents/PIS_ICF_$langSuffix.pdf',
+        );
         bytes = data.buffer.asUint8List();
         ext = 'pdf';
       } catch (_) {}
-      bytes ??= await tryGet(Uri.parse(
-          '$_pisDocumentsWebBase/documents/PIS_ICF_$langSuffix.pdf'));
+      bytes ??= await tryGet(
+        Uri.parse('$_pisDocumentsWebBase/documents/PIS_ICF_$langSuffix.pdf'),
+      );
       if (bytes != null) ext = 'pdf';
 
       if (bytes == null) {
@@ -1450,9 +1626,24 @@ class _ScreeningFormState extends State<ScreeningForm>
   }
 
   Map<String, dynamic> _buildSyncPayload({bool useDraftFallbacks = false}) {
-    final weeks = int.tryParse(_gestWeeksCtrl.text.trim());
-    final days  = int.tryParse(_gestDaysCtrl.text.trim());
-    final ended = _gaEndedParticipation || useDraftFallbacks;
+    int? weeks = int.tryParse(_gestWeeksCtrl.text.trim());
+    int? days = int.tryParse(_gestDaysCtrl.text.trim());
+    if (_gestationKnownInWeeks == false) {
+      final asOf = _gaAsOfDate();
+      GestAge? ga;
+      if (_gaSource == "LMP") {
+        final lmp = _parseDdMmYyyy(_lmpCtrl.text);
+        if (lmp != null) ga = gestAgeFromLmp(lmp, asOf);
+      } else if (_gaSource == "EDD") {
+        final edd = _parseDdMmYyyy(_expectedDeliveryCtrl.text);
+        if (edd != null) ga = gestAgeFromEdd(edd, asOf);
+      }
+      if (ga != null) {
+        weeks = ga.weeks;
+        days = ga.days;
+      }
+    }
+    final ended = useDraftFallbacks && !_gaEndedParticipation;
     String screenedBy = _screenedByCtrl.text.trim();
     if (screenedBy.isEmpty || screenedBy == "Select") {
       screenedBy = "";
@@ -1472,12 +1663,15 @@ class _ScreeningFormState extends State<ScreeningForm>
         .toList();
 
     final gaMethod = _mapGestationMethod(_gaAssessmentMethod);
-    final screeningDt = _ddmmyyyyHHmmToIso(_screeningDateTimeCtrl.text) ??
+    final screeningDt =
+        _ddmmyyyyHHmmToIso(_screeningDateTimeCtrl.text) ??
         (useDraftFallbacks ? _nowIsoLocal() : null);
-    final consentActive = _consentStatus == "Yes" ||
+    final consentActive =
+        _consentStatus == "Yes" ||
         _consentStatus == "No" ||
         _consentStatus == "Trial run";
-    final hasIcf = _icfSignatureBase64 != null &&
+    final hasIcf =
+        _icfSignatureBase64 != null &&
         _icfSignatureBase64!.isNotEmpty &&
         consentActive;
 
@@ -1486,71 +1680,83 @@ class _ScreeningFormState extends State<ScreeningForm>
         'screening_id': _assignedScreeningId,
       if (screeningDt != null) 'screening_datetime': screeningDt,
       // ScreeningCreate required fields — always present so PUT never 422s.
-      'site_name'   : _selectedSite,
-      'site_id'     : _siteMap[_selectedSite] ?? "",
-      'screened_by' : screenedBy,
-      'mother_first_name' : _motherFirstCtrl.text.trim(),
-      'mother_surname'    : _motherSurnameCtrl.text.trim(),
+      'site_name': _selectedSite,
+      'site_id': _siteMap[_selectedSite] ?? "",
+      'screened_by': screenedBy,
+      'mother_first_name': _motherFirstCtrl.text.trim(),
+      'mother_surname': _motherSurnameCtrl.text.trim(),
       'husband_first_name': _husbandFirstCtrl.text.trim(),
-      'husband_surname'   : _husbandSurnameCtrl.text.trim(),
-      'mother_contact'    : _motherPhoneCtrl.text.trim(),
-      'husband_contact'   : _husbandPhoneCtrl.text.trim(),
-      'maternal_uid'      : _maternalUidCtrl.text.trim(),
+      'husband_surname': _husbandSurnameCtrl.text.trim(),
+      'mother_contact': _motherPhoneCtrl.text.trim(),
+      'husband_contact': _husbandPhoneCtrl.text.trim(),
+      'maternal_uid': _maternalUidCtrl.text.trim(),
       'hospital_admission_number': _hospitalNoCtrl.text.trim(),
       'gestation_known': _gestationKnownInWeeks == true
           ? "Yes"
           : (_gestationKnownInWeeks == false ? "No" : null),
       'ga_source': _gestationKnownInWeeks == false ? (_gaSource) : null,
       'gestation_weeks': weeks ?? 0,
-      'gestation_days' : days  ?? 0,
+      'gestation_days': days ?? 0,
       'gestation_method': gaMethod,
       'expected_delivery_date': _ddmmyyyyToIsoDate(_expectedDeliveryCtrl.text),
-      'lmp_date'              : _ddmmyyyyToIsoDate(_lmpCtrl.text),
-      'exclusion_present': _allExclusionsAnswered
-          ? _exclusionPresent
-          : false,
+      'lmp_date': _ddmmyyyyToIsoDate(_lmpCtrl.text),
+      'exclusion_present': _allExclusionsAnswered ? _exclusionPresent : false,
       'exclusion_reasons': !_allExclusionsAnswered
           ? null
-          : (exclusionLabels.isNotEmpty ? exclusionLabels.join(", ") : ""),
+          : (exclusionLabels.isNotEmpty ? exclusionLabels.join(", ") : null),
       'reason_for_insufficient_time': !_allExclusionsAnswered
           ? null
           : (_exclusionAnswers["INSUFFICIENT"] == "Yes" &&
-                  _insufficientReason.trim().isNotEmpty
-              ? _insufficientReason.trim()
-              : ""),
+                    _insufficientReason.trim().isNotEmpty
+                ? _insufficientReason.trim()
+                : ""),
       'decision_forego_resuscitation_reason': !_allExclusionsAnswered
           ? null
           : (_exclusionAnswers["RESUSCITATION"] == "Yes" &&
-                  _resuscitationReasons.isNotEmpty
-              ? _resuscitationReasons.join(", ")
-              : ""),
+                    _resuscitationReasons.isNotEmpty
+                ? _resuscitationReasons.join(", ")
+                : ""),
       'decision_forego_resuscitation_reason_other': !_allExclusionsAnswered
           ? null
           : (_resuscitationReasons.contains("Other") &&
-                  _resuscitationOther.trim().isNotEmpty
-              ? _resuscitationOther.trim()
-              : ""),
+                    _resuscitationOther.trim().isNotEmpty
+                ? _resuscitationOther.trim()
+                : ""),
       'major_structural_anomalies_if_yes': !_allExclusionsAnswered
           ? null
           : (_exclusionAnswers["ANOMALY"] == "Yes" &&
-                  _anomalyDetails.trim().isNotEmpty
-              ? _anomalyDetails.trim()
-              : ""),
+                    _anomalyDetails.trim().isNotEmpty
+                ? _anomalyDetails.trim()
+                : ""),
       'fetal_hydrops': !_allExclusionsAnswered
           ? null
           : (_exclusionAnswers["HYDROPS"] == "Yes" && _hydropsType.isNotEmpty
-              ? _hydropsType
-              : ""),
-      'consent_given'   : _consentStatus != "Select" ? _consentStatus : null,
+                ? _hydropsType
+                : ""),
+      'consent_given': _consentStatus != "Select" ? _consentStatus : null,
       'consent_taken_by': _consentTakenBy != "Select" ? _consentTakenBy : null,
-      'relationship_to_participant': _relationshipToParticipant != "Select" ? _relationshipToParticipant : null,
-      'relationship_other'         : _relationshipOtherText.trim().isNotEmpty ? _relationshipOtherText.trim() : null,
-      'reason_for_consent_refusal' : _consentRefusalReasons.isNotEmpty ? _consentRefusalReasons.join(", ") : null,
-      'reason_for_consent_refusal_other': _consentRefusalOtherText.trim().isNotEmpty ? _consentRefusalOtherText.trim() : null,
-      'reason_not_approached'      : _notApproachedReasons.isNotEmpty ? _notApproachedReasons.join(", ") : null,
-      'reason_not_approached_other': _notApproachedOtherText.trim().isNotEmpty ? _notApproachedOtherText.trim() : null,
+      'relationship_to_participant': _relationshipToParticipant != "Select"
+          ? _relationshipToParticipant
+          : null,
+      'relationship_other': _relationshipOtherText.trim().isNotEmpty
+          ? _relationshipOtherText.trim()
+          : null,
+      'reason_for_consent_refusal': _consentRefusalReasons.isNotEmpty
+          ? _consentRefusalReasons.join(", ")
+          : null,
+      'reason_for_consent_refusal_other':
+          _consentRefusalOtherText.trim().isNotEmpty
+          ? _consentRefusalOtherText.trim()
+          : null,
+      'reason_not_approached': _notApproachedReasons.isNotEmpty
+          ? _notApproachedReasons.join(", ")
+          : null,
+      'reason_not_approached_other': _notApproachedOtherText.trim().isNotEmpty
+          ? _notApproachedOtherText.trim()
+          : null,
       'video_pis_shown': _videoPisShown != "Select" ? _videoPisShown : null,
-      if (hasIcf) 'consent_signature_image': 'data:image/png;base64,$_icfSignatureBase64',
+      if (hasIcf)
+        'consent_signature_image': 'data:image/png;base64,$_icfSignatureBase64',
       if (hasIcf)
         'consent_signature_captured_at': () {
           _icfSignatureCapturedAt ??= _nowIsoLocal();
@@ -1577,28 +1783,32 @@ class _ScreeningFormState extends State<ScreeningForm>
       _isGestationOutOfRange() ||
       (_gestationKnownInWeeks == false && _eddKnown == false);
 
-  /// Draft/server sync only when required ScreeningCreate fields are real
-  /// (avoids creating "DRAFT / Excluded" ghost patients on the home list).
-  /// Ineligible / undeterminable GA still POSTs so the row appears on web.
-  bool _canSyncDraftToServer() {
-    if (_selectedSite.isEmpty || _siteMap[_selectedSite] == null) return false;
-    if (_gestationKnownInWeeks == false && _eddKnown == false) return true;
+  bool _gaInInclusionWindowNow() {
+    if (_gestWeeksCtrl.text.trim().isEmpty) return false;
     final weeks = int.tryParse(_gestWeeksCtrl.text.trim());
-    if (weeks == null ||
-        weeks < _kEligibleGestMinWeeks ||
-        weeks > _kEligibleGestMaxWeeks) {
-      return false;
-    }
-    if (_isGestationOutOfRange()) return true;
-    return _screenedByCtrl.text.trim().isNotEmpty
-        && _screenedByCtrl.text != "Select"
-        && _motherFirstCtrl.text.trim().isNotEmpty
-        && _husbandFirstCtrl.text.trim().isNotEmpty;
+    if (weeks == null) return false;
+    final days = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
+    return gaInInclusionWindow(weeks, days);
+  }
+
+  /// Draft/server sync only when GA is inside 25w0d–31w6d and identity is real.
+  /// Out-of-window / unknown GA must not get a screening ID or a server row.
+  bool _canSyncDraftToServer() {
+    if (_gaEndedParticipation) return false;
+    if (!_gaInInclusionWindowNow()) return false;
+    if (_selectedSite.isEmpty || _siteMap[_selectedSite] == null) return false;
+    return _screenedByCtrl.text.trim().isNotEmpty &&
+        _screenedByCtrl.text != "Select" &&
+        _motherFirstCtrl.text.trim().isNotEmpty &&
+        _husbandFirstCtrl.text.trim().isNotEmpty;
   }
 
   /// POSTs (create) or PUTs (update) the current form state to the real
   /// `/screenings/` backend endpoint — the same one ScreeningForm.jsx uses.
   Future<Map<String, dynamic>?> _syncToBackend({bool isDraft = false}) async {
+    if (_gaEndedParticipation) {
+      throw const ApiException(422, kGaNoRecordMessage);
+    }
     if (isDraft && !_canSyncDraftToServer() && !_serverConfirmedId) {
       return null;
     }
@@ -1609,7 +1819,15 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (!isDraft) {
       payload['explicitly_saved'] = true;
     }
+    // All-No must send JSON null so PUT exclude_unset clears the column
+    // (web does the same). Other nulls stay omitted so unset fields are not wiped.
+    final exclusionReasons = payload['exclusion_reasons'];
+    final sendExclusionReasonsNull =
+        _allExclusionsAnswered && exclusionReasons == null;
     payload.removeWhere((_, v) => v == null);
+    if (sendExclusionReasonsNull) {
+      payload['exclusion_reasons'] = null;
+    }
     if ((payload['site_name'] as String? ?? '').isEmpty) {
       throw const ApiException(400, 'Site is required to save Form A');
     }
@@ -1617,20 +1835,43 @@ class _ScreeningFormState extends State<ScreeningForm>
       payload['site_id'] = _siteMap[payload['site_name']] ?? "";
     }
     payload['screened_by'] = (payload['screened_by'] as String? ?? '');
-    payload['mother_first_name'] = (payload['mother_first_name'] as String? ?? '');
-    payload['husband_first_name'] = (payload['husband_first_name'] as String? ?? '');
+    payload['mother_first_name'] =
+        (payload['mother_first_name'] as String? ?? '');
+    payload['husband_first_name'] =
+        (payload['husband_first_name'] as String? ?? '');
     payload['gestation_weeks'] = payload['gestation_weeks'] ?? 0;
     payload['gestation_days'] = payload['gestation_days'] ?? 0;
     payload['exclusion_present'] = payload['exclusion_present'] ?? false;
 
-    final resp = await ScreeningApiService.instance.syncScreening(
-      payload: payload,
-      existingScreeningId: _serverConfirmedId ? _assignedScreeningId : null,
-    );
+    var existingId =
+        _serverConfirmedId ? (_assignedScreeningId ?? '').trim() : '';
+    if (_isLocalPlaceholderScreeningId(existingId)) {
+      existingId = '';
+      _serverConfirmedId = false;
+      payload.remove('screening_id');
+    }
+
+    Map<String, dynamic> resp;
+    try {
+      resp = await ScreeningApiService.instance.syncScreening(
+        payload: payload,
+        existingScreeningId: existingId.isEmpty ? null : existingId,
+      );
+    } on ApiException catch (e) {
+      // Draft kept a screening_id the server does not have (never created,
+      // or deleted in View Entries). POST a new row instead of failing Save.
+      if (e.statusCode != 404 || existingId.isEmpty) rethrow;
+      _serverConfirmedId = false;
+      payload.remove('screening_id');
+      resp = await ScreeningApiService.instance.syncScreening(
+        payload: payload,
+        existingScreeningId: null,
+      );
+    }
     final sid = resp['screening_id']?.toString();
     if (sid != null && sid.isNotEmpty) {
-      _assignedScreeningId  = sid;
-      _serverConfirmedId    = true;
+      _assignedScreeningId = sid;
+      _serverConfirmedId = true;
       if (_screeningIdCtrl.text != sid) _screeningIdCtrl.text = sid;
     }
     final eid = resp['enrollment_id']?.toString();
@@ -1649,90 +1890,73 @@ class _ScreeningFormState extends State<ScreeningForm>
     _currentDraftKey = null;
   }
 
-  /// True when Form A has been filled far enough that keeping a "Draft" card
-  /// next to the same record on the web patient list is confusing.
-  bool _looksFullyFilledForDraftClear() {
-    final consentDone = _consentStatus != "Select" && _consentStatus.trim().isNotEmpty;
-    if (consentDone) return true;
-    if (_exclusionPresent && _allExclusionsAnswered) return true;
-    if (_gestationKnownInWeeks == false && _eddKnown == false) return true;
-    if (_isGestationOutOfRange()) return true;
-    return false;
-  }
-
   Future<void> _saveDraft({bool silent = false}) async {
     if (_isFormCompletelyEmpty()) return;
+    if (_gaEndedParticipation) {
+      if (!silent && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text(kGaNoRecordMessage)),
+        );
+      }
+      return;
+    }
     await _assignScreeningIdIfNeeded();
 
     // Best-effort background sync to the real backend so progress is visible
     // on the web portal too. Failures (e.g. offline) are silent here — the
     // local SharedPreferences draft below still keeps the data safe.
-    Map<String, dynamic>? syncResp;
     try {
-      syncResp = await _syncToBackend(isDraft: true);
-    } catch (_) {
-      syncResp = null;
-    }
+      await _syncToBackend(isDraft: true);
+    } catch (_) {}
 
-    // Only drop the local draft after a successful server sync. If sync failed
-    // (offline / error), keep SharedPreferences so edits are never lost.
-    if (syncResp != null &&
-        _serverConfirmedId &&
-        _looksFullyFilledForDraftClear()) {
-      await _clearLocalDraft();
-      if (!mounted) return;
-      if (!silent) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text("Saved to server — removed from local drafts"),
-        ));
-      }
-      return;
-    }
+    // Always keep the on-device draft until the nurse taps Save.
+    // Clearing it after autosave (once consent was chosen) made Form A look
+    // empty if the app was killed or the patient was missing from Home.
 
     final prefs = await SharedPreferences.getInstance();
     _currentDraftKey ??= "draft_${DateTime.now().millisecondsSinceEpoch}";
 
     final draft = {
-      "screeningId"         : _assignedScreeningId,
-      "enrollmentId"        : _enrollmentId,
-      "serverConfirmedId"   : _serverConfirmedId,
-      "site"                : _selectedSite,
-      "savedAt"             : DateTime.now().toIso8601String(),
-      "screeningDateTime"   : _screeningDateTimeCtrl.text,
-      "screenedBy"          : _screenedByCtrl.text,
-      "motherFirst"         : _motherFirstCtrl.text,
-      "motherFirstName"     : _motherFirstCtrl.text, // dashboard list key
-      "motherSurname"       : _motherSurnameCtrl.text,
-      "husbandFirst"        : _husbandFirstCtrl.text,
-      "husbandSurname"      : _husbandSurnameCtrl.text,
-      "motherPhone"         : _motherPhoneCtrl.text,
-      "husbandPhone"        : _husbandPhoneCtrl.text,
-      "maternalUid"         : _maternalUidCtrl.text,
-      "hospitalNo"          : _hospitalNoCtrl.text,
+      "screeningId": _assignedScreeningId,
+      "enrollmentId": _enrollmentId,
+      "serverConfirmedId": _serverConfirmedId,
+      "site": _selectedSite,
+      "savedAt": DateTime.now().toIso8601String(),
+      "screeningDateTime": _screeningDateTimeCtrl.text,
+      "screenedBy": _screenedByCtrl.text,
+      "motherFirst": _motherFirstCtrl.text,
+      "motherFirstName": _motherFirstCtrl.text, // dashboard list key
+      "motherSurname": _motherSurnameCtrl.text,
+      "husbandFirst": _husbandFirstCtrl.text,
+      "husbandSurname": _husbandSurnameCtrl.text,
+      "motherPhone": _motherPhoneCtrl.text,
+      "husbandPhone": _husbandPhoneCtrl.text,
+      "maternalUid": _maternalUidCtrl.text,
+      "hospitalNo": _hospitalNoCtrl.text,
       "gestationKnownInWeeks": _gestationKnownInWeeks,
-      "eddKnown"            : _eddKnown,
-      "gaSource"            : _gaSource,
-      "lmpDate"             : _lmpCtrl.text,
-      "gestWeeks"           : _gestWeeksCtrl.text,
-      "gestDays"            : _gestDaysCtrl.text,
-      "gaMethod"            : _gaAssessmentMethod,
-      "expectedDelivery"    : _expectedDeliveryCtrl.text,
-      "exclusionAnswers"    : _exclusionAnswers,
-      "insufficientReason"  : _insufficientReason,
+      "eddKnown": _eddKnown,
+      "gaSource": _gaSource,
+      "lmpDate": _lmpCtrl.text,
+      "gestWeeks": _gestWeeksCtrl.text,
+      "gestDays": _gestDaysCtrl.text,
+      "gaMethod": _gaAssessmentMethod,
+      "expectedDelivery": _expectedDeliveryCtrl.text,
+      "exclusionAnswers": _exclusionAnswers,
+      "insufficientReason": _insufficientReason,
       "resuscitationReasons": _resuscitationReasons.toList(),
-      "resuscitationOther"  : _resuscitationOther,
-      "anomalyDetails"      : _anomalyDetails,
-      "hydropsType"         : _hydropsType,
-      "consentStatus"       : _consentStatus,
-      "relationship"        : _relationshipToParticipant,
-      "relationshipOther"   : _relationshipOtherText,
-      "consentTakenBy"      : _consentTakenBy,
+      "resuscitationOther": _resuscitationOther,
+      "anomalyDetails": _anomalyDetails,
+      "hydropsType": _hydropsType,
+      "consentStatus": _consentStatus,
+      "relationship": _relationshipToParticipant,
+      "relationshipOther": _relationshipOtherText,
+      "consentTakenBy": _consentTakenBy,
       "consentRefusalReasons": _consentRefusalReasons.toList(),
-      "consentRefusalOther" : _consentRefusalOtherText,
+      "consentRefusalOther": _consentRefusalOtherText,
       "notApproachedReasons": _notApproachedReasons.toList(),
-      "notApproachedOther"  : _notApproachedOtherText,
-      "videoPisShown"       : _videoPisShown,
-      "proceedToConsent"    : _proceedToConsent,
+      "notApproachedOther": _notApproachedOtherText,
+      "videoPisShown": _videoPisShown,
+      "proceedToConsent": _proceedToConsent,
     };
 
     await prefs.setString(_currentDraftKey!, jsonEncode(draft));
@@ -1742,43 +1966,45 @@ class _ScreeningFormState extends State<ScreeningForm>
   }
 
   Future<void> _loadDraftIfExists() async {
-    final prefs   = await SharedPreferences.getInstance();
+    final prefs = await SharedPreferences.getInstance();
     final jsonStr = prefs.getString(widget.draftKey!);
     if (jsonStr == null) return;
 
     final data = jsonDecode(jsonStr);
     setState(() {
-      _assignedScreeningId       = data["screeningId"];
-      _screeningIdCtrl.text      = _assignedScreeningId ?? "";
-      _enrollmentId              = data["enrollmentId"]?.toString();
-      _selectedSite              = data["site"] ?? _selectedSite;
-      _idAssigned                = (_assignedScreeningId ?? "").isNotEmpty;
-      // Real server IDs look like "01-0007"; LOCAL placeholders must still POST
+      _assignedScreeningId = data["screeningId"];
+      _screeningIdCtrl.text = _assignedScreeningId ?? "";
+      _enrollmentId = data["enrollmentId"]?.toString();
+      _selectedSite = data["site"] ?? _selectedSite;
+      _idAssigned = (_assignedScreeningId ?? "").isNotEmpty;
       final sid = _assignedScreeningId ?? "";
-      _serverConfirmedId = data["serverConfirmedId"] == true ||
-          RegExp(r'^\d{2}-\d+$').hasMatch(sid);
-      _screeningDateTimeCtrl.text= data["screeningDateTime"] ?? "";
-      _screenedByCtrl.text       = data["screenedBy"] ?? "";
-      _motherFirstCtrl.text      = data["motherFirst"] ?? data["motherFirstName"] ?? "";
-      _motherSurnameCtrl.text    = data["motherSurname"] ?? "";
-      _husbandFirstCtrl.text     = data["husbandFirst"] ?? "";
-      _husbandSurnameCtrl.text   = data["husbandSurname"] ?? "";
-      _motherPhoneCtrl.text      = data["motherPhone"] ?? "";
-      _husbandPhoneCtrl.text     = data["husbandPhone"] ?? "";
-      _maternalUidCtrl.text      = data["maternalUid"] ?? "";
-      _hospitalNoCtrl.text       = data["hospitalNo"] ?? "";
-      _gestationKnownInWeeks     = data["gestationKnownInWeeks"];
-      _eddKnown                  = data["eddKnown"];
-      _gaSource                  = data["gaSource"];
-      _lmpCtrl.text              = data["lmpDate"] ?? "";
-      _gestWeeksCtrl.text        = data["gestWeeks"] ?? "";
-      _gestDaysCtrl.text         = data["gestDays"] ?? "0";
-      _gaAssessmentMethod        = data["gaMethod"] ?? "Select";
+      // Only trust an explicit flag. A numeric-looking id (01-0007) can be a
+      // leftover local guess after a failed/offline draft — PUT then 404s.
+      _serverConfirmedId = data["serverConfirmedId"] == true &&
+          !_isLocalPlaceholderScreeningId(sid);
+      _screeningDateTimeCtrl.text = data["screeningDateTime"] ?? "";
+      _screenedByCtrl.text = data["screenedBy"] ?? "";
+      _motherFirstCtrl.text =
+          data["motherFirst"] ?? data["motherFirstName"] ?? "";
+      _motherSurnameCtrl.text = data["motherSurname"] ?? "";
+      _husbandFirstCtrl.text = data["husbandFirst"] ?? "";
+      _husbandSurnameCtrl.text = data["husbandSurname"] ?? "";
+      _motherPhoneCtrl.text = data["motherPhone"] ?? "";
+      _husbandPhoneCtrl.text = data["husbandPhone"] ?? "";
+      _maternalUidCtrl.text = data["maternalUid"] ?? "";
+      _hospitalNoCtrl.text = data["hospitalNo"] ?? "";
+      _gestationKnownInWeeks = data["gestationKnownInWeeks"];
+      _eddKnown = data["eddKnown"];
+      _gaSource = data["gaSource"];
+      _lmpCtrl.text = data["lmpDate"] ?? "";
+      _gestWeeksCtrl.text = data["gestWeeks"] ?? "";
+      _gestDaysCtrl.text = data["gestDays"] ?? "0";
+      _gaAssessmentMethod = data["gaMethod"] ?? "Select";
       _expectedDeliveryCtrl.text = data["expectedDelivery"] ?? "";
       _exclusionAnswers
         ..clear()
         ..addAll(_parseExclusionAnswersMap(data["exclusionAnswers"]));
-      _insufficientReason        = data["insufficientReason"] ?? "";
+      _insufficientReason = data["insufficientReason"] ?? "";
       if (_exclusionAnswers["INSUFFICIENT"] != "Yes") _insufficientReason = "";
       if (data["resuscitationReasons"] != null) {
         _resuscitationReasons = Set<String>.from(data["resuscitationReasons"]);
@@ -1790,49 +2016,38 @@ class _ScreeningFormState extends State<ScreeningForm>
       if (_exclusionAnswers["RESUSCITATION"] != "Yes") {
         _resuscitationReasons = {};
       }
-      _resuscitationOther        = data["resuscitationOther"] ?? "";
-      _anomalyDetails            = data["anomalyDetails"] ?? "";
+      _resuscitationOther = data["resuscitationOther"] ?? "";
+      _anomalyDetails = data["anomalyDetails"] ?? "";
       if (_exclusionAnswers["ANOMALY"] != "Yes") _anomalyDetails = "";
-      _hydropsType               = data["hydropsType"] ?? "";
+      _hydropsType = data["hydropsType"] ?? "";
       if (_exclusionAnswers["HYDROPS"] != "Yes") _hydropsType = "";
-      _consentStatus             = data["consentStatus"] ?? "Select";
+      _consentStatus = data["consentStatus"] ?? "Select";
       _relationshipToParticipant = data["relationship"] ?? "Select";
-      _relationshipOtherText     = data["relationshipOther"] ?? "";
-      _consentTakenBy            = (data["consentTakenBy"] as String?)?.isNotEmpty == true
+      _relationshipOtherText = data["relationshipOther"] ?? "";
+      _consentTakenBy = (data["consentTakenBy"] as String?)?.isNotEmpty == true
           ? data["consentTakenBy"]
           : "Select";
-      _consentRefusalReasons     = Set<String>.from(data["consentRefusalReasons"] ?? []);
-      _consentRefusalOtherText   = data["consentRefusalOther"] ?? "";
-      _notApproachedReasons      = Set<String>.from(data["notApproachedReasons"] ?? []);
-      _notApproachedOtherText    = data["notApproachedOther"] ?? "";
-      _videoPisShown             = data["videoPisShown"] ?? "Select";
+      _consentRefusalReasons = Set<String>.from(
+        data["consentRefusalReasons"] ?? [],
+      );
+      _consentRefusalOtherText = data["consentRefusalOther"] ?? "";
+      _notApproachedReasons = Set<String>.from(
+        data["notApproachedReasons"] ?? [],
+      );
+      _notApproachedOtherText = data["notApproachedOther"] ?? "";
+      _videoPisShown = data["videoPisShown"] ?? "Select";
       _proceedToConsent = _allExclusionsNo || _consentStatus != "Select";
       _previousYesExclusions = _exclusionAnswers.entries
           .where((e) => e.value == "Yes")
           .map((e) => e.key)
           .toSet();
-      _currentDraftKey           = widget.draftKey;
-      _hospitalNoLiveError       = _hospitalNoLiveMessage(_hospitalNoCtrl.text);
+      _currentDraftKey = widget.draftKey;
+      _hospitalNoLiveError = _hospitalNoLiveMessage(_hospitalNoCtrl.text);
     });
 
-    // Prefer LMP→GA when LMP is known; otherwise recompute from EDD.
-    if (_gestationKnownInWeeks == false) {
-      if (_gaSource == "LMP" && _lmpCtrl.text.trim().isNotEmpty) {
-        final lmp = _parseDdMmYyyy(_lmpCtrl.text);
-        if (lmp != null) {
-          final edd = _eddFromLmp(lmp);
-          setState(() {
-            _expectedDeliveryCtrl.text = formatDdMmYyyy(edd);
-            _setGestationFromLmp(lmp);
-          });
-        }
-      } else if (_gaSource == "EDD" && _expectedDeliveryCtrl.text.trim().isNotEmpty) {
-        final edd = _parseDdMmYyyy(_expectedDeliveryCtrl.text);
-        if (edd != null) {
-          setState(() => _setGestationFromEdd(edd));
-        }
-      }
-    } else if (_gestationKnownInWeeks == true &&
+    // Prefer LMP→EDD fill on the Yes+LMP path only. Do NOT recompute stored
+    // GA on load (web displays saved weeks/days; auto-GA is as-of screening).
+    if (_gestationKnownInWeeks == true &&
         _gaAssessmentMethod == "LMP" &&
         _lmpCtrl.text.trim().isNotEmpty) {
       final lmp = _parseDdMmYyyy(_lmpCtrl.text);
@@ -1845,6 +2060,82 @@ class _ScreeningFormState extends State<ScreeningForm>
     }
 
     await _loadSiteScreeners();
+    await _verifyDraftServerId();
+  }
+
+  /// If the draft's screening_id is gone on the server, next Save must POST.
+  Future<void> _verifyDraftServerId() async {
+    final sid = (_assignedScreeningId ?? '').trim();
+    if (!_serverConfirmedId || _isLocalPlaceholderScreeningId(sid)) return;
+    try {
+      final remote = await ScreeningApiService.instance.getScreening(sid);
+      if (remote == null && mounted) {
+        setState(() => _serverConfirmedId = false);
+      }
+    } catch (_) {
+      // Offline — keep the flag; Save still falls back from PUT 404 to POST.
+    }
+  }
+
+  /// If GET /screenings + /pii came back without names (PII lag / 403), fill
+  /// empty fields from the on-device draft for the same screening ID so a
+  /// filled Form A does not reopen blank.
+  Future<void> _overlayLocalDraftIfServerSparse(String screeningId) async {
+    if (_motherFirstCtrl.text.trim().isNotEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final keys = prefs.getStringList(draftIndexKey) ?? [];
+      for (final k in keys) {
+        final raw = prefs.getString(k);
+        if (raw == null) continue;
+        final data = jsonDecode(raw);
+        if (data is! Map) continue;
+        if ((data['screeningId'] ?? '').toString() != screeningId) continue;
+        _currentDraftKey = k;
+        if (!mounted) return;
+        setState(() {
+          void fill(TextEditingController c, dynamic v) {
+            if (c.text.trim().isNotEmpty) return;
+            final s = (v ?? '').toString();
+            if (s.trim().isEmpty) return;
+            c.text = s;
+          }
+
+          fill(_motherFirstCtrl, data['motherFirst'] ?? data['motherFirstName']);
+          fill(_motherSurnameCtrl, data['motherSurname']);
+          fill(_husbandFirstCtrl, data['husbandFirst']);
+          fill(_husbandSurnameCtrl, data['husbandSurname']);
+          fill(_motherPhoneCtrl, data['motherPhone']);
+          fill(_husbandPhoneCtrl, data['husbandPhone']);
+          fill(_maternalUidCtrl, data['maternalUid']);
+          fill(_hospitalNoCtrl, data['hospitalNo']);
+          fill(_screenedByCtrl, data['screenedBy']);
+          if (_gestWeeksCtrl.text.trim().isEmpty ||
+              _gestWeeksCtrl.text.trim() == '0') {
+            fill(_gestWeeksCtrl, data['gestWeeks']);
+          }
+          if (_gestDaysCtrl.text.trim().isEmpty ||
+              _gestDaysCtrl.text.trim() == '0') {
+            final d = (data['gestDays'] ?? '').toString();
+            if (d.trim().isNotEmpty) _gestDaysCtrl.text = d;
+          }
+          fill(_lmpCtrl, data['lmpDate']);
+          fill(_expectedDeliveryCtrl, data['expectedDelivery']);
+          if (_gaAssessmentMethod == 'Select' &&
+              (data['gaMethod'] ?? '').toString().isNotEmpty) {
+            _gaAssessmentMethod = data['gaMethod'].toString();
+          }
+          _gestationKnownInWeeks ??= data['gestationKnownInWeeks'] as bool?;
+          _eddKnown ??= data['eddKnown'] as bool?;
+          _gaSource ??= data['gaSource'] as String?;
+          if (_consentStatus == 'Select' &&
+              (data['consentStatus'] ?? '').toString().isNotEmpty) {
+            _consentStatus = data['consentStatus'].toString();
+          }
+        });
+        return;
+      }
+    } catch (_) {}
   }
 
   DateTime? _parseDdMmYyyy(String raw) {
@@ -1860,7 +2151,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Future<void> _addDraftKey(String key) async {
     final prefs = await SharedPreferences.getInstance();
-    final keys  = prefs.getStringList(draftIndexKey) ?? [];
+    final keys = prefs.getStringList(draftIndexKey) ?? [];
     if (!keys.contains(key)) {
       keys.add(key);
       await prefs.setStringList(draftIndexKey, keys);
@@ -1869,7 +2160,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Future<void> _removeDraftKey(String key) async {
     final prefs = await SharedPreferences.getInstance();
-    final keys  = prefs.getStringList(draftIndexKey) ?? [];
+    final keys = prefs.getStringList(draftIndexKey) ?? [];
     keys.remove(key);
     await prefs.setStringList(draftIndexKey, keys);
   }
@@ -1880,10 +2171,23 @@ class _ScreeningFormState extends State<ScreeningForm>
   Future<bool> _submit() async {
     _submitted = true;
 
+    if (_gaEndedParticipation) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text(kGaNoRecordMessage)),
+      );
+      return false;
+    }
+
+    if (_assignedScreeningId == null) {
+      await _assignScreeningIdIfNeeded();
+    }
+
     if (_assignedScreeningId == null) {
       if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Screening ID could not be assigned")));
+        const SnackBar(content: Text("Screening ID could not be assigned")),
+      );
       return false;
     }
 
@@ -1892,7 +2196,10 @@ class _ScreeningFormState extends State<ScreeningForm>
       setState(() => _submitted = true);
       if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Please answer all exclusion criteria (Yes / No)")));
+        const SnackBar(
+          content: Text("Please answer all exclusion criteria (Yes / No)"),
+        ),
+      );
       return false;
     }
 
@@ -1900,21 +2207,25 @@ class _ScreeningFormState extends State<ScreeningForm>
       setState(() => _submitted = true);
       if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Please complete all required exclusion details")));
+        const SnackBar(
+          content: Text("Please complete all required exclusion details"),
+        ),
+      );
       return false;
     }
 
     if (!_attestationSignaturesComplete()) {
       setState(() => _submitted = true);
       if (!mounted) return false;
-      final msg = _validateAttestationSignaturesForSave() ??
+      final msg =
+          _validateAttestationSignaturesForSave() ??
           "Consent signature (A5) is required";
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
       return false;
     }
 
     final weeksParsed = int.tryParse(_gestWeeksCtrl.text.trim());
-    final days        = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
+    final days = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
 
     try {
       // Sync to shared backend FIRST so web + mobile stay aligned.
@@ -1925,52 +2236,52 @@ class _ScreeningFormState extends State<ScreeningForm>
           : computeScreeningStatus(
               gestationWeeks: weeksParsed,
               gestationDays: days,
-              exclusionPresent:
-                  _allExclusionsAnswered ? _exclusionPresent : null,
-              consentGiven:
-                  _consentStatus != "Select" ? _consentStatus : null,
+              exclusionPresent: _allExclusionsAnswered
+                  ? _exclusionPresent
+                  : null,
+              consentGiven: _consentStatus != "Select" ? _consentStatus : null,
               gestationKnown: _gestationKnownInWeeks == true
                   ? "Yes"
                   : (_gestationKnownInWeeks == false ? "No" : null),
-              gaSource:
-                  _gestationKnownInWeeks == false ? _gaSource : null,
+              gaSource: _gestationKnownInWeeks == false ? _gaSource : null,
             );
 
       final crf = CRF(
-        screeningId         : _assignedScreeningId!,
-        site                : _selectedSite,
-        siteId              : _siteMap[_selectedSite] ?? "",
-        screeningDateTime   : _screeningDateTimeCtrl.text.trim(),
-        screenedBy          : _screenedByCtrl.text.trim(),
-        motherFirstName     : _motherFirstCtrl.text.trim(),
-        motherSurname       : _motherSurnameCtrl.text.trim(),
-        husbandFirstName    : _husbandFirstCtrl.text.trim(),
-        husbandSurname      : _husbandSurnameCtrl.text.trim(),
-        motherPhone         : _motherPhoneCtrl.text.trim(),
-        husbandPhone        : _husbandPhoneCtrl.text.trim(),
-        maternalUid         : _maternalUidCtrl.text.trim(),
-        hospitalNo          : _hospitalNoCtrl.text.trim(),
-        gestationWeeks      : weeksParsed ?? 0,
-        gestationDays       : days,
-        gestationMethod     : _gaAssessmentMethod,
+        screeningId: _assignedScreeningId!,
+        site: _selectedSite,
+        siteId: _siteMap[_selectedSite] ?? "",
+        screeningDateTime: _screeningDateTimeCtrl.text.trim(),
+        screenedBy: _screenedByCtrl.text.trim(),
+        motherFirstName: _motherFirstCtrl.text.trim(),
+        motherSurname: _motherSurnameCtrl.text.trim(),
+        husbandFirstName: _husbandFirstCtrl.text.trim(),
+        husbandSurname: _husbandSurnameCtrl.text.trim(),
+        motherPhone: _motherPhoneCtrl.text.trim(),
+        husbandPhone: _husbandPhoneCtrl.text.trim(),
+        maternalUid: _maternalUidCtrl.text.trim(),
+        hospitalNo: _hospitalNoCtrl.text.trim(),
+        gestationWeeks: weeksParsed ?? 0,
+        gestationDays: days,
+        gestationMethod: _gaAssessmentMethod,
         expectedDeliveryDate: _expectedDeliveryCtrl.text.trim(),
         gestationKnownInWeeks: _gestationKnownInWeeks == true,
-        eddKnown            : _eddKnown == true,
-        exclusion           : _exclusionPresent,
-        exclusionReason     : _exclusionAnswers.entries
+        eddKnown: _eddKnown == true,
+        exclusion: _exclusionPresent,
+        exclusionReason: _exclusionAnswers.entries
             .where((e) => e.value == "Yes")
             .map((e) => e.key)
             .join("; "),
-        anomalyDetails      : _anomalyDetails,
-        eligibilityStatus   : eligibility,
-        consentStatus       : _consentStatus,
-        consentRefusalReason: _consentStatus == "No" && _consentRefusalReasons.isNotEmpty
+        anomalyDetails: _anomalyDetails,
+        eligibilityStatus: eligibility,
+        consentStatus: _consentStatus,
+        consentRefusalReason:
+            _consentStatus == "No" && _consentRefusalReasons.isNotEmpty
             ? _consentRefusalReasons.join(", ")
             : "",
         relationshipToParticipant: _relationshipToParticipant,
-        relationshipOther   : _relationshipOtherText,
-        consentTakenBy      : _consentTakenBy != "Select" ? _consentTakenBy : "",
-        enrollmentId        : _enrollmentId ?? "",
+        relationshipOther: _relationshipOtherText,
+        consentTakenBy: _consentTakenBy != "Select" ? _consentTakenBy : "",
+        enrollmentId: _enrollmentId ?? "",
       );
 
       // Local device CRF store (best-effort — must not block draft cleanup).
@@ -1985,12 +2296,12 @@ class _ScreeningFormState extends State<ScreeningForm>
       await _clearLocalDraft();
 
       return true; // signal success to caller
-
     } catch (e) {
       if (!mounted) return false;
       final msg = e is ApiException ? e.message : e.toString();
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text("Failed to save: $msg")));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("Failed to save: $msg")));
       return false;
     }
   }
@@ -2005,7 +2316,8 @@ class _ScreeningFormState extends State<ScreeningForm>
         _consentRefusalOtherText.trim(),
     ].join(" — ");
     return CRF(
-      screeningId: (_assignedScreeningId ?? widget.existingScreeningId ?? "").trim(),
+      screeningId: (_assignedScreeningId ?? widget.existingScreeningId ?? "")
+          .trim(),
       site: _selectedSite,
       siteId: _siteMap[_selectedSite] ?? "",
       screeningDateTime: _screeningDateTimeCtrl.text.trim(),
@@ -2020,7 +2332,9 @@ class _ScreeningFormState extends State<ScreeningForm>
       hospitalNo: _hospitalNoCtrl.text.trim(),
       gestationWeeks: weeksParsed ?? 0,
       gestationDays: days,
-      gestationMethod: _gaAssessmentMethod == "Select" ? "" : _gaAssessmentMethod,
+      gestationMethod: _gaAssessmentMethod == "Select"
+          ? ""
+          : _gaAssessmentMethod,
       expectedDeliveryDate: _expectedDeliveryCtrl.text.trim(),
       gestationKnownInWeeks: _gestationKnownInWeeks == true,
       eddKnown: _eddKnown == true,
@@ -2042,8 +2356,9 @@ class _ScreeningFormState extends State<ScreeningForm>
       ),
       consentStatus: _consentStatus == "Select" ? "" : _consentStatus,
       consentRefusalReason: _consentStatus == "No" ? refusal : "",
-      relationshipToParticipant:
-          _relationshipToParticipant == "Select" ? "" : _relationshipToParticipant,
+      relationshipToParticipant: _relationshipToParticipant == "Select"
+          ? ""
+          : _relationshipToParticipant,
       relationshipOther: _relationshipOtherText,
       consentTakenBy: _consentTakenBy != "Select" ? _consentTakenBy : "",
       enrollmentId: _enrollmentId ?? "",
@@ -2076,8 +2391,10 @@ class _ScreeningFormState extends State<ScreeningForm>
       hydropsType: _hydropsType,
       resusReason: joinParts(_resuscitationReasons, _resuscitationOther),
       insufficientTimeReason: _insufficientReason,
-      notApproachedReason:
-          joinParts(_notApproachedReasons, _notApproachedOtherText),
+      notApproachedReason: joinParts(
+        _notApproachedReasons,
+        _notApproachedOtherText,
+      ),
       exclusionAnswers: Map<String, String?>.from(_exclusionAnswers),
     );
   }
@@ -2117,7 +2434,8 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Future<void> _openFormB() async {
     if (!_formAExportEnabled || _formBLocked) return;
-    final id = (_assignedScreeningId ?? widget.existingScreeningId ?? "").trim();
+    final id = (_assignedScreeningId ?? widget.existingScreeningId ?? "")
+        .trim();
     if (id.isEmpty) return;
     final weeks = int.tryParse(_gestWeeksCtrl.text.trim()) ?? 0;
     final days = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
@@ -2132,6 +2450,8 @@ class _ScreeningFormState extends State<ScreeningForm>
           motherName:
               '${_motherFirstCtrl.text.trim()} ${_motherSurnameCtrl.text.trim()}'
                   .trim(),
+          motherFirstName: _motherFirstCtrl.text.trim(),
+          motherSurname: _motherSurnameCtrl.text.trim(),
           motherPhone: _motherPhoneCtrl.text.trim(),
           husbandPhone: _husbandPhoneCtrl.text.trim(),
           gestWeeks: weeks,
@@ -2148,103 +2468,91 @@ class _ScreeningFormState extends State<ScreeningForm>
   // ── FIX: _confirmSaveAndClose is async, awaits _submit, then pops ──
   Future<void> _confirmSaveAndClose() async {
     print("SAVE & CLOSE CLICKED");
-   if (_gestationKnownInWeeks == false && _eddKnown == false) {
-     _showScreeningEndedPopup();
-     return;
-   }
-
-  final weeks = int.tryParse(_gestWeeksCtrl.text);
-  final days = int.tryParse(_gestDaysCtrl.text);
-
-  if (weeks != null && days != null) {
-    final totalDays = (weeks * 7) + days;
-
-    if (totalDays < _kEligibleGestMinTotalDays ||
-        totalDays > _kEligibleGestMaxTotalDays) {
-      _showGestationOutOfRangePopup();
+    if (_gestationKnownInWeeks == false && _eddKnown == false) {
+      _showScreeningEndedPopup();
       return;
     }
-  }
 
-  final c = AppTheme.of(context);
+    final weeks = int.tryParse(_gestWeeksCtrl.text);
+    final days = int.tryParse(_gestDaysCtrl.text);
 
-  final confirm = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      backgroundColor: c.surface,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
-      title: Text(
-        "Confirm Save",
-        style: TextStyle(
-          color: c.textPrimary,
-          fontWeight: FontWeight.w800,
+    if (weeks != null && days != null) {
+      final totalDays = (weeks * 7) + days;
+
+      if (totalDays < _kEligibleGestMinTotalDays ||
+          totalDays > _kEligibleGestMaxTotalDays) {
+        _showGestationOutOfRangePopup();
+        return;
+      }
+    }
+
+    final c = AppTheme.of(context);
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: c.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          "Confirm Save",
+          style: TextStyle(color: c.textPrimary, fontWeight: FontWeight.w800),
         ),
-      ),
-      content: Text(
-        "Are you sure you want to save and close?",
-        style: TextStyle(
-          color: c.textSecondary,
+        content: Text(
+          "Are you sure you want to save and close?",
+          style: TextStyle(color: c.textSecondary),
         ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, false),
-          child: Text(
-            "No",
-            style: TextStyle(
-              color: c.textTertiary,
-            ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text("No", style: TextStyle(color: c.textTertiary)),
           ),
-        ),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: c.primary,
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: c.primary,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
             ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("Yes"),
           ),
-          onPressed: () => Navigator.pop(ctx, true),
-          child: const Text("Yes"),
-        ),
-      ],
-    ),
-  );
-
-  if (confirm != true) return;
-  if (!mounted) return;
-
-  // Show a non-dismissible spinner while syncing to the backend so the
-  // screen doesn't just appear frozen on a slow connection.
-  showDialog(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => const Center(child: CircularProgressIndicator()),
-  );
-
-  final success = await _submit();
-
-  if (!mounted) return;
-  Navigator.pop(context); // close the spinner
-
-  if (!mounted) return;
-
-  if (success) {
-    setState(() {
-      _isSaved = true;
-      _isEditing = false;
-    });
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("Form A has been saved successfully."),
-        backgroundColor: Color(0xFF15803D),
+        ],
       ),
     );
+
+    if (confirm != true) return;
+    if (!mounted) return;
+
+    // Show a non-dismissible spinner while syncing to the backend so the
+    // screen doesn't just appear frozen on a slow connection.
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    final success = await _submit();
+
+    if (!mounted) return;
+    Navigator.pop(context); // close the spinner
+
+    if (!mounted) return;
+
+    if (success) {
+      setState(() {
+        _isSaved = true;
+        _isEditing = false;
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Form A has been saved successfully."),
+          backgroundColor: Color(0xFF15803D),
+        ),
+      );
+    }
   }
-}
   // ── POPUPS ─────────────────────────────────────────────────────────────────
 
   void _showScreeningEndedPopup() {
@@ -2255,26 +2563,36 @@ class _ScreeningFormState extends State<ScreeningForm>
       builder: (_) => AlertDialog(
         backgroundColor: c.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(children: [
-          Icon(Icons.cancel_rounded, color: c.danger, size: 20),
-          const SizedBox(width: 8),
-          Text("Screening Ended",
-              style: TextStyle(color: c.danger, fontWeight: FontWeight.w800, fontSize: 15)),
-        ]),
+        title: Row(
+          children: [
+            Icon(Icons.cancel_rounded, color: c.danger, size: 20),
+            const SizedBox(width: 8),
+            Text(
+              "Screening Ended",
+              style: TextStyle(
+                color: c.danger,
+                fontWeight: FontWeight.w800,
+                fontSize: 15,
+              ),
+            ),
+          ],
+        ),
         content: Text(
-          "Gestational age cannot be determined.\n\nPlease do not proceed with screening. Your progress was saved and will show on the web portal for this site.",
+          "Gestational age cannot be determined.\n\n$kGaNoRecordMessage",
           style: TextStyle(color: c.textSecondary, fontSize: 13),
         ),
         actions: [
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-                backgroundColor: c.danger, foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-            onPressed: () async {
-              await _saveDraft(silent: true);
-              if (!context.mounted) return;
+              backgroundColor: c.danger,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            onPressed: () {
               Navigator.pop(context); // close dialog
-              Navigator.pop(context, true); // go back to dashboard
+              Navigator.pop(context, false); // go back — do not save
             },
             child: const Text("OK"),
           ),
@@ -2291,26 +2609,36 @@ class _ScreeningFormState extends State<ScreeningForm>
       builder: (_) => AlertDialog(
         backgroundColor: c.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(children: [
-          Icon(Icons.warning_amber_rounded, color: c.danger, size: 20),
-          const SizedBox(width: 8),
-          Text("Screening Ended",
-              style: TextStyle(color: c.danger, fontWeight: FontWeight.w800, fontSize: 15)),
-        ]),
+        title: Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: c.danger, size: 20),
+            const SizedBox(width: 8),
+            Text(
+              "Screening Ended",
+              style: TextStyle(
+                color: c.danger,
+                fontWeight: FontWeight.w800,
+                fontSize: 15,
+              ),
+            ),
+          ],
+        ),
         content: Text(
-          "Gestational age is outside the eligible range (25+0 to 31+6 weeks).\n\nScreening has been ended. Your progress was saved and will show on the web portal for this site.",
+          kGaNoRecordMessage,
           style: TextStyle(color: c.textSecondary, fontSize: 13),
         ),
         actions: [
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-                backgroundColor: c.danger, foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-            onPressed: () async {
-              await _saveDraft(silent: true);
-              if (!context.mounted) return;
+              backgroundColor: c.danger,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            onPressed: () {
               Navigator.pop(context); // close dialog
-              Navigator.pop(context, true); // go back to dashboard
+              Navigator.pop(context, false); // go back — do not save
             },
             child: const Text("OK"),
           ),
@@ -2329,15 +2657,17 @@ class _ScreeningFormState extends State<ScreeningForm>
         backgroundColor: c.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: SizedBox(
-          width: 320, height: 320,
+          width: 320,
+          height: 320,
           child: MobileScanner(
             onDetect: (capture) {
               final code = capture.barcodes.first.rawValue ?? "";
               if (code.isNotEmpty) {
                 Navigator.pop(context);
                 _maternalUidCtrl.text = code;
-                ScaffoldMessenger.of(context)
-                    .showSnackBar(SnackBar(content: Text("Scanned: $code")));
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(SnackBar(content: Text("Scanned: $code")));
               }
             },
           ),
@@ -2356,19 +2686,29 @@ class _ScreeningFormState extends State<ScreeningForm>
         elevation: 6,
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-            side: BorderSide(color: c.warning.withOpacity(0.4))),
-        content: Row(children: [
-          Container(
-            padding: const EdgeInsets.all(6),
-            decoration: BoxDecoration(
-                color: c.warningSoft, borderRadius: BorderRadius.circular(8)),
-            child: Icon(Icons.save_rounded, color: c.warning, size: 18),
-          ),
-          const SizedBox(width: 12),
-          Text("Draft saved successfully",
-              style: TextStyle(color: c.textPrimary, fontWeight: FontWeight.w600)),
-        ]),
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(color: c.warning.withOpacity(0.4)),
+        ),
+        content: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: c.warningSoft,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(Icons.save_rounded, color: c.warning, size: 18),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              "Draft saved successfully",
+              style: TextStyle(
+                color: c.textPrimary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
         duration: const Duration(seconds: 2),
       ),
     );
@@ -2473,7 +2813,10 @@ class _ScreeningFormState extends State<ScreeningForm>
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(8),
-              child: Image.memory(base64Decode(savedBase64!), fit: BoxFit.contain),
+              child: Image.memory(
+                base64Decode(savedBase64!),
+                fit: BoxFit.contain,
+              ),
             ),
           ),
           Align(
@@ -2526,7 +2869,10 @@ class _ScreeningFormState extends State<ScreeningForm>
           if (showRequiredError)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text("Required", style: TextStyle(color: c.danger, fontSize: 12)),
+              child: Text(
+                "Required",
+                style: TextStyle(color: c.danger, fontSize: 12),
+              ),
             ),
           if (!hasSaved)
             Padding(
@@ -2541,11 +2887,16 @@ class _ScreeningFormState extends State<ScreeningForm>
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton(
-                    onPressed: points.whereType<Offset>().isEmpty ? null : () => onSave(),
+                    onPressed: points.whereType<Offset>().isEmpty
+                        ? null
+                        : () => onSave(),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: c.primary,
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(8),
                       ),
@@ -2587,19 +2938,27 @@ class _ScreeningFormState extends State<ScreeningForm>
       builder: (ctx) => AlertDialog(
         backgroundColor: c.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Text("Change site?",
-            style: TextStyle(color: c.textPrimary, fontWeight: FontWeight.w800)),
-        content: Text("Changing site will affect Screening ID assignment. Continue?",
-            style: TextStyle(color: c.textSecondary)),
+        title: Text(
+          "Change site?",
+          style: TextStyle(color: c.textPrimary, fontWeight: FontWeight.w800),
+        ),
+        content: Text(
+          "Changing site will affect Screening ID assignment. Continue?",
+          style: TextStyle(color: c.textSecondary),
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: Text("Cancel", style: TextStyle(color: c.textTertiary))),
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text("Cancel", style: TextStyle(color: c.textTertiary)),
+          ),
           ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: c.primary, foregroundColor: Colors.white),
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text("Yes, update")),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: c.primary,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text("Yes, update"),
+          ),
         ],
       ),
     );
@@ -2623,35 +2982,43 @@ class _ScreeningFormState extends State<ScreeningForm>
     return InputDecoration(
       // Red * for mandatory fields (not black labelText "*").
       label: requiredLabel(label, style: labelStyle, required: required),
-      hintText   : hint,
-      helperText : helper,
+      hintText: hint,
+      helperText: helper,
       helperStyle: TextStyle(color: c.textTertiary, fontSize: 12),
-      labelStyle : labelStyle,
+      labelStyle: labelStyle,
       floatingLabelStyle: labelStyle,
-      hintStyle  : TextStyle(color: c.textTertiary,  fontSize: 13),
-      filled     : true,
-      fillColor  : c.surfaceAlt,
+      hintStyle: TextStyle(color: c.textTertiary, fontSize: 13),
+      filled: true,
+      fillColor: c.surfaceAlt,
       contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
       border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.border)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.border),
+      ),
       enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.border)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.border),
+      ),
       focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.primary, width: 1.5)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.primary, width: 1.5),
+      ),
       errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.danger)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.danger),
+      ),
       focusedErrorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.danger, width: 1.5)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.danger, width: 1.5),
+      ),
     );
   }
 
-  InputDecoration _requiredDecoration(String label, {String? hint, String? helper}) =>
-      _inputDecoration(label, hint: hint, helper: helper, required: true);
+  InputDecoration _requiredDecoration(
+    String label, {
+    String? hint,
+    String? helper,
+  }) => _inputDecoration(label, hint: hint, helper: helper, required: true);
 
   Widget _reqText(String label, AppColors c, {double fontSize = 13}) =>
       requiredLabel(
@@ -2669,7 +3036,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     Widget? trailing,
     Color? accentColor,
   }) {
-    final c     = AppTheme.of(context);
+    final c = AppTheme.of(context);
     final color = accentColor ?? c.primary;
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
@@ -2677,43 +3044,69 @@ class _ScreeningFormState extends State<ScreeningForm>
         color: c.surface,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: c.border),
-        boxShadow: [BoxShadow(
+        boxShadow: [
+          BoxShadow(
             color: Colors.black.withOpacity(0.04),
-            blurRadius: 8, offset: const Offset(0, 2))],
-      ),
-      child: Column(children: [
-        // Header
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: c.surfaceAlt,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-            border: Border(bottom: BorderSide(color: c.borderLight)),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
           ),
-          child: Row(children: [
-            Container(
-              padding: const EdgeInsets.all(7),
-              decoration: BoxDecoration(
-                  color: color.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(9)),
-              child: Icon(icon, color: color, size: 16),
+        ],
+      ),
+      child: Column(
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: c.surfaceAlt,
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(16),
+              ),
+              border: Border(bottom: BorderSide(color: c.borderLight)),
             ),
-            const SizedBox(width: 10),
-            Container(width: 3, height: 16,
-                decoration: BoxDecoration(
-                    color: color, borderRadius: BorderRadius.circular(2))),
-            const SizedBox(width: 8),
-            Text(title, style: TextStyle(color: c.textPrimary,
-                fontWeight: FontWeight.w800, fontSize: 13, letterSpacing: .4)),
-            if (trailing != null) ...[const Spacer(), trailing],
-          ]),
-        ),
-        // Body
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
-        ),
-      ]),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(7),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Icon(icon, color: color, size: 16),
+                ),
+                const SizedBox(width: 10),
+                Container(
+                  width: 3,
+                  height: 16,
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: c.textPrimary,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13,
+                    letterSpacing: .4,
+                  ),
+                ),
+                if (trailing != null) ...[const Spacer(), trailing],
+              ],
+            ),
+          ),
+          // Body
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: children,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2723,6 +3116,7 @@ class _ScreeningFormState extends State<ScreeningForm>
     required TextEditingController controller,
     required int min,
     required int max,
+
     /// First +/- tap on an empty field snaps here (weeks: 25, the eligibility floor).
     int? emptySnapTo,
     String? Function(String?)? validator,
@@ -2737,56 +3131,71 @@ class _ScreeningFormState extends State<ScreeningForm>
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
           decoration: BoxDecoration(
-              color: c.surfaceAlt, borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: c.border)),
-          child: Row(children: [
-            IconButton(
-              icon: Icon(Icons.remove_circle_outline_rounded, color: c.danger, size: 20),
-              onPressed: () {
-                final parsed = int.tryParse(controller.text);
-                final snap = emptySnapTo ?? min;
-                setState(() {
-                  if (parsed == null) {
-                    controller.text = "$snap";
-                  } else if (parsed > min) {
-                    controller.text = "${parsed - 1}";
-                  }
-                  afterChange?.call();
-                });
-              },
-            ),
-            Expanded(
-              child: TextFormField(
-                controller: controller,
-                keyboardType: TextInputType.number,
-                textAlign: TextAlign.center,
-                readOnly: !enabled,
-                validator: validator,
-                onChanged: (_) {
-                  afterChange?.call();
-                  _scheduleGestationUiRefresh();
+            color: c.surfaceAlt,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: c.border),
+          ),
+          child: Row(
+            children: [
+              IconButton(
+                icon: Icon(
+                  Icons.remove_circle_outline_rounded,
+                  color: c.danger,
+                  size: 20,
+                ),
+                onPressed: () {
+                  final parsed = int.tryParse(controller.text);
+                  final snap = emptySnapTo ?? min;
+                  setState(() {
+                    if (parsed == null) {
+                      controller.text = "$snap";
+                    } else if (parsed > min) {
+                      controller.text = "${parsed - 1}";
+                    }
+                    afterChange?.call();
+                  });
                 },
-                style: TextStyle(color: c.textPrimary,
-                    fontWeight: FontWeight.w700, fontSize: 16),
-                decoration: const InputDecoration(border: InputBorder.none),
               ),
-            ),
-            IconButton(
-              icon: Icon(Icons.add_circle_outline_rounded, color: c.success, size: 20),
-              onPressed: () {
-                final parsed = int.tryParse(controller.text);
-                final snap = emptySnapTo ?? min;
-                setState(() {
-                  if (parsed == null) {
-                    controller.text = "$snap";
-                  } else if (parsed < max) {
-                    controller.text = "${parsed + 1}";
-                  }
-                  afterChange?.call();
-                });
-              },
-            ),
-          ]),
+              Expanded(
+                child: TextFormField(
+                  controller: controller,
+                  keyboardType: TextInputType.number,
+                  textAlign: TextAlign.center,
+                  readOnly: !enabled,
+                  validator: validator,
+                  onChanged: (_) {
+                    afterChange?.call();
+                    _scheduleGestationUiRefresh();
+                  },
+                  style: TextStyle(
+                    color: c.textPrimary,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 16,
+                  ),
+                  decoration: const InputDecoration(border: InputBorder.none),
+                ),
+              ),
+              IconButton(
+                icon: Icon(
+                  Icons.add_circle_outline_rounded,
+                  color: c.success,
+                  size: 20,
+                ),
+                onPressed: () {
+                  final parsed = int.tryParse(controller.text);
+                  final snap = emptySnapTo ?? min;
+                  setState(() {
+                    if (parsed == null) {
+                      controller.text = "$snap";
+                    } else if (parsed < max) {
+                      controller.text = "${parsed + 1}";
+                    }
+                    afterChange?.call();
+                  });
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2804,27 +3213,40 @@ class _ScreeningFormState extends State<ScreeningForm>
           decoration: BoxDecoration(
             color: c.surfaceAlt,
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: _exclusionAnswers[key] == "Yes"
-                ? c.danger.withOpacity(0.4)
-                : _exclusionAnswers[key] == "No"
-                    ? c.success.withOpacity(0.3)
-                    : c.border),
+            border: Border.all(
+              color: _exclusionAnswers[key] == "Yes"
+                  ? c.danger.withOpacity(0.4)
+                  : _exclusionAnswers[key] == "No"
+                  ? c.success.withOpacity(0.3)
+                  : c.border,
+            ),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(label, style: TextStyle(color: c.textPrimary,
-                  fontSize: 13, fontWeight: FontWeight.w500)),
+              Text(
+                label,
+                style: TextStyle(
+                  color: c.textPrimary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
               const SizedBox(height: 8),
-              Row(children: [
-                _yesNoChip("Yes", key, c.danger),
-                const SizedBox(width: 8),
-                _yesNoChip("No",  key, c.success),
-              ]),
+              Row(
+                children: [
+                  _yesNoChip("Yes", key, c.danger),
+                  const SizedBox(width: 8),
+                  _yesNoChip("No", key, c.success),
+                ],
+              ),
               if (_exclusionAnswers[key] == null && _submitted)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
-                  child: Text("Required", style: TextStyle(color: c.danger, fontSize: 12)),
+                  child: Text(
+                    "Required",
+                    style: TextStyle(color: c.danger, fontSize: 12),
+                  ),
                 ),
               if (_exclusionAnswers[key] == "Yes") ...[
                 const SizedBox(height: 12),
@@ -2839,7 +3261,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   }
 
   Widget _yesNoChip(String value, String key, Color color) {
-    final c        = AppTheme.of(context);
+    final c = AppTheme.of(context);
     final selected = _exclusionAnswers[key] == value;
     return GestureDetector(
       key: ValueKey('excl-$key-$value'),
@@ -2872,10 +3294,14 @@ class _ScreeningFormState extends State<ScreeningForm>
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: selected ? color : c.border, width: 1.5),
         ),
-        child: Text(value,
-            style: TextStyle(
-                color: selected ? color : c.textSecondary,
-                fontWeight: FontWeight.w700, fontSize: 12)),
+        child: Text(
+          value,
+          style: TextStyle(
+            color: selected ? color : c.textSecondary,
+            fontWeight: FontWeight.w700,
+            fontSize: 12,
+          ),
+        ),
       ),
     );
   }
@@ -2883,71 +3309,114 @@ class _ScreeningFormState extends State<ScreeningForm>
   Widget _exclusionSubFields(String key, AppColors c) {
     switch (key) {
       case "INSUFFICIENT":
-        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          TextFormField(
-            decoration: _requiredDecoration("24. If yes, specify"),
-            style: TextStyle(color: c.textPrimary),
-            onChanged: (v) => _insufficientReason = v,
-          ),
-          if (_submitted && _insufficientReason.trim().isEmpty)
-            Padding(padding: const EdgeInsets.only(top: 4),
-                child: Text("Required", style: TextStyle(color: c.danger, fontSize: 12))),
-        ]);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextFormField(
+              decoration: _requiredDecoration("24. If yes, specify"),
+              style: TextStyle(color: c.textPrimary),
+              onChanged: (v) => _insufficientReason = v,
+            ),
+            if (_submitted && _insufficientReason.trim().isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  "Required",
+                  style: TextStyle(color: c.danger, fontSize: 12),
+                ),
+              ),
+          ],
+        );
 
       case "RESUSCITATION":
-        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _reqText("22. If yes (select all that apply)", c),
-          const SizedBox(height: 6),
-          ...["Periviable", "Socio-economic", "Major CMF", "Other"].map((v) =>
-              _multiCheckboxTile(v, _resuscitationReasons, c, () => setState(() {
-                if (_resuscitationReasons.contains(v)) {
-                  _resuscitationReasons.remove(v);
-                } else {
-                  _resuscitationReasons.add(v);
-                }
-              }))),
-          if (_submitted && _resuscitationReasons.isEmpty)
-            Text("Please select at least one reason", style: TextStyle(color: c.danger, fontSize: 12)),
-          if (_resuscitationReasons.contains("Other")) ...[
-            const SizedBox(height: 8),
-            TextFormField(
-              decoration: _requiredDecoration("Please specify…"),
-              style: TextStyle(color: c.textPrimary),
-              onChanged: (v) => _resuscitationOther = v,
-              validator: (v) {
-                if (_submitted &&
-                    _resuscitationReasons.contains("Other") &&
-                    (v == null || v.trim().isEmpty)) return "Required";
-                return null;
-              },
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _reqText("22. If yes (select all that apply)", c),
+            const SizedBox(height: 6),
+            ...["Periviable", "Socio-economic", "Major CMF", "Other"].map(
+              (v) => _multiCheckboxTile(
+                v,
+                _resuscitationReasons,
+                c,
+                () => setState(() {
+                  if (_resuscitationReasons.contains(v)) {
+                    _resuscitationReasons.remove(v);
+                  } else {
+                    _resuscitationReasons.add(v);
+                  }
+                }),
+              ),
             ),
-            if (_submitted && _resuscitationOther.trim().isEmpty)
-              Text("Required", style: TextStyle(color: c.danger, fontSize: 12)),
+            if (_submitted && _resuscitationReasons.isEmpty)
+              Text(
+                "Please select at least one reason",
+                style: TextStyle(color: c.danger, fontSize: 12),
+              ),
+            if (_resuscitationReasons.contains("Other")) ...[
+              const SizedBox(height: 8),
+              TextFormField(
+                decoration: _requiredDecoration("Please specify…"),
+                style: TextStyle(color: c.textPrimary),
+                onChanged: (v) => _resuscitationOther = v,
+                validator: (v) {
+                  if (_submitted &&
+                      _resuscitationReasons.contains("Other") &&
+                      (v == null || v.trim().isEmpty))
+                    return "Required";
+                  return null;
+                },
+              ),
+              if (_submitted && _resuscitationOther.trim().isEmpty)
+                Text(
+                  "Required",
+                  style: TextStyle(color: c.danger, fontSize: 12),
+                ),
+            ],
           ],
-        ]);
+        );
 
       case "ANOMALY":
-        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          TextFormField(
-            decoration: _requiredDecoration("If yes, specify"),
-            style: TextStyle(color: c.textPrimary),
-            onChanged: (v) => _anomalyDetails = v,
-          ),
-          if (_submitted && _anomalyDetails.trim().isEmpty)
-            Padding(padding: const EdgeInsets.only(top: 4),
-                child: Text("Required", style: TextStyle(color: c.danger, fontSize: 12))),
-        ]);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextFormField(
+              decoration: _requiredDecoration("If yes, specify"),
+              style: TextStyle(color: c.textPrimary),
+              onChanged: (v) => _anomalyDetails = v,
+            ),
+            if (_submitted && _anomalyDetails.trim().isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  "Required",
+                  style: TextStyle(color: c.danger, fontSize: 12),
+                ),
+              ),
+          ],
+        );
 
       case "HYDROPS":
-        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _reqText("20. If yes", c),
-          const SizedBox(height: 6),
-          ...["Immune", "Non-immune", "Unclear"].map((v) =>
-              _styledRadio(v, _hydropsType, c, (val) =>
-                  setState(() => _hydropsType = val!))),
-          if (_submitted && _hydropsType.isEmpty)
-            Text("Please select hydrops type", style: TextStyle(color: c.danger, fontSize: 12)),
-        ]);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _reqText("20. If yes", c),
+            const SizedBox(height: 6),
+            ...["Immune", "Non-immune", "Unclear"].map(
+              (v) => _styledRadio(
+                v,
+                _hydropsType,
+                c,
+                (val) => setState(() => _hydropsType = val!),
+              ),
+            ),
+            if (_submitted && _hydropsType.isEmpty)
+              Text(
+                "Please select hydrops type",
+                style: TextStyle(color: c.danger, fontSize: 12),
+              ),
+          ],
+        );
 
       default:
         return const SizedBox.shrink();
@@ -2957,8 +3426,12 @@ class _ScreeningFormState extends State<ScreeningForm>
   // Same visual language as _styledRadio, but a square checkbox indicator
   // (not a circle) to visually signal "multi-select" vs "pick one", and
   // toggles membership in a Set instead of replacing a single value.
-  Widget _multiCheckboxTile(String value, Set<String> selectedSet, AppColors c,
-      VoidCallback onToggle) {
+  Widget _multiCheckboxTile(
+    String value,
+    Set<String> selectedSet,
+    AppColors c,
+    VoidCallback onToggle,
+  ) {
     final selected = selectedSet.contains(value);
     return GestureDetector(
       onTap: onToggle,
@@ -2973,27 +3446,44 @@ class _ScreeningFormState extends State<ScreeningForm>
             width: selected ? 2 : 1,
           ),
         ),
-        child: Row(children: [
-          Container(
-            width: 16, height: 16,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: selected ? c.primary : c.border, width: 2),
-              color: selected ? c.primary : Colors.transparent,
+        child: Row(
+          children: [
+            Container(
+              width: 16,
+              height: 16,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: selected ? c.primary : c.border,
+                  width: 2,
+                ),
+                color: selected ? c.primary : Colors.transparent,
+              ),
+              child: selected
+                  ? const Icon(Icons.check, color: Colors.white, size: 12)
+                  : null,
             ),
-            child: selected ? const Icon(Icons.check, color: Colors.white, size: 12) : null,
-          ),
-          const SizedBox(width: 10),
-          Text(value, style: TextStyle(
-              color: selected ? c.primaryDark : c.textSecondary,
-              fontWeight: selected ? FontWeight.w800 : FontWeight.w500, fontSize: 13)),
-        ]),
+            const SizedBox(width: 10),
+            Text(
+              value,
+              style: TextStyle(
+                color: selected ? c.primaryDark : c.textSecondary,
+                fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _styledRadio(String value, String groupValue, AppColors c,
-      void Function(String?) onChanged) {
+  Widget _styledRadio(
+    String value,
+    String groupValue,
+    AppColors c,
+    void Function(String?) onChanged,
+  ) {
     final selected = groupValue == value;
     return GestureDetector(
       onTap: () => onChanged(value),
@@ -3005,22 +3495,34 @@ class _ScreeningFormState extends State<ScreeningForm>
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: selected ? c.primary : c.border),
         ),
-        child: Row(children: [
-          Container(
-            width: 16, height: 16,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(color: selected ? c.primary : c.border, width: 2),
-              color: selected ? c.primary : Colors.transparent,
+        child: Row(
+          children: [
+            Container(
+              width: 16,
+              height: 16,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: selected ? c.primary : c.border,
+                  width: 2,
+                ),
+                color: selected ? c.primary : Colors.transparent,
+              ),
+              child: selected
+                  ? Icon(Icons.circle, color: Colors.white, size: 8)
+                  : null,
             ),
-            child: selected ? Icon(Icons.circle, color: Colors.white, size: 8) : null,
-          ),
-          const SizedBox(width: 10),
-          Text(value, style: TextStyle(
-              color: selected ? c.primary : c.textSecondary,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-              fontSize: 13)),
-        ]),
+            const SizedBox(width: 10),
+            Text(
+              value,
+              style: TextStyle(
+                color: selected ? c.primary : c.textSecondary,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3043,44 +3545,63 @@ class _ScreeningFormState extends State<ScreeningForm>
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: c.border),
       ),
-      child: Row(children: List.generate(steps.length * 2 - 1, (i) {
-        if (i.isOdd) {
+      child: Row(
+        children: List.generate(steps.length * 2 - 1, (i) {
+          if (i.isOdd) {
+            final stepIdx = i ~/ 2;
+            final done = stepIdx < activeStep;
+            return Expanded(
+              child: Container(height: 2, color: done ? c.primary : c.border),
+            );
+          }
           final stepIdx = i ~/ 2;
           final done = stepIdx < activeStep;
-          return Expanded(child: Container(
-            height: 2,
-            color: done ? c.primary : c.border,
-          ));
-        }
-        final stepIdx = i ~/ 2;
-        final done    = stepIdx < activeStep;
-        final current = stepIdx == activeStep;
-        return Column(mainAxisSize: MainAxisSize.min, children: [
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            width: 24, height: 24,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: done ? c.primary : current ? c.primarySoft : c.surfaceAlt,
-              border: Border.all(
-                  color: done || current ? c.primary : c.border, width: 1.5),
-            ),
-            child: Center(
-              child: done
-                  ? Icon(Icons.check_rounded, color: Colors.white, size: 13)
-                  : Text("${stepIdx + 1}",
-                      style: TextStyle(
-                          color: current ? c.primary : c.textTertiary,
-                          fontSize: 10, fontWeight: FontWeight.w700)),
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(steps[stepIdx],
-              style: TextStyle(
+          final current = stepIdx == activeStep;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                width: 24,
+                height: 24,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: done
+                      ? c.primary
+                      : current
+                      ? c.primarySoft
+                      : c.surfaceAlt,
+                  border: Border.all(
+                    color: done || current ? c.primary : c.border,
+                    width: 1.5,
+                  ),
+                ),
+                child: Center(
+                  child: done
+                      ? Icon(Icons.check_rounded, color: Colors.white, size: 13)
+                      : Text(
+                          "${stepIdx + 1}",
+                          style: TextStyle(
+                            color: current ? c.primary : c.textTertiary,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                steps[stepIdx],
+                style: TextStyle(
                   color: done || current ? c.primary : c.textTertiary,
-                  fontSize: 9, fontWeight: FontWeight.w600)),
-        ]);
-      })),
+                  fontSize: 9,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          );
+        }),
+      ),
     );
   }
 
@@ -3103,11 +3624,20 @@ class _ScreeningFormState extends State<ScreeningForm>
           context: context,
           builder: (ctx) => AlertDialog(
             backgroundColor: c.surface,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: Text("Leave this form?",
-                style: TextStyle(color: c.textPrimary, fontWeight: FontWeight.w800)),
-            content: Text("Your progress will be saved as draft.",
-                style: TextStyle(color: c.textSecondary)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            title: Text(
+              "Leave this form?",
+              style: TextStyle(
+                color: c.textPrimary,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            content: Text(
+              "Your progress will be saved as draft.",
+              style: TextStyle(color: c.textSecondary),
+            ),
             actionsAlignment: MainAxisAlignment.spaceBetween,
             actions: [
               TextButton(
@@ -3117,9 +3647,16 @@ class _ScreeningFormState extends State<ScreeningForm>
               ElevatedButton(
                 onPressed: () => Navigator.pop(ctx, true),
                 style: ElevatedButton.styleFrom(
-                    backgroundColor: c.danger, foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-                child: const Text("Leave", style: TextStyle(fontWeight: FontWeight.bold)),
+                  backgroundColor: c.danger,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: const Text(
+                  "Leave",
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
               ),
             ],
           ),
@@ -3140,120 +3677,144 @@ class _ScreeningFormState extends State<ScreeningForm>
         body: _loadingExisting
             ? const Center(child: CircularProgressIndicator())
             : Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter, end: Alignment.bottomCenter,
-              colors: [c.bgGradTop, c.bg], stops: const [0.0, 0.35],
-            ),
-          ),
-          child: SafeArea(
-            child: SingleChildScrollView(
-              controller: _formScrollController,
-              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-              physics: _icfSigningActive
-                  ? const NeverScrollableScrollPhysics()
-                  : const ClampingScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
-              child: AbsorbPointer(
-                absorbing: _formReadOnly,
-                child: Form(
-                  key: _formKey,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [c.bgGradTop, c.bg],
+                    stops: const [0.0, 0.35],
+                  ),
+                ),
+                child: SafeArea(
+                  child: SingleChildScrollView(
+                    controller: _formScrollController,
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    physics: _icfSigningActive
+                        ? const NeverScrollableScrollPhysics()
+                        : const ClampingScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+                    child: AbsorbPointer(
+                      absorbing: _formReadOnly,
+                      child: Form(
+                        key: _formKey,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (_formReadOnly) ...[
+                              Container(
+                                width: double.infinity,
+                                margin: const EdgeInsets.only(bottom: 12),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: c.primary.withOpacity(0.08),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: c.primary.withOpacity(0.25),
+                                  ),
+                                ),
+                                child: Text(
+                                  "Saved — tap Edit Form in the header to make changes",
+                                  style: TextStyle(
+                                    color: c.primary,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                            ],
+                            if (_isEditing &&
+                                (_isSaved || widget.viewOnly)) ...[
+                              Container(
+                                width: double.infinity,
+                                margin: const EdgeInsets.only(bottom: 12),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: c.warningSoft,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: c.warning.withOpacity(0.35),
+                                  ),
+                                ),
+                                child: Text(
+                                  "Editing saved Form A",
+                                  style: TextStyle(
+                                    color: c.warning,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                            ],
 
-                      if (_formReadOnly) ...[
-                        Container(
-                          width: double.infinity,
-                          margin: const EdgeInsets.only(bottom: 12),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: c.primary.withOpacity(0.08),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: c.primary.withOpacity(0.25)),
-                          ),
-                          child: Text(
-                            "Saved — tap Edit Form in the header to make changes",
-                            style: TextStyle(
-                              color: c.primary,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
+                            _buildStepIndicator(c),
+
+                            _buildGestationSection(c),
+
+                            if (_isEligibleGestation)
+                              _buildIdentificationSection(c, nameFormatter),
+
+                            if (_isEligibleGestation)
+                              _buildMaternalSection(c, nameFormatter),
+
+                            if (_isEligibleGestation) _buildExclusionSection(c),
+
+                            // Match web: show A5 when all exclusions No, or consent already saved
+                            if (_isEligibleGestation &&
+                                (_allExclusionsNo ||
+                                    (_consentStatus != "Select" &&
+                                        _consentStatus.isNotEmpty)))
+                              _buildConsentSection(c),
+
+                            if (_submitted &&
+                                _formKey.currentState?.validate() == false)
+                              Container(
+                                padding: const EdgeInsets.all(12),
+                                margin: const EdgeInsets.only(bottom: 16),
+                                decoration: BoxDecoration(
+                                  color: c.dangerSoft,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: c.danger.withOpacity(0.4),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.error_outline, color: c.danger),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        "Please fill all mandatory fields highlighted in red",
+                                        style: TextStyle(
+                                          color: c.danger,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+
+                            // Same as web NotesBox — optional local notes keyed by screening id.
+                            NotesBox(
+                              formKey:
+                                  "form_a_${(_assignedScreeningId != null && _assignedScreeningId!.isNotEmpty) ? _assignedScreeningId! : "new"}",
                             ),
-                          ),
+
+                            const SizedBox(height: 40),
+                          ],
                         ),
-                      ],
-                      if (_isEditing && (_isSaved || widget.viewOnly)) ...[
-                        Container(
-                          width: double.infinity,
-                          margin: const EdgeInsets.only(bottom: 12),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: c.warningSoft,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: c.warning.withOpacity(0.35)),
-                          ),
-                          child: Text(
-                            "Editing saved Form A",
-                            style: TextStyle(
-                              color: c.warning,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ),
-                      ],
-
-                      _buildStepIndicator(c),
-
-                      _buildGestationSection(c),
-
-                      if (_isEligibleGestation) _buildIdentificationSection(c, nameFormatter),
-
-                      if (_isEligibleGestation) _buildMaternalSection(c, nameFormatter),
-
-                      if (_isEligibleGestation) _buildExclusionSection(c),
-
-                      // Match web: show A5 when all exclusions No, or consent already saved
-                      if (_isEligibleGestation &&
-                          (_allExclusionsNo ||
-                              (_consentStatus != "Select" &&
-                                  _consentStatus.isNotEmpty)))
-                        _buildConsentSection(c),
-
-                      if (_submitted && _formKey.currentState?.validate() == false)
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          margin: const EdgeInsets.only(bottom: 16),
-                          decoration: BoxDecoration(
-                            color: c.dangerSoft,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: c.danger.withOpacity(0.4)),
-                          ),
-                          child: Row(children: [
-                            Icon(Icons.error_outline, color: c.danger),
-                            const SizedBox(width: 10),
-                            Expanded(child: Text(
-                              "Please fill all mandatory fields highlighted in red",
-                              style: TextStyle(color: c.danger, fontWeight: FontWeight.w600),
-                            )),
-                          ]),
-                        ),
-
-                      // Same as web NotesBox — optional local notes keyed by screening id.
-                      NotesBox(
-                        formKey: "form_a_${(_assignedScreeningId != null && _assignedScreeningId!.isNotEmpty) ? _assignedScreeningId! : "new"}",
                       ),
-
-                      const SizedBox(height: 40),
-                    ],
+                    ),
                   ),
                 ),
               ),
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -3270,15 +3831,29 @@ class _ScreeningFormState extends State<ScreeningForm>
         preferredSize: const Size.fromHeight(1),
         child: Container(height: 1, color: c.borderLight),
       ),
-      title: Column(mainAxisSize: MainAxisSize.min, children: [
-        Text("Form A : Screening",
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800,
-                color: c.textPrimary, letterSpacing: .3)),
-        const SizedBox(height: 2),
-        Text("Eligibility Assessment · 25 weeks 0 days to 31 weeks 6 days",
-            style: TextStyle(fontSize: 11, color: c.primary.withOpacity(0.7),
-                fontWeight: FontWeight.w500)),
-      ]),
+      title: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            "Form A : Screening",
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+              color: c.textPrimary,
+              letterSpacing: .3,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            "Eligibility Assessment · 25 weeks 0 days to 31 weeks 6 days",
+            style: TextStyle(
+              fontSize: 11,
+              color: c.primary.withOpacity(0.7),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
       actions: [
         Padding(
           padding: const EdgeInsets.only(right: 2),
@@ -3296,11 +3871,11 @@ class _ScreeningFormState extends State<ScreeningForm>
                       color: c.primary,
                     ),
                   )
-                : Icon(Icons.ios_share_rounded,
-                    color: _formAExportEnabled
-                        ? c.textPrimary
-                        : c.textTertiary,
-                    size: 20),
+                : Icon(
+                    Icons.ios_share_rounded,
+                    color: _formAExportEnabled ? c.textPrimary : c.textTertiary,
+                    size: 20,
+                  ),
           ),
         ),
         if (_showEditAction)
@@ -3326,17 +3901,33 @@ class _ScreeningFormState extends State<ScreeningForm>
               context: context,
               builder: (ctx) => AlertDialog(
                 backgroundColor: c.surface,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                title: Text("Logout?",
-                    style: TextStyle(color: c.textPrimary, fontWeight: FontWeight.w800)),
-                content: Text("Are you sure you want to logout?",
-                    style: TextStyle(color: c.textSecondary)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                title: Text(
+                  "Logout?",
+                  style: TextStyle(
+                    color: c.textPrimary,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                content: Text(
+                  "Are you sure you want to logout?",
+                  style: TextStyle(color: c.textSecondary),
+                ),
                 actions: [
-                  TextButton(onPressed: () => Navigator.pop(ctx, false),
-                      child: Text("Cancel", style: TextStyle(color: c.textTertiary))),
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: Text(
+                      "Cancel",
+                      style: TextStyle(color: c.textTertiary),
+                    ),
+                  ),
                   ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                        backgroundColor: c.danger, foregroundColor: Colors.white),
+                      backgroundColor: c.danger,
+                      foregroundColor: Colors.white,
+                    ),
                     onPressed: () => Navigator.pop(ctx, true),
                     child: const Text("Logout"),
                   ),
@@ -3349,8 +3940,10 @@ class _ScreeningFormState extends State<ScreeningForm>
             margin: const EdgeInsets.only(right: 12),
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-                color: c.dangerSoft, borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: c.danger.withOpacity(0.2))),
+              color: c.dangerSoft,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: c.danger.withOpacity(0.2)),
+            ),
             child: Icon(Icons.logout_rounded, color: c.danger, size: 18),
           ),
         ),
@@ -3366,120 +3959,178 @@ class _ScreeningFormState extends State<ScreeningForm>
       top: false,
       minimum: const EdgeInsets.only(bottom: 8),
       child: Container(
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-      decoration: BoxDecoration(
-        color: c.surface,
-        border: Border(top: BorderSide(color: c.borderLight)),
-        boxShadow: [BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10, offset: const Offset(0, -3))],
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                icon: Icon(Icons.save_outlined, size: 16, color: c.warning),
-                label: Text("Save for Later", style: TextStyle(color: c.warning, fontWeight: FontWeight.w700, fontSize: 12)),
-                onPressed: () async {
-                  await _saveDraft();
-                  if (!mounted) return;
-                  Navigator.of(context).pop(true);
-                },
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: c.warning.withOpacity(0.5)),
-                  backgroundColor: c.warningSoft,
-                  padding: const EdgeInsets.symmetric(vertical: 13),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-              ),
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border(top: BorderSide(color: c.borderLight)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 10,
+              offset: const Offset(0, -3),
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              flex: 2,
-              child: ElevatedButton.icon(
-                icon: const Icon(Icons.check_circle_outline_rounded, size: 16, color: Colors.white),
-                label: const Text("Save",
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-                onPressed: () async {
-                  setState(() => _submitted = true);
-                  if (_formKey.currentState?.validate() != true) {
-                    _scrollToFirstError();
-                    return;
-                  }
-                  if (_gestationKnownInWeeks == false && _eddKnown == false) {
-                    _showScreeningEndedPopup(); return;
-                  }
-                  if (_isGestationOutOfRange()) {
-                    _showGestationOutOfRangePopup(); return;
-                  }
-                  if ((_gestationKnownInWeeks == true || _eddKnown == true) &&
-                      !_validateExclusionCompleted()) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text("Please answer all exclusion criteria")));
-                    return;
-                  }
-                  final sigMissing = _validateAttestationSignaturesForSave();
-                  if (sigMissing != null) {
-                    setState(() {});
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          "$sigMissing — sign and tap Save Signature (same as web Form A)",
-                        ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: Icon(Icons.save_outlined, size: 16, color: c.warning),
+                    label: Text(
+                      "Save for Later",
+                      style: TextStyle(
+                        color: c.warning,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12,
                       ),
-                    );
-                    return;
-                  }
-                  await _confirmSaveAndClose();
-                },
+                    ),
+                    onPressed: () async {
+                      await _saveDraft();
+                      if (!mounted) return;
+                      Navigator.of(context).pop(true);
+                    },
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: c.warning.withOpacity(0.5)),
+                      backgroundColor: c.warningSoft,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  flex: 2,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(
+                      Icons.check_circle_outline_rounded,
+                      size: 16,
+                      color: Colors.white,
+                    ),
+                    label: const Text(
+                      "Save",
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    onPressed: () async {
+                      setState(() => _submitted = true);
+                      if (_formKey.currentState?.validate() != true) {
+                        _scrollToFirstError();
+                        return;
+                      }
+                      if (_gestationKnownInWeeks == false &&
+                          _eddKnown == false) {
+                        _showScreeningEndedPopup();
+                        return;
+                      }
+                      if (_isGestationOutOfRange()) {
+                        _showGestationOutOfRangePopup();
+                        return;
+                      }
+                      if ((_gestationKnownInWeeks == true ||
+                              _eddKnown == true) &&
+                          !_validateExclusionCompleted()) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              "Please answer all exclusion criteria",
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+                      final sigMissing =
+                          _validateAttestationSignaturesForSave();
+                      if (sigMissing != null) {
+                        setState(() {});
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              "$sigMissing — sign and tap Save Signature (same as web Form A)",
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+                      await _confirmSaveAndClose();
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: c.success,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      elevation: 0,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () async {
+                      if (!_formReadOnly) await _saveDraft();
+                      if (!mounted) return;
+                      Navigator.of(context).pop(true);
+                    },
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: c.border),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    child: Text(
+                      "Dashboard",
+                      style: TextStyle(
+                        color: c.textSecondary,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                icon: const Icon(
+                  Icons.child_care_rounded,
+                  size: 16,
+                  color: Colors.white,
+                ),
+                label: const Text(
+                  "Birth & Resuscitation",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+                onPressed: (_formAExportEnabled && !_formBLocked)
+                    ? _openFormB
+                    : null,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: c.success,
-                  padding: const EdgeInsets.symmetric(vertical: 13),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  backgroundColor: c.primary,
+                  disabledBackgroundColor: c.border,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                   elevation: 0,
                 ),
               ),
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: OutlinedButton(
-                onPressed: () async {
-                  if (!_formReadOnly) await _saveDraft();
-                  if (!mounted) return;
-                  Navigator.of(context).pop(true);
-                },
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: c.border),
-                  padding: const EdgeInsets.symmetric(vertical: 13),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-                child: Text("Dashboard",
-                    style: TextStyle(color: c.textSecondary, fontWeight: FontWeight.w600, fontSize: 12)),
-              ),
-            ),
-          ]),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              icon: const Icon(Icons.child_care_rounded, size: 16, color: Colors.white),
-              label: const Text("Birth & Resuscitation",
-                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13)),
-              onPressed: (_formAExportEnabled && !_formBLocked) ? _openFormB : null,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: c.primary,
-                disabledBackgroundColor: c.border,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                elevation: 0,
-              ),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
-    ),
     );
   }
 
@@ -3491,82 +4142,103 @@ class _ScreeningFormState extends State<ScreeningForm>
       icon: Icons.pregnant_woman_rounded,
       accentColor: c.primary,
       children: [
-        Text("1. Gestation in weeks clearly mentioned",
-            style: TextStyle(color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600)),
+        Text(
+          "1. Gestation in weeks clearly mentioned",
+          style: TextStyle(
+            color: c.textSecondary,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
         const SizedBox(height: 10),
-        Row(children: [
-          Expanded(child: _gestRadio("Yes", true, c)),
-          const SizedBox(width: 8),
-          Expanded(child: _gestRadio("No",  false, c)),
-        ]),
+        Row(
+          children: [
+            Expanded(child: _gestRadio("Yes", true, c)),
+            const SizedBox(width: 8),
+            Expanded(child: _gestRadio("No", false, c)),
+          ],
+        ),
 
         if (_gestationKnownInWeeks == true) ...[
           const SizedBox(height: 18),
-          Text("2. Best estimate gestational age — Weeks",
-              style: TextStyle(color: c.textSecondary, fontSize: 13, fontWeight: FontWeight.w600)),
+          Text(
+            "2. Best estimate gestational age — Weeks",
+            style: TextStyle(
+              color: c.textSecondary,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
           const SizedBox(height: 8),
-          Row(children: [
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text("Weeks", style: TextStyle(color: c.textTertiary, fontSize: 12)),
-              const SizedBox(height: 6),
-              // Eligibility window: 25+0 through 31+6 weeks only.
-              _numberStepper(
-                controller: _gestWeeksCtrl,
-                min: _kEligibleGestMinWeeks,
-                max: _kEligibleGestMaxWeeks,
-                emptySnapTo: _kEligibleGestMinWeeks,
-                afterChange: _normalizeDirectGestationEntry,
-                validator: (v) {
-                  if (!_submitted) return null;
-                  if (v == null || v.trim().isEmpty) return "Required";
-                  final n = int.tryParse(v);
-                  if (n == null ||
-                      n < _kEligibleGestMinWeeks ||
-                      n > _kEligibleGestMaxWeeks) {
-                    return "Must be $_kEligibleGestMinWeeks–$_kEligibleGestMaxWeeks weeks";
-                  }
-                  final d = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
-                  final t = n * 7 + d;
-                  if (t < _kEligibleGestMinTotalDays ||
-                      t > _kEligibleGestMaxTotalDays) {
-                    return "Must be 25w0d to 31w6d";
-                  }
-                  return null;
-                },
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "Weeks",
+                      style: TextStyle(color: c.textTertiary, fontSize: 12),
+                    ),
+                    const SizedBox(height: 6),
+                    // Direct GA entry: 25 weeks 0 days – 31 weeks 6 days (same as web).
+                    _numberStepper(
+                      controller: _gestWeeksCtrl,
+                      min: _kEligibleGestMinWeeks,
+                      max: _kEligibleGestMaxWeeks,
+                      emptySnapTo: _kEligibleGestMinWeeks,
+                      afterChange: _normalizeDirectGestationEntry,
+                      validator: (v) {
+                        if (!_submitted) return null;
+                        if (v == null || v.trim().isEmpty) return "Required";
+                        final n = int.tryParse(v);
+                        if (n == null ||
+                            n < _kEligibleGestMinWeeks ||
+                            n > _kEligibleGestMaxWeeks) {
+                          return "Must be 25 weeks 0 days to 31 weeks 6 days";
+                        }
+                        return null;
+                      },
+                    ),
+                  ],
+                ),
               ),
-            ])),
-            const SizedBox(width: 12),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text("Days", style: TextStyle(color: c.textTertiary, fontSize: 12)),
-              const SizedBox(height: 6),
-              _numberStepper(
-                controller: _gestDaysCtrl,
-                min: 0,
-                max: 6,
-                afterChange: _normalizeDirectGestationEntry,
-                validator: (v) {
-                  if (!_submitted) return null;
-                  if (v == null || v.trim().isEmpty) return "Required";
-                  final n = int.tryParse(v);
-                  if (n == null || n < 0 || n > 6) return "Must be 0–6 days";
-                  final w = int.tryParse(_gestWeeksCtrl.text.trim());
-                  if (w != null) {
-                    final t = w * 7 + n;
-                    if (t < _kEligibleGestMinTotalDays ||
-                        t > _kEligibleGestMaxTotalDays) {
-                      return "Must be 25w0d to 31w6d";
-                    }
-                  }
-                  return null;
-                },
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "Days",
+                      style: TextStyle(color: c.textTertiary, fontSize: 12),
+                    ),
+                    const SizedBox(height: 6),
+                    _numberStepper(
+                      controller: _gestDaysCtrl,
+                      min: 0,
+                      max: 6,
+                      afterChange: _normalizeDirectGestationEntry,
+                      validator: (v) {
+                        if (!_submitted) return null;
+                        if (v == null || v.trim().isEmpty) return "Required";
+                        final n = int.tryParse(v);
+                        if (n == null || n < 0 || n > 6)
+                          return "Must be 0–6 days";
+                        return null;
+                      },
+                    ),
+                  ],
+                ),
               ),
-            ])),
-          ]),
+            ],
+          ),
           const SizedBox(height: 14),
           DropdownButtonFormField<String>(
             value: _gaAssessmentMethod,
             dropdownColor: c.surface,
-            decoration: _requiredDecoration("3. Method of gestation assessment"),
+            decoration: _requiredDecoration(
+              "3. Method of gestation assessment",
+            ),
             items: [
               _ddItem("Select", c, hint: true),
               _ddItem("LMP", c),
@@ -3588,15 +4260,22 @@ class _ScreeningFormState extends State<ScreeningForm>
           if (_gaAssessmentMethod == "LMP") ...[
             const SizedBox(height: 12),
             TextFormField(
-              controller: _lmpCtrl, readOnly: true,
+              controller: _lmpCtrl,
+              readOnly: true,
               decoration: _requiredDecoration("3. LMP date").copyWith(
-                suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18)),
+                suffixIcon: Icon(
+                  Icons.calendar_today,
+                  color: c.textTertiary,
+                  size: 18,
+                ),
+              ),
               style: TextStyle(color: c.textPrimary),
               onTap: () async {
                 final picked = await showModernDatePicker(
                   context: context,
                   initialDate: DateTime.now(),
-                  firstDate: DateTime(2020), lastDate: DateTime.now(),
+                  firstDate: DateTime(2020),
+                  lastDate: DateTime.now(),
                 );
                 if (picked != null) {
                   _lmpCtrl.text = formatDdMmYyyy(picked);
@@ -3608,7 +4287,8 @@ class _ScreeningFormState extends State<ScreeningForm>
             ),
             const SizedBox(height: 12),
             TextFormField(
-              controller: _expectedDeliveryCtrl, readOnly: true,
+              controller: _expectedDeliveryCtrl,
+              readOnly: true,
               decoration: _inputDecoration("EDD (auto-calculated from LMP)"),
               style: TextStyle(color: c.textPrimary),
             ),
@@ -3626,15 +4306,19 @@ class _ScreeningFormState extends State<ScreeningForm>
           DropdownButtonFormField<String>(
             value: _gaSource ?? "Select",
             dropdownColor: c.surface,
-            decoration: _requiredDecoration("4. If No, is any of the following known?"),
+            decoration: _requiredDecoration(
+              "4. If No, is any of the following known?",
+            ),
             items: [
               _ddItem("Select", c, hint: true),
               _ddItem("LMP", c),
               _ddItem("EDD", c),
               DropdownMenuItem(
                 value: "Neither",
-                child: Text("Neither known",
-                    style: TextStyle(color: c.textPrimary, fontSize: 13)),
+                child: Text(
+                  "Neither known",
+                  style: TextStyle(color: c.textPrimary, fontSize: 13),
+                ),
               ),
             ],
             onChanged: (v) {
@@ -3653,15 +4337,22 @@ class _ScreeningFormState extends State<ScreeningForm>
           if (_gaSource == "LMP") ...[
             const SizedBox(height: 16),
             TextFormField(
-              controller: _lmpCtrl, readOnly: true,
+              controller: _lmpCtrl,
+              readOnly: true,
               decoration: _requiredDecoration("5. If LMP known, LMP").copyWith(
-                suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18)),
+                suffixIcon: Icon(
+                  Icons.calendar_today,
+                  color: c.textTertiary,
+                  size: 18,
+                ),
+              ),
               style: TextStyle(color: c.textPrimary),
               onTap: () async {
                 final picked = await showModernDatePicker(
                   context: context,
                   initialDate: DateTime.now(),
-                  firstDate: DateTime(2020), lastDate: DateTime.now(),
+                  firstDate: DateTime(2020),
+                  lastDate: DateTime.now(),
                 );
                 if (picked != null) {
                   _lmpCtrl.text = formatDdMmYyyy(picked);
@@ -3675,24 +4366,27 @@ class _ScreeningFormState extends State<ScreeningForm>
             ),
             const SizedBox(height: 12),
             TextFormField(
-              controller: _expectedDeliveryCtrl, readOnly: true,
+              controller: _expectedDeliveryCtrl,
+              readOnly: true,
               decoration: _inputDecoration("EDD (auto-calculated in app)"),
               style: TextStyle(color: c.textPrimary),
             ),
             const SizedBox(height: 12),
             InputDecorator(
               decoration: _inputDecoration(
-                  "7. Calculated gestational age (auto calculated in app)"),
+                "7. Calculated gestational age (auto calculated in app)",
+              ),
               child: Text(
                 _gestWeeksCtrl.text.trim().isEmpty
                     ? "____ weeks ; ____ days"
                     : "${_gestWeeksCtrl.text} weeks ; ${_gestDaysCtrl.text.isEmpty ? "0" : _gestDaysCtrl.text} days",
                 style: TextStyle(
-                    color: _gestWeeksCtrl.text.trim().isEmpty
-                        ? c.textTertiary
-                        : c.textPrimary,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 15),
+                  color: _gestWeeksCtrl.text.trim().isEmpty
+                      ? c.textTertiary
+                      : c.textPrimary,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                ),
               ),
             ),
           ],
@@ -3700,15 +4394,23 @@ class _ScreeningFormState extends State<ScreeningForm>
           if (_gaSource == "EDD") ...[
             const SizedBox(height: 16),
             TextFormField(
-              controller: _expectedDeliveryCtrl, readOnly: true,
-              decoration: _requiredDecoration("6. If LMP not known, EDD").copyWith(
-                suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18)),
+              controller: _expectedDeliveryCtrl,
+              readOnly: true,
+              decoration: _requiredDecoration("6. If LMP not known, EDD")
+                  .copyWith(
+                    suffixIcon: Icon(
+                      Icons.calendar_today,
+                      color: c.textTertiary,
+                      size: 18,
+                    ),
+                  ),
               style: TextStyle(color: c.textPrimary),
               onTap: () async {
                 final picked = await showModernDatePicker(
                   context: context,
                   initialDate: DateTime.now(),
-                  firstDate: DateTime(1900), lastDate: DateTime(2100),
+                  firstDate: DateTime(1900),
+                  lastDate: DateTime(2100),
                 );
                 if (picked != null) {
                   _expectedDeliveryCtrl.text = formatDdMmYyyy(picked);
@@ -3720,17 +4422,19 @@ class _ScreeningFormState extends State<ScreeningForm>
             const SizedBox(height: 12),
             InputDecorator(
               decoration: _inputDecoration(
-                  "7. Calculated gestational age (auto calculated in app)"),
+                "7. Calculated gestational age (auto calculated in app)",
+              ),
               child: Text(
                 _gestWeeksCtrl.text.trim().isEmpty
                     ? "____ weeks ; ____ days"
                     : "${_gestWeeksCtrl.text} weeks ; ${_gestDaysCtrl.text.isEmpty ? "0" : _gestDaysCtrl.text} days",
                 style: TextStyle(
-                    color: _gestWeeksCtrl.text.trim().isEmpty
-                        ? c.textTertiary
-                        : c.textPrimary,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 15),
+                  color: _gestWeeksCtrl.text.trim().isEmpty
+                      ? c.textTertiary
+                      : c.textPrimary,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                ),
               ),
             ),
           ],
@@ -3746,7 +4450,9 @@ class _ScreeningFormState extends State<ScreeningForm>
             _infoBanner(
               icon: Icons.warning_amber_rounded,
               text: "Gestational age cannot be determined.\nEnd participation.",
-              color: c.danger, softColor: c.dangerSoft, c: c,
+              color: c.danger,
+              softColor: c.dangerSoft,
+              c: c,
             ),
           ],
         ],
@@ -3756,7 +4462,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
   Widget _gestRadio(String label, bool value, AppColors c) {
     final selected = _gestationKnownInWeeks == value;
-    final color    = value ? c.success : c.danger;
+    final color = value ? c.success : c.danger;
     return GestureDetector(
       onTap: () {
         setState(() {
@@ -3779,21 +4485,35 @@ class _ScreeningFormState extends State<ScreeningForm>
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: selected ? color : c.border, width: 1.5),
         ),
-        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Container(
-            width: 16, height: 16,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(color: selected ? color : c.border, width: 2),
-              color: selected ? color : Colors.transparent,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 16,
+              height: 16,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: selected ? color : c.border,
+                  width: 2,
+                ),
+                color: selected ? color : Colors.transparent,
+              ),
+              child: selected
+                  ? const Icon(Icons.circle, color: Colors.white, size: 8)
+                  : null,
             ),
-            child: selected ? const Icon(Icons.circle, color: Colors.white, size: 8) : null,
-          ),
-          const SizedBox(width: 8),
-          Text(label, style: TextStyle(
-              color: selected ? color : c.textSecondary,
-              fontWeight: FontWeight.w700, fontSize: 13)),
-        ]),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? color : c.textSecondary,
+                fontWeight: FontWeight.w700,
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3802,16 +4522,20 @@ class _ScreeningFormState extends State<ScreeningForm>
   /// `isDirectGaEntry`). false when GA was derived from LMP/EDD (Q1=No).
   Widget _gestationResultBanner(AppColors c, {required bool directEntry}) {
     final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
-    final days  = int.tryParse(_gestDaysCtrl.text)  ?? 0;
+    final days = int.tryParse(_gestDaysCtrl.text) ?? 0;
     final inRange = (() {
       final t = weeks * 7 + days;
       return t >= _kEligibleGestMinTotalDays && t <= _kEligibleGestMaxTotalDays;
     })();
     final tooHigh = weeks * 7 + days > _kEligibleGestMaxTotalDays;
-    final color   = inRange ? c.success : c.danger;
-    final soft    = inRange ? c.successSoft : c.dangerSoft;
-    final weeksText = _gestWeeksCtrl.text.trim().isEmpty ? "____" : _gestWeeksCtrl.text;
-    final daysText = _gestDaysCtrl.text.trim().isEmpty ? "____" : _gestDaysCtrl.text;
+    final color = inRange ? c.success : c.danger;
+    final soft = inRange ? c.successSoft : c.dangerSoft;
+    final weeksText = _gestWeeksCtrl.text.trim().isEmpty
+        ? "____"
+        : _gestWeeksCtrl.text;
+    final daysText = _gestDaysCtrl.text.trim().isEmpty
+        ? "____"
+        : _gestDaysCtrl.text;
     final headline = directEntry
         ? "Gestational age"
         : "Calculated gestational age (auto calculated in app)";
@@ -3829,41 +4553,71 @@ class _ScreeningFormState extends State<ScreeningForm>
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: color.withOpacity(0.3)),
           ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(headline,
-                style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 13)),
-            const SizedBox(height: 8),
-            Text("$weeksText weeks ; $daysText days",
-                style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 6),
-            Text(
-              eligibilityLine,
-              style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
-            ),
-          ]),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                headline,
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                "$weeksText weeks ; $daysText days",
+                style: TextStyle(
+                  color: color,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                eligibilityLine,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
         if (tooHigh) ...[
           const SizedBox(height: 10),
           _infoBanner(
             icon: Icons.cancel_rounded,
-            text: "If ≥32 weeks – cannot proceed. Gestational age is outside the eligibility window (25 weeks 0 days to 31 weeks 6 days).",
-            color: c.danger, softColor: c.dangerSoft, c: c,
+            text:
+                "If ≥32 weeks – cannot proceed. Gestational age is outside the eligibility window (25 weeks 0 days to 31 weeks 6 days).",
+            color: c.danger,
+            softColor: c.dangerSoft,
+            c: c,
           ),
         ],
         if (!inRange && !tooHigh && _gestWeeksCtrl.text.trim().isNotEmpty) ...[
           const SizedBox(height: 10),
           _infoBanner(
             icon: Icons.cancel_rounded,
-            text: "Gestational age <25 weeks — outside eligibility window (25w0d–31w6d). Cannot proceed.",
-            color: c.danger, softColor: c.dangerSoft, c: c,
+            text:
+                "Gestational age <25 weeks — outside eligibility window (25w0d–31w6d). Cannot proceed.",
+            color: c.danger,
+            softColor: c.dangerSoft,
+            c: c,
           ),
         ],
       ],
     );
   }
 
-  Widget _infoBanner({required IconData icon, required String text,
-      required Color color, required Color softColor, required AppColors c}) {
+  Widget _infoBanner({
+    required IconData icon,
+    required String text,
+    required Color color,
+    required Color softColor,
+    required AppColors c,
+  }) {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -3871,72 +4625,112 @@ class _ScreeningFormState extends State<ScreeningForm>
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: color.withOpacity(0.3)),
       ),
-      child: Row(children: [
-        Icon(icon, color: color, size: 20),
-        const SizedBox(width: 12),
-        Expanded(child: Text(text, style: TextStyle(
-            color: color, fontWeight: FontWeight.w600, fontSize: 13))),
-      ]),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  DropdownMenuItem<String> _ddItem(String v, AppColors c, {bool hint = false}) =>
-      DropdownMenuItem(
-        value: v,
-        child: Text(v, style: TextStyle(
-            color: hint ? c.textTertiary : c.textPrimary, fontSize: 13)),
-      );
+  DropdownMenuItem<String> _ddItem(
+    String v,
+    AppColors c, {
+    bool hint = false,
+  }) => DropdownMenuItem(
+    value: v,
+    child: Text(
+      v,
+      style: TextStyle(
+        color: hint ? c.textTertiary : c.textPrimary,
+        fontSize: 13,
+      ),
+    ),
+  );
 
   // ── IDENTIFICATION SECTION ────────────────────────────────────────────────
 
-  Widget _buildIdentificationSection(AppColors c, List<TextInputFormatter> nameFormatter) {
+  Widget _buildIdentificationSection(
+    AppColors c,
+    List<TextInputFormatter> nameFormatter,
+  ) {
     return _sectionCard(
       title: "A2 · Identification",
       icon: Icons.badge_rounded,
       accentColor: c.primary,
       children: [
         TextFormField(
-          controller: _screeningIdCtrl, readOnly: true,
+          controller: _screeningIdCtrl,
+          readOnly: true,
           decoration: _inputDecoration("8. Screening ID (auto filled)"),
           style: TextStyle(color: c.textPrimary),
         ),
         const SizedBox(height: 12),
 
-        Row(children: [
-          Expanded(
-            child: DropdownButtonFormField<String>(
-              value: _siteMap.containsKey(_selectedSite) ? _selectedSite : null,
-              hint: Text("-- Select Site --",
-                  style: TextStyle(color: c.textTertiary)),
-              dropdownColor: c.surface,
-              decoration: _requiredDecoration("9. Site"),
-              items: _siteMap.keys.map((s) =>
-                  DropdownMenuItem(value: s,
-                      child: Text(s, style: TextStyle(color: c.textPrimary)))).toList(),
-              onChanged: _siteLocked
-                  ? null
-                  : (v) async => _onSiteChangedWithConfirm(v),
-              validator: (v) =>
-                  _submitted && (v == null || v.isEmpty) ? "Required" : null,
-              style: TextStyle(color: c.textPrimary),
+        Row(
+          children: [
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                value: _siteMap.containsKey(_selectedSite)
+                    ? _selectedSite
+                    : null,
+                hint: Text(
+                  "-- Select Site --",
+                  style: TextStyle(color: c.textTertiary),
+                ),
+                dropdownColor: c.surface,
+                decoration: _requiredDecoration("9. Site"),
+                items: _siteMap.keys
+                    .map(
+                      (s) => DropdownMenuItem(
+                        value: s,
+                        child: Text(s, style: TextStyle(color: c.textPrimary)),
+                      ),
+                    )
+                    .toList(),
+                onChanged: _siteLocked
+                    ? null
+                    : (v) async => _onSiteChangedWithConfirm(v),
+                validator: (v) =>
+                    _submitted && (v == null || v.isEmpty) ? "Required" : null,
+                style: TextStyle(color: c.textPrimary),
+              ),
             ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: TextFormField(
-              readOnly: true,
-              controller: TextEditingController(text: _siteMap[_selectedSite] ?? ""),
-              decoration: _inputDecoration("10. Site ID (auto filled)"),
-              style: TextStyle(color: c.textPrimary),
+            const SizedBox(width: 12),
+            Expanded(
+              child: TextFormField(
+                readOnly: true,
+                controller: TextEditingController(
+                  text: _siteMap[_selectedSite] ?? "",
+                ),
+                decoration: _inputDecoration("10. Site ID (auto filled)"),
+                style: TextStyle(color: c.textPrimary),
+              ),
             ),
-          ),
-        ]),
+          ],
+        ),
         const SizedBox(height: 12),
 
         TextFormField(
-          controller: _screeningDateTimeCtrl, readOnly: true,
+          controller: _screeningDateTimeCtrl,
+          readOnly: true,
           decoration: _requiredDecoration("11. Screening Date & Time").copyWith(
-            suffixIcon: Icon(Icons.access_time_rounded, color: c.textTertiary, size: 18),
+            suffixIcon: Icon(
+              Icons.access_time_rounded,
+              color: c.textTertiary,
+              size: 18,
+            ),
           ),
           style: TextStyle(color: c.textPrimary),
           validator: _screeningDateValidator,
@@ -3957,40 +4751,56 @@ class _ScreeningFormState extends State<ScreeningForm>
             );
             if (picked == null || !mounted) return;
             _screeningDateTimeCtrl.text = formatDdMmYyyyPipeHHmm(picked);
+            if (_gestationKnownInWeeks == false) {
+              if (_gaSource == "LMP") {
+                final lmp = _parseDdMmYyyy(_lmpCtrl.text);
+                if (lmp != null) _setGestationFromLmp(lmp);
+              } else if (_gaSource == "EDD") {
+                final edd = _parseDdMmYyyy(_expectedDeliveryCtrl.text);
+                if (edd != null) _setGestationFromEdd(edd);
+              }
+            }
             setState(() {});
           },
         ),
         const SizedBox(height: 12),
 
-        Builder(builder: (_) {
-          final opts = _consentNurseOptions();
-          final cur = _screenedByCtrl.text.trim();
-          final value = cur.isEmpty
-              ? "Select"
-              : (opts.contains(cur) || cur == "Select" ? cur : cur);
-          return DropdownButtonFormField<String>(
-            value: value,
-            decoration: _requiredDecoration("12. Screened by (First name)"),
-            dropdownColor: c.surface,
-            items: [
-              _ddItem("Select", c, hint: true),
-              if (cur.isNotEmpty && cur != "Select" && !opts.contains(cur))
-                _ddItem(cur, c),
-              ...opts.map((n) => _ddItem(n, c)),
-            ],
-            onChanged: (v) => setState(() {
-              _screenedByCtrl.text = (v == null || v == "Select") ? "" : v;
-            }),
-            validator: (v) => _submitted && (v == null || v == "Select" || v.trim().isEmpty)
-                ? "Required" : null,
-            style: TextStyle(color: c.textPrimary),
-          );
-        }),
+        Builder(
+          builder: (_) {
+            final opts = _consentNurseOptions();
+            final cur = _screenedByCtrl.text.trim();
+            final value = cur.isEmpty
+                ? "Select"
+                : (opts.contains(cur) || cur == "Select" ? cur : cur);
+            return DropdownButtonFormField<String>(
+              value: value,
+              decoration: _requiredDecoration("12. Screened by (First name)"),
+              dropdownColor: c.surface,
+              items: [
+                _ddItem("Select", c, hint: true),
+                if (cur.isNotEmpty && cur != "Select" && !opts.contains(cur))
+                  _ddItem(cur, c),
+                ...opts.map((n) => _ddItem(n, c)),
+              ],
+              onChanged: (v) => setState(() {
+                _screenedByCtrl.text = (v == null || v == "Select") ? "" : v;
+              }),
+              validator: (v) =>
+                  _submitted && (v == null || v == "Select" || v.trim().isEmpty)
+                  ? "Required"
+                  : null,
+              style: TextStyle(color: c.textPrimary),
+            );
+          },
+        ),
       ],
     );
   }
 
-  Widget _buildMaternalSection(AppColors c, List<TextInputFormatter> nameFormatter) {
+  Widget _buildMaternalSection(
+    AppColors c,
+    List<TextInputFormatter> nameFormatter,
+  ) {
     return _sectionCard(
       title: "A3 · Maternal Identification",
       icon: Icons.family_restroom_rounded,
@@ -4006,139 +4816,180 @@ class _ScreeningFormState extends State<ScreeningForm>
               borderRadius: BorderRadius.circular(10),
               border: Border.all(color: c.warning.withOpacity(0.35)),
             ),
-            child: Text(_duplicateWarn,
-                style: TextStyle(color: c.warning, fontSize: 12, fontWeight: FontWeight.w600)),
+            child: Text(
+              _duplicateWarn,
+              style: TextStyle(
+                color: c.warning,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
         ],
 
-        Row(children: [
-          Expanded(
-            child: TextFormField(
-              controller: _motherFirstCtrl,
-              onChanged: (_) {
-                _assignScreeningIdIfNeeded();
-                _checkDuplicateMotherName();
-              },
-              decoration: _requiredDecoration("13. Mother's Name — First"),
-              validator: (v) => _submitted ? _charOnlyValidator(v) : null,
-              inputFormatters: nameFormatter,
-              style: TextStyle(color: c.textPrimary),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: TextFormField(
-              controller: _motherSurnameCtrl,
-              decoration: _inputDecoration("Surname"),
-              validator: (v) {
-                if (v != null && v.trim().isNotEmpty &&
-                    !RegExp(r"^[\p{L} .'\-]+$", unicode: true).hasMatch(v.trim())) {
-                  return "Letters only";
-                }
-                return null;
-              },
-              inputFormatters: nameFormatter,
-              style: TextStyle(color: c.textPrimary),
-            ),
-          ),
-        ]),
-        const SizedBox(height: 12),
-
-        Row(children: [
-          Expanded(
-            child: TextFormField(
-              controller: _husbandFirstCtrl,
-              decoration: _requiredDecoration("14. Husband's Name — First"),
-              validator: (v) => _submitted ? _charOnlyValidator(v) : null,
-              inputFormatters: nameFormatter,
-              style: TextStyle(color: c.textPrimary),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: TextFormField(
-              controller: _husbandSurnameCtrl,
-              decoration: _inputDecoration("Surname"),
-              validator: (v) {
-                if (v != null && v.trim().isNotEmpty &&
-                    !RegExp(r"^[\p{L} .'\-]+$", unicode: true).hasMatch(v.trim())) {
-                  return "Letters only";
-                }
-                return null;
-              },
-              inputFormatters: nameFormatter,
-              style: TextStyle(color: c.textPrimary),
-            ),
-          ),
-        ]),
-        const SizedBox(height: 12),
-
-        Row(children: [
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              TextFormField(
-                controller: _maternalUidCtrl,
-                focusNode: _maternalUidFocus,
-                keyboardType: _selectedSite == "PGIMER"
-                    ? TextInputType.number
-                    : TextInputType.text,
-                inputFormatters: _maternalUidFormatters(),
-                decoration: (_maternalUidRequired
-                        ? _requiredDecoration(_maternalUidLabel())
-                        : _inputDecoration(_maternalUidLabel()))
-                    .copyWith(counterText: "", hintText: _maternalUidHint()),
-                validator: (v) => _submitted ? _maternalUidValidator(v) : null,
-                onChanged: (v) => setState(() {
-                  final max = _maternalUidMaxLen();
-                  _maternalUidLimitReached = v.length >= max;
-                  _maternalUidCount = v.length;
-                }),
+        Row(
+          children: [
+            Expanded(
+              child: TextFormField(
+                controller: _motherFirstCtrl,
+                onChanged: (_) {
+                  _assignScreeningIdIfNeeded();
+                  _checkDuplicateMotherName();
+                },
+                decoration: _requiredDecoration("13. Mother's Name — First"),
+                validator: (v) => _submitted ? _charOnlyValidator(v) : null,
+                inputFormatters: nameFormatter,
                 style: TextStyle(color: c.textPrimary),
               ),
-              if (_maternalUidFocus.hasFocus && _maternalUidLimitReached)
-                Padding(padding: const EdgeInsets.only(top: 3),
-                    child: Text(_selectedSite == "PGIMER"
-                            ? "Maximum 12 digits reached"
-                            : "Maximum length reached",
-                        style: TextStyle(color: c.success,
-                            fontSize: 11, fontWeight: FontWeight.w600))),
-            ]),
-          ),
-          const SizedBox(width: 12),
-          ScaleTransition(
-            scale: _scanAnimation,
-            child: GestureDetector(
-              onTap: _scanCRNumber,
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [c.primary, c.primaryDark],
-                    begin: Alignment.topLeft, end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(14),
-                  boxShadow: [BoxShadow(
-                      color: c.primary.withOpacity(0.35),
-                      blurRadius: 10, offset: const Offset(0, 3))],
-                ),
-                child: const Icon(Icons.qr_code_scanner, color: Colors.white, size: 26),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: TextFormField(
+                controller: _motherSurnameCtrl,
+                decoration: _inputDecoration("Surname"),
+                validator: (v) {
+                  if (v != null &&
+                      v.trim().isNotEmpty &&
+                      !RegExp(
+                        r"^[\p{L} .'\-]+$",
+                        unicode: true,
+                      ).hasMatch(v.trim())) {
+                    return "Letters only";
+                  }
+                  return null;
+                },
+                inputFormatters: nameFormatter,
+                style: TextStyle(color: c.textPrimary),
               ),
             ),
-          ),
-        ]),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        Row(
+          children: [
+            Expanded(
+              child: TextFormField(
+                controller: _husbandFirstCtrl,
+                decoration: _requiredDecoration("14. Husband's Name — First"),
+                validator: (v) => _submitted ? _charOnlyValidator(v) : null,
+                inputFormatters: nameFormatter,
+                style: TextStyle(color: c.textPrimary),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: TextFormField(
+                controller: _husbandSurnameCtrl,
+                decoration: _inputDecoration("Surname"),
+                validator: (v) {
+                  if (v != null &&
+                      v.trim().isNotEmpty &&
+                      !RegExp(
+                        r"^[\p{L} .'\-]+$",
+                        unicode: true,
+                      ).hasMatch(v.trim())) {
+                    return "Letters only";
+                  }
+                  return null;
+                },
+                inputFormatters: nameFormatter,
+                style: TextStyle(color: c.textPrimary),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextFormField(
+                    controller: _maternalUidCtrl,
+                    focusNode: _maternalUidFocus,
+                    keyboardType: _selectedSite == "PGIMER"
+                        ? TextInputType.number
+                        : TextInputType.text,
+                    inputFormatters: _maternalUidFormatters(),
+                    decoration:
+                        (_maternalUidRequired
+                                ? _requiredDecoration(_maternalUidLabel())
+                                : _inputDecoration(_maternalUidLabel()))
+                            .copyWith(
+                              counterText: "",
+                              hintText: _maternalUidHint(),
+                            ),
+                    validator: (v) =>
+                        _submitted ? _maternalUidValidator(v) : null,
+                    onChanged: (v) => setState(() {
+                      final max = _maternalUidMaxLen();
+                      _maternalUidLimitReached = v.length >= max;
+                      _maternalUidCount = v.length;
+                    }),
+                    style: TextStyle(color: c.textPrimary),
+                  ),
+                  if (_maternalUidFocus.hasFocus && _maternalUidLimitReached)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        _selectedSite == "PGIMER"
+                            ? "Maximum 12 digits reached"
+                            : "Maximum length reached",
+                        style: TextStyle(
+                          color: c.success,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            ScaleTransition(
+              scale: _scanAnimation,
+              child: GestureDetector(
+                onTap: _scanCRNumber,
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [c.primary, c.primaryDark],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [
+                      BoxShadow(
+                        color: c.primary.withOpacity(0.35),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.qr_code_scanner,
+                    color: Colors.white,
+                    size: 26,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 12),
 
         TextFormField(
           controller: _hospitalNoCtrl,
-          keyboardType: const {"PGIMER", "GMCH-A", "GMCH", "IOG"}
-                  .contains(_selectedSite)
+          keyboardType:
+              const {"PGIMER", "GMCH-A", "GMCH", "IOG"}.contains(_selectedSite)
               ? TextInputType.number
               : TextInputType.text,
           inputFormatters: _hospitalNoFormatters(),
-          decoration: (_selectedSite == "PGIMER"
-                  ? _requiredDecoration("16. Hospital Admission Number")
-                  : _inputDecoration(_hospitalNoLabel()))
-              .copyWith(
+          decoration: _inputDecoration(_hospitalNoLabel()).copyWith(
             errorText: _hospitalNoLiveError,
             hintText: _hospitalNoHint(),
           ),
@@ -4150,67 +5001,97 @@ class _ScreeningFormState extends State<ScreeningForm>
         ),
         const SizedBox(height: 12),
 
-        Row(children: [
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              TextFormField(
-                controller: _motherPhoneCtrl,
-                focusNode: _motherPhoneFocus,
-                decoration: _requiredDecoration("17. Mobile Number — Mother"),
-                keyboardType: TextInputType.number,
-                style: TextStyle(color: c.textPrimary),
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(10),
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextFormField(
+                    controller: _motherPhoneCtrl,
+                    focusNode: _motherPhoneFocus,
+                    decoration: _requiredDecoration(
+                      "17. Mobile Number — Mother",
+                    ),
+                    keyboardType: TextInputType.number,
+                    style: TextStyle(color: c.textPrimary),
+                    inputFormatters: [
+                      FilteringTextInputFormatter.digitsOnly,
+                      LengthLimitingTextInputFormatter(10),
+                    ],
+                    validator: (v) => _submitted ? _phoneValidator(v) : null,
+                    onChanged: (value) => setState(() {
+                      _motherPhoneCount = value.length;
+                      _motherMobileLimitReached = value.length >= 10;
+                    }),
+                  ),
+                  if (_motherPhoneFocus.hasFocus)
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 3, right: 4),
+                        child: Text(
+                          "${_motherPhoneCount}/10",
+                          style: TextStyle(
+                            color: _motherPhoneCount == 10
+                                ? c.success
+                                : c.textTertiary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
-                validator: (v) => _submitted ? _phoneValidator(v) : null,
-                onChanged: (value) => setState(() {
-                  _motherPhoneCount       = value.length;
-                  _motherMobileLimitReached = value.length >= 10;
-                }),
               ),
-              if (_motherPhoneFocus.hasFocus)
-                Align(alignment: Alignment.centerRight,
-                    child: Padding(padding: const EdgeInsets.only(top: 3, right: 4),
-                        child: Text("${_motherPhoneCount}/10",
-                            style: TextStyle(
-                                color: _motherPhoneCount == 10 ? c.success : c.textTertiary,
-                                fontSize: 11, fontWeight: FontWeight.w600)))),
-            ]),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              TextFormField(
-                controller: _husbandPhoneCtrl,
-                focusNode: _husbandPhoneFocus,
-                keyboardType: TextInputType.number,
-                maxLength: 10,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(10),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextFormField(
+                    controller: _husbandPhoneCtrl,
+                    focusNode: _husbandPhoneFocus,
+                    keyboardType: TextInputType.number,
+                    maxLength: 10,
+                    inputFormatters: [
+                      FilteringTextInputFormatter.digitsOnly,
+                      LengthLimitingTextInputFormatter(10),
+                    ],
+                    decoration: _requiredDecoration(
+                      "Husband",
+                    ).copyWith(counterText: ""),
+                    validator: (v) => _submitted ? _phoneValidator(v) : null,
+                    style: TextStyle(color: c.textPrimary),
+                    onChanged: (value) => setState(() {
+                      _husbandPhoneCount = value.length;
+                      _husbandPhoneLimitReached = value.length == 10;
+                    }),
+                  ),
+                  if (_husbandPhoneFocus.hasFocus)
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 3, right: 4),
+                        child: Text(
+                          "${_husbandPhoneCount}/10",
+                          style: TextStyle(
+                            color: _husbandPhoneCount == 10
+                                ? c.success
+                                : c.textTertiary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
-                decoration: _requiredDecoration("Husband")
-                    .copyWith(counterText: ""),
-                validator: (v) => _submitted ? _phoneValidator(v) : null,
-                style: TextStyle(color: c.textPrimary),
-                onChanged: (value) => setState(() {
-                  _husbandPhoneCount       = value.length;
-                  _husbandPhoneLimitReached = value.length == 10;
-                }),
               ),
-              if (_husbandPhoneFocus.hasFocus)
-                Align(alignment: Alignment.centerRight,
-                    child: Padding(padding: const EdgeInsets.only(top: 3, right: 4),
-                        child: Text("${_husbandPhoneCount}/10",
-                            style: TextStyle(
-                                color: _husbandPhoneCount == 10 ? c.success : c.textTertiary,
-                                fontSize: 11, fontWeight: FontWeight.w600)))),
-            ]),
-          ),
-        ]),
+            ),
+          ],
+        ),
         const SizedBox(height: 12),
-
       ],
     );
   }
@@ -4223,10 +5104,15 @@ class _ScreeningFormState extends State<ScreeningForm>
       icon: Icons.block_rounded,
       accentColor: c.danger,
       children: [
-        _exclusionYesNo("ANOMALY",
-            "18. Major structural anomalies or genetic abnormality (suspected/proven)"),
+        _exclusionYesNo(
+          "ANOMALY",
+          "18. Major structural anomalies or genetic abnormality (suspected/proven)",
+        ),
         _exclusionYesNo("HYDROPS", "19. Fetal Hydrops"),
-        _exclusionYesNo("RESUSCITATION", "21. Decision to forego resuscitation"),
+        _exclusionYesNo(
+          "RESUSCITATION",
+          "21. Decision to forego resuscitation",
+        ),
         _exclusionYesNo("INSUFFICIENT", "23. Insufficient time for consent"),
         _exclusionYesNo("IUFD", "25. IUFD"),
 
@@ -4290,7 +5176,8 @@ class _ScreeningFormState extends State<ScreeningForm>
           dropdownColor: c.surface,
           items: [
             _ddItem("Select", c, hint: true),
-            _ddItem("Yes", c), _ddItem("No", c),
+            _ddItem("Yes", c),
+            _ddItem("No", c),
             _ddItem("Trial run", c),
             _ddItem("Not approached", c),
           ],
@@ -4303,18 +5190,21 @@ class _ScreeningFormState extends State<ScreeningForm>
               } else {
                 _consentDateTimeIso = null;
               }
-              if (_consentStatus != "Yes" && _consentStatus != "No" && _consentStatus != "Trial run") {
+              if (_consentStatus != "Yes" &&
+                  _consentStatus != "No" &&
+                  _consentStatus != "Trial run") {
                 _relationshipToParticipant = "Select";
-                _relationshipOtherText     = "";
-                _consentTakenBy            = "Select";
+                _relationshipOtherText = "";
+                _consentTakenBy = "Select";
               }
               _consentRefusalReasons.clear();
               _consentRefusalOtherText = "";
               _notApproachedReasons.clear();
-              _notApproachedOtherText  = "";
+              _notApproachedOtherText = "";
             });
           },
-          validator: (v) => _submitted && (v == null || v == "Select") ? "Required" : null,
+          validator: (v) =>
+              _submitted && (v == null || v == "Select") ? "Required" : null,
           style: TextStyle(color: c.textPrimary),
         ),
         const SizedBox(height: 14),
@@ -4322,7 +5212,9 @@ class _ScreeningFormState extends State<ScreeningForm>
         // 28 + 31: Consent obtained from | Consent obtained by (nurse)
         // shown for Yes / No / Trial run — matches webform which shows this
         // block whenever consent_given is Yes, No, or Trial run.
-        if (_consentStatus == "Yes" || _consentStatus == "No" || _consentStatus == "Trial run") ...[
+        if (_consentStatus == "Yes" ||
+            _consentStatus == "No" ||
+            _consentStatus == "Trial run") ...[
           DropdownButtonFormField<String>(
             value: _relationshipToParticipant,
             decoration: _requiredDecoration("27. Consent obtained from"),
@@ -4348,7 +5240,8 @@ class _ScreeningFormState extends State<ScreeningForm>
               onChanged: (v) => _relationshipOtherText = v,
               style: TextStyle(color: c.textPrimary),
               validator: (v) {
-                if (_submitted && (v == null || v.trim().isEmpty)) return "Required";
+                if (_submitted && (v == null || v.trim().isEmpty))
+                  return "Required";
                 return null;
               },
             ),
@@ -4358,10 +5251,16 @@ class _ScreeningFormState extends State<ScreeningForm>
 
         // 28. Reason for refusal (if No)
         if (_consentStatus == "No") ...[
-          _reqText("28. If no, reason for consent refusal (select all that apply)", c),
+          _reqText(
+            "28. If no, reason for consent refusal (select all that apply)",
+            c,
+          ),
           const SizedBox(height: 8),
           ...[
-            "Fear of adverse effects", "Family pressure", "Not known", "Other"
+            "Fear of adverse effects",
+            "Family pressure",
+            "Not known",
+            "Other",
           ].map((reason) => _styledCheckbox(reason, c)),
           if (_consentRefusalReasons.contains("Other")) ...[
             const SizedBox(height: 8),
@@ -4372,7 +5271,8 @@ class _ScreeningFormState extends State<ScreeningForm>
               validator: (v) {
                 if (_consentStatus == "No" &&
                     _consentRefusalReasons.contains("Other") &&
-                    (v == null || v.trim().isEmpty)) return "Required";
+                    (v == null || v.trim().isEmpty))
+                  return "Required";
                 return null;
               },
             ),
@@ -4385,15 +5285,24 @@ class _ScreeningFormState extends State<ScreeningForm>
           _reqText("29. If not approached, reason (select all that apply)", c),
           const SizedBox(height: 8),
           ...[
-            "Nurse on leave", "Parent not available", "Missed screening", "Other"
-          ].map((reason) => GestureDetector(
-                onTap: () => setState(() {
-                  _notApproachedReasons.contains(reason)
-                      ? _notApproachedReasons.remove(reason)
-                      : _notApproachedReasons.add(reason);
-                }),
-                child: _checkboxRow(reason, _notApproachedReasons.contains(reason), c),
-              )),
+            "Nurse on leave",
+            "Parent not available",
+            "Missed screening",
+            "Other",
+          ].map(
+            (reason) => GestureDetector(
+              onTap: () => setState(() {
+                _notApproachedReasons.contains(reason)
+                    ? _notApproachedReasons.remove(reason)
+                    : _notApproachedReasons.add(reason);
+              }),
+              child: _checkboxRow(
+                reason,
+                _notApproachedReasons.contains(reason),
+                c,
+              ),
+            ),
+          ),
           if (_notApproachedReasons.contains("Other")) ...[
             const SizedBox(height: 8),
             TextFormField(
@@ -4403,7 +5312,8 @@ class _ScreeningFormState extends State<ScreeningForm>
               validator: (v) {
                 if (_consentStatus == "Not approached" &&
                     _notApproachedReasons.contains("Other") &&
-                    (v == null || v.trim().isEmpty)) return "Required";
+                    (v == null || v.trim().isEmpty))
+                  return "Required";
                 return null;
               },
             ),
@@ -4412,10 +5322,14 @@ class _ScreeningFormState extends State<ScreeningForm>
         ],
 
         // 30. Consent obtained by — Yes / No / Trial run (web order after 28/29)
-        if (_consentStatus == "Yes" || _consentStatus == "No" || _consentStatus == "Trial run") ...[
+        if (_consentStatus == "Yes" ||
+            _consentStatus == "No" ||
+            _consentStatus == "Trial run") ...[
           DropdownButtonFormField<String>(
             value: _consentTakenBy,
-            decoration: _requiredDecoration("30. Consent obtained by (First name)"),
+            decoration: _requiredDecoration(
+              "30. Consent obtained by (First name)",
+            ),
             dropdownColor: c.surface,
             items: [
               _ddItem("Select", c, hint: true),
@@ -4437,7 +5351,8 @@ class _ScreeningFormState extends State<ScreeningForm>
             dropdownColor: c.surface,
             items: [
               _ddItem("Select", c, hint: true),
-              _ddItem("Yes", c), _ddItem("No", c),
+              _ddItem("Yes", c),
+              _ddItem("No", c),
             ],
             onChanged: (v) => setState(() => _videoPisShown = v!),
             validator: (v) =>
@@ -4460,13 +5375,19 @@ class _ScreeningFormState extends State<ScreeningForm>
             Text(
               "Consent given by — ${_consentGivenByName()}"
               "${_relationshipToParticipant != "Select" ? " ($_relationshipToParticipant)" : ""}",
-              style: TextStyle(fontWeight: FontWeight.w600, color: c.textPrimary),
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: c.textPrimary,
+              ),
             )
           else if (_relationshipToParticipant != "Select")
             Text(
               "Relationship — $_relationshipToParticipant"
               "${_relationshipOtherText.trim().isNotEmpty ? ": ${_relationshipOtherText.trim()}" : ""}",
-              style: TextStyle(fontWeight: FontWeight.w600, color: c.textPrimary),
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: c.textPrimary,
+              ),
             ),
           const SizedBox(height: 10),
           Text(
@@ -4480,7 +5401,8 @@ class _ScreeningFormState extends State<ScreeningForm>
             boundaryKey: _icfSignatureBoundaryKey,
             points: _icfSignaturePoints,
             savedBase64: _icfSignatureBase64,
-            showRequiredError: _submitted &&
+            showRequiredError:
+                _submitted &&
                 _needsAttestationSignatures &&
                 !(_icfSignatureBase64?.isNotEmpty ?? false),
             onDown: _icfSignaturePointerDown,
@@ -4515,23 +5437,31 @@ class _ScreeningFormState extends State<ScreeningForm>
             runSpacing: 10,
             children: [
               OutlinedButton.icon(
-                onPressed: () => _openPisDocument('English', 'PIS Document (English)'),
+                onPressed: () =>
+                    _openPisDocument('English', 'PIS Document (English)'),
                 icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
                 label: const Text("PIS Document (English)"),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: c.textPrimary,
                   side: BorderSide(color: c.border),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
                 ),
               ),
               OutlinedButton.icon(
-                onPressed: () => _openPisDocument('Hindi', 'PIS Document (Hindi)'),
+                onPressed: () =>
+                    _openPisDocument('Hindi', 'PIS Document (Hindi)'),
                 icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
                 label: const Text("PIS Document (Hindi)"),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: c.textPrimary,
                   side: BorderSide(color: c.border),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
                 ),
               ),
               if (_showPunjabiPis)
@@ -4543,7 +5473,10 @@ class _ScreeningFormState extends State<ScreeningForm>
                   style: OutlinedButton.styleFrom(
                     foregroundColor: c.textPrimary,
                     side: BorderSide(color: c.border),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
                   ),
                 ),
             ],
@@ -4562,24 +5495,35 @@ class _ScreeningFormState extends State<ScreeningForm>
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: checked ? c.primary : c.border),
       ),
-      child: Row(children: [
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          width: 18, height: 18,
-          decoration: BoxDecoration(
-            color: checked ? c.primary : Colors.transparent,
-            borderRadius: BorderRadius.circular(4),
-            border: Border.all(color: checked ? c.primary : c.border, width: 1.5),
+      child: Row(
+        children: [
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            width: 18,
+            height: 18,
+            decoration: BoxDecoration(
+              color: checked ? c.primary : Colors.transparent,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(
+                color: checked ? c.primary : c.border,
+                width: 1.5,
+              ),
+            ),
+            child: checked
+                ? const Icon(Icons.check_rounded, color: Colors.white, size: 12)
+                : null,
           ),
-          child: checked
-              ? const Icon(Icons.check_rounded, color: Colors.white, size: 12)
-              : null,
-        ),
-        const SizedBox(width: 10),
-        Text(label, style: TextStyle(
-            color: checked ? c.primary : c.textSecondary,
-            fontSize: 13, fontWeight: checked ? FontWeight.w600 : FontWeight.normal)),
-      ]),
+          const SizedBox(width: 10),
+          Text(
+            label,
+            style: TextStyle(
+              color: checked ? c.primary : c.textSecondary,
+              fontSize: 13,
+              fontWeight: checked ? FontWeight.w600 : FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -4599,24 +5543,39 @@ class _ScreeningFormState extends State<ScreeningForm>
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: checked ? c.primary : c.border),
         ),
-        child: Row(children: [
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            width: 18, height: 18,
-            decoration: BoxDecoration(
-              color: checked ? c.primary : Colors.transparent,
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: checked ? c.primary : c.border, width: 1.5),
+        child: Row(
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: 18,
+              height: 18,
+              decoration: BoxDecoration(
+                color: checked ? c.primary : Colors.transparent,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: checked ? c.primary : c.border,
+                  width: 1.5,
+                ),
+              ),
+              child: checked
+                  ? const Icon(
+                      Icons.check_rounded,
+                      color: Colors.white,
+                      size: 12,
+                    )
+                  : null,
             ),
-            child: checked
-                ? const Icon(Icons.check_rounded, color: Colors.white, size: 12)
-                : null,
-          ),
-          const SizedBox(width: 10),
-          Text(label, style: TextStyle(
-              color: checked ? c.primary : c.textSecondary,
-              fontSize: 13, fontWeight: checked ? FontWeight.w600 : FontWeight.normal)),
-        ]),
+            const SizedBox(width: 10),
+            Text(
+              label,
+              style: TextStyle(
+                color: checked ? c.primary : c.textSecondary,
+                fontSize: 13,
+                fontWeight: checked ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -4629,7 +5588,8 @@ class _ScreeningFormState extends State<ScreeningForm>
     final val = (v ?? "").trim();
     if (_selectedSite == "PGIMER") {
       if (val.isEmpty) return "Required";
-      if (!RegExp(r'^\d{12}$').hasMatch(val)) return "Must be exactly 12 digits";
+      if (!RegExp(r'^\d{12}$').hasMatch(val))
+        return "Must be exactly 12 digits";
       return null;
     }
     if (_selectedSite == "AMC") {
@@ -4646,23 +5606,28 @@ class _ScreeningFormState extends State<ScreeningForm>
   String? _hospitalNoValidator(String? v) {
     final val = (v ?? "").trim();
     if (_selectedSite == "PGIMER") {
-      if (val.isEmpty) return "Required";
-      if (!RegExp(r'^\d{10}$').hasMatch(val)) return "Must be exactly 10 digits";
+      if (val.isEmpty) return null;
+      if (!RegExp(r'^\d{10}$').hasMatch(val))
+        return "Must be exactly 10 digits";
       return null;
     }
-    if (_selectedSite == "GMCH-A" && val.isNotEmpty &&
+    if (_selectedSite == "GMCH-A" &&
+        val.isNotEmpty &&
         !RegExp(r'^\d{4,6}$').hasMatch(val)) {
       return "Must be 4–6 digits";
     }
-    if (_selectedSite == "GMCH" && val.isNotEmpty &&
+    if (_selectedSite == "GMCH" &&
+        val.isNotEmpty &&
         !RegExp(r'^\d{9,11}$').hasMatch(val)) {
       return "Must be 9–11 digits";
     }
-    if (_selectedSite == "IOG" && val.isNotEmpty &&
+    if (_selectedSite == "IOG" &&
+        val.isNotEmpty &&
         !RegExp(r'^\d{4,6}$').hasMatch(val)) {
       return "Must be 4–6 digits";
     }
-    if (_selectedSite == "AMC" && val.isNotEmpty &&
+    if (_selectedSite == "AMC" &&
+        val.isNotEmpty &&
         !RegExp(r'^\d+/\d{4}$').hasMatch(val)) {
       return "Must be in serial/year format, e.g. 123/2026";
     }
@@ -4673,7 +5638,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   String? _hospitalNoLiveMessage(String? v) {
     final val = (v ?? "").trim();
     if (val.isEmpty) {
-      return _selectedSite == "PGIMER" ? "Required" : null;
+      return null;
     }
     return _hospitalNoValidator(val);
   }
@@ -4734,6 +5699,7 @@ class _IcfSignaturePainter extends CustomPainter {
       }
     }
   }
+
   @override
   bool shouldRepaint(covariant _IcfSignaturePainter oldDelegate) => true;
 }

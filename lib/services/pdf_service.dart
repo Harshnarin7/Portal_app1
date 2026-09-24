@@ -124,13 +124,8 @@ class PdfService {
     );
 
     final dir = await getApplicationDocumentsDirectory();
-    final suffix = [
-      if (includeFormA) 'A',
-      if (hasB) 'B1',
-      if (hasC) 'B2',
-    ].join('');
-    final file = File(
-        '${dir.path}/${crf.screeningId}_Form$suffix.pdf');
+    final id = crf.screeningId.trim().isEmpty ? 'screening' : crf.screeningId.trim();
+    final file = File('${dir.path}/$id.pdf');
     await file.writeAsBytes(await pdf.save());
     return file;
   }
@@ -151,10 +146,10 @@ class PdfService {
       includeFormA: true,
       formAExtras: extras,
     );
-    final id = crf.screeningId.trim().isEmpty ? 'FormA' : crf.screeningId.trim();
+    final id = crf.screeningId.trim().isEmpty ? 'screening' : crf.screeningId.trim();
     await Printing.sharePdf(
       bytes: await file.readAsBytes(),
-      filename: '${id}_FormA.pdf',
+      filename: '$id.pdf',
     );
     return file;
   }
@@ -229,12 +224,12 @@ class PdfService {
     );
 
     final dir = await getApplicationDocumentsDirectory();
-    final id = crf.screeningId.trim().isEmpty ? 'FormB' : crf.screeningId.trim();
-    final file = File('${dir.path}/${id}_FormB.pdf');
+    final id = crf.screeningId.trim().isEmpty ? 'screening' : crf.screeningId.trim();
+    final file = File('${dir.path}/$id.pdf');
     await file.writeAsBytes(await pdf.save());
     await Printing.sharePdf(
       bytes: await file.readAsBytes(),
-      filename: '${id}_FormB.pdf',
+      filename: '$id.pdf',
     );
     return file;
   }

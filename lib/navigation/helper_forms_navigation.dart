@@ -85,6 +85,7 @@ Widget buildHelperFormScreen(
         motherName: ctx.motherName,
         babyUid: ctx.babyUid,
         site: ctx.site,
+        screeningId: ctx.screeningId,
       );
     case HelperFormKind.fio2Auc:
       return HelperFiO2AUC(
@@ -93,6 +94,7 @@ Widget buildHelperFormScreen(
         gestation: ctx.gestation,
         motherName: ctx.motherName,
         babyUid: ctx.babyUid,
+        screeningId: ctx.screeningId,
       );
     case HelperFormKind.infectGiHema:
       return HelperForm3InfectGIHema(
@@ -101,6 +103,7 @@ Widget buildHelperFormScreen(
         gestation: ctx.gestation,
         motherName: ctx.motherName,
         babyUid: ctx.babyUid,
+        screeningId: ctx.screeningId,
       );
     case HelperFormKind.metabRenalVascEye:
       return HelperForm4MetabRenalVascEye(
@@ -109,6 +112,7 @@ Widget buildHelperFormScreen(
         gestation: ctx.gestation,
         motherName: ctx.motherName,
         babyUid: ctx.babyUid,
+        screeningId: ctx.screeningId,
       );
     case HelperFormKind.minimalMonitoring:
       return HelperForm5MinimalMonitoring(
@@ -117,6 +121,7 @@ Widget buildHelperFormScreen(
         gestation: ctx.gestation,
         motherName: ctx.motherName,
         babyUid: ctx.babyUid,
+        screeningId: ctx.screeningId,
       );
   }
 }

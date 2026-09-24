@@ -1,8 +1,14 @@
 // lib/screens/helper_form3_infect_gi_hema.dart
 //
+// NAMING TRAP: this file / class is Helper Form 3 on mobile, but it is
+// web sidebar Helper 4 (Infect / GI / Hema). Do not rename without a
+// coordinated navigation pass.
+//
 // Helper Form 4 — Infection / GI / Hematology Daily Log
 // Parity with web InfectGIHemaLog.jsx: fields 1–30, same sequence,
 // same validations, same /infect-gi-hema/ API (NICU day, not calendar blob).
+// #15 ml/kg/d = cumulative ml ÷ effective weight (DMS 5.7.A if recovered
+// to/past Form B birth_weight, else birth_weight).
 
 import 'dart:async';
 
@@ -13,6 +19,7 @@ import '../services/forms_api_service.dart';
 import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
+import '../utils/form_b_local_guard.dart';
 import '../utils/helper_day_strip.dart';
 import '../utils/helper_dob_day1.dart';
 import '../utils/helper_session.dart';
@@ -31,6 +38,7 @@ class HelperForm3InfectGIHema extends StatefulWidget {
   final String motherName;
   final String babyUid;
   final String site;
+  final String screeningId;
 
   const HelperForm3InfectGIHema({
     super.key,
@@ -39,6 +47,7 @@ class HelperForm3InfectGIHema extends StatefulWidget {
     required this.motherName,
     required this.babyUid,
     this.site = 'PGIMER',
+    this.screeningId = '',
   });
 
   @override
@@ -72,11 +81,13 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   bool _recordExists = false;
   bool _isEditing = true;
   bool _isSubmitted = false;
+
   /// Site-monitor override expiry for the active day (mirrors web's
   /// `overrideUntil` — reopens an otherwise-submitted/locked day for a
   /// limited window). Parsed from `override_unlocked_until`.
   DateTime? _overrideUntil;
   bool _dayLoadFailed = false;
+
   /// Guards against day-chip race: only the latest load may apply UI state.
   int _loadGen = 0;
   String? _serverUpdatedAt;
@@ -84,6 +95,10 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   String? _lastFeedAutoDate;
   double? _lastFeedAutoValue;
   bool _feedVolumeAutofilled = false;
+  String? _lastFeedVolCalcAutoDate;
+  String? _lastFeedVolCalcAutoValue;
+  bool _feedVolumeCalcAutofilled = false;
+  double? _birthWeightGrams;
   bool _hemaPrbcAutofilled = false;
   bool _hemaPlateletAutofilled = false;
   bool _hemaFfpAutofilled = false;
@@ -98,6 +113,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   bool? _sepsisSuspected;
   bool? _bloodCultureSent;
   bool? _bloodCulturePositive;
+  String? _bloodCultureStatus;
   bool? _antibiotics;
   bool? _lpDone;
   bool? _meningitis;
@@ -114,6 +130,8 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   bool? _men;
   bool? _enteralFeedsReceived;
   List<String> _feedType = [];
+  String? _cumulativeFeedVolumeStatus;
+  String? _feedVolumeStatus;
   bool? _ivFluids;
   bool? _parenteralNutrition;
   bool? _probiotic;
@@ -123,6 +141,8 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   bool? _cholestasis;
 
   // Hema 23–30
+  String? _hbValueStatus;
+  String? _peakTsbStatus;
   bool? _jaundice;
   bool? _phototherapy;
   bool? _exchangeTransfusion;
@@ -187,8 +207,29 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     try {
       try {
         final birth = await _api.loadBirthResuscitation(eid);
+        if (!helperBirthRowMatchesScreening(
+          birth: birth,
+          screeningId: widget.screeningId,
+        )) {
+          if (mounted) {
+            setState(() {
+              _loading = false;
+              _banner =
+                  'This enrollment belongs to a different screening. Helper data was not loaded.';
+              _bannerError = true;
+            });
+          }
+          return;
+        }
         final raw = birth?['date_of_birth']?.toString();
         _babyName = (birth?['baby_name'] ?? '').toString();
+        final bw = birth?['birth_weight'];
+        _birthWeightGrams = bw == null
+            ? null
+            : (bw is num ? bw.toDouble() : double.tryParse(bw.toString().trim()));
+        if (_birthWeightGrams != null && _birthWeightGrams! <= 0) {
+          _birthWeightGrams = null;
+        }
         if (raw != null && raw.isNotEmpty) {
           _day1Date = parseIsoDateOnly(raw);
           _dischargeDay = helperDischargeNicuDay(
@@ -212,10 +253,13 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         final day = n is int ? n : int.tryParse('$n') ?? 0;
         if (day < 1) continue;
         if (day > maxDay) maxDay = day;
-        final st = (row['submission_status'] ?? 'empty').toString();
         final pct = row['completion_pct'];
-        _dayStatus[day] = st;
-        _dayPct[day] = pct is int ? pct : int.tryParse('$pct') ?? 0;
+        final parsedPct = pct is int ? pct : int.tryParse('$pct') ?? 0;
+        _dayStatus[day] = helperDayDisplayStatus(
+          (row['submission_status'] ?? 'empty').toString(),
+          parsedPct,
+        );
+        _dayPct[day] = parsedPct;
       }
       _recomputeTodayNicuDay();
       _totalDays = maxDay < 14 ? 14 : maxDay;
@@ -227,7 +271,8 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         helperSessionKeyInfectGiHema,
         eid,
       );
-      _activeDay = remembered != null &&
+      _activeDay =
+          remembered != null &&
               remembered >= 1 &&
               remembered <= _todayNicuDay &&
               (_dischargeDay == null || remembered <= _dischargeDay!)
@@ -255,8 +300,11 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
 
   DateTime? _calendarForDay(int day) {
     if (_day1Date == null) return null;
-    return DateTime(_day1Date!.year, _day1Date!.month, _day1Date!.day)
-        .add(Duration(days: day - 1));
+    return DateTime(
+      _day1Date!.year,
+      _day1Date!.month,
+      _day1Date!.day,
+    ).add(Duration(days: day - 1));
   }
 
   String? get _activeDayYmd {
@@ -273,13 +321,13 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   /// Informational only — a past day's calendar date no longer forces the
   /// record read-only on its own. Locking is manual, via Submit & Lock
   /// (mirrors web's `isPastActiveDay`).
-  bool get _isPastActiveDay =>
-      _day1Date != null && _activeDay < _todayNicuDay;
+  bool get _isPastActiveDay => _day1Date != null && _activeDay < _todayNicuDay;
 
   /// Site-monitor override reopens an otherwise-locked day for a limited
   /// window (mirrors web's `isOverrideActiveDay`).
   bool get _isOverrideActive =>
-      _overrideUntil != null && DateTime.now().toUtc().isBefore(_overrideUntil!);
+      _overrideUntil != null &&
+      DateTime.now().toUtc().isBefore(_overrideUntil!);
 
   bool get _isFieldEditable {
     if (_isSubmitted && !_isOverrideActive) return false;
@@ -319,6 +367,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _lastFeedAutoDate = null;
     _lastFeedAutoValue = null;
     _feedVolumeAutofilled = false;
+    _lastFeedVolCalcAutoDate = null;
+    _lastFeedVolCalcAutoValue = null;
+    _feedVolumeCalcAutofilled = false;
     _hemaPrbcAutofilled = false;
     _hemaPlateletAutofilled = false;
     _hemaFfpAutofilled = false;
@@ -326,7 +377,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       final raw = await _api.loadInfectGiHemaDay(eid, day);
       if (!mounted || gen != _loadGen || day != _activeDay) return;
       if (raw == null) {
-        if (!await _applyLocalDraftIfAny(day)) {
+        if (!await _applyLocalDraftIfAny(day, serverConfirmedEmpty: true)) {
           _clearForm();
           _recordExists = false;
           _isEditing = true;
@@ -417,12 +468,20 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     if (_isFutureDay) return;
     if (_isSubmitted && !_isOverrideActive) return;
     try {
-      final flags = await _loadMmlHemeTransfusionFlagsForHelperDay(eid, recordDate);
+      final flags = await _loadMmlHemeTransfusionFlagsForHelperDay(
+        eid,
+        recordDate,
+      );
       if (!mounted || _activeDayYmd != recordDate) return;
 
       var changed = false;
-      void sync(bool mmlHas, bool wasAf, bool? current, void Function(bool?) setVal,
-          void Function(bool) setAf) {
+      void sync(
+        bool mmlHas,
+        bool wasAf,
+        bool? current,
+        void Function(bool?) setVal,
+        void Function(bool) setAf,
+      ) {
         final r = mmlSyncTransfusionYnFromMml(
           current: current,
           mmlHas: mmlHas,
@@ -435,12 +494,27 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         }
       }
 
-      sync(flags.prbc, _hemaPrbcAutofilled, _prbcTransfusion, (v) => _prbcTransfusion = v,
-          (a) => _hemaPrbcAutofilled = a);
-      sync(flags.platelet, _hemaPlateletAutofilled, _plateletTransfusion,
-          (v) => _plateletTransfusion = v, (a) => _hemaPlateletAutofilled = a);
-      sync(flags.ffpCryo, _hemaFfpAutofilled, _ffpCryo, (v) => _ffpCryo = v,
-          (a) => _hemaFfpAutofilled = a);
+      sync(
+        flags.prbc,
+        _hemaPrbcAutofilled,
+        _prbcTransfusion,
+        (v) => _prbcTransfusion = v,
+        (a) => _hemaPrbcAutofilled = a,
+      );
+      sync(
+        flags.platelet,
+        _hemaPlateletAutofilled,
+        _plateletTransfusion,
+        (v) => _plateletTransfusion = v,
+        (a) => _hemaPlateletAutofilled = a,
+      );
+      sync(
+        flags.ffpCryo,
+        _hemaFfpAutofilled,
+        _ffpCryo,
+        (v) => _ffpCryo = v,
+        (a) => _hemaFfpAutofilled = a,
+      );
 
       if (changed && mounted) {
         setState(() => _isEditing = true);
@@ -452,6 +526,8 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
 
   Future<void> _applyMmlAutofillFromHelper5() async {
     await _applyFeedVolumeFromMml();
+    // Must run after cumulative ml settles — #15 = #14 ÷ effective weight.
+    await _applyFeedVolumeCalcFromWeight();
     await _applyTransfusionFlagsFromMml();
   }
 
@@ -494,13 +570,17 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     if (_isFutureDay) return;
     if (_isSubmitted && !_isOverrideActive) return;
     try {
-      final entryValues = await _loadMmlGiAFeedValuesForHelperDay(eid, recordDate);
+      final entryValues = await _loadMmlGiAFeedValuesForHelperDay(
+        eid,
+        recordDate,
+      );
       if (!mounted || _activeDayYmd != recordDate) return;
       final vol = sumGiAFeedVolumeValues(entryValues);
       if (_npo == true) return;
 
       final current = _cumulativeFeedCtrl.text.trim();
-      final stillMatchesLastAuto = _lastFeedAutoDate == recordDate &&
+      final stillMatchesLastAuto =
+          _lastFeedAutoDate == recordDate &&
           _lastFeedAutoValue != null &&
           current == _formatFeedVol(_lastFeedAutoValue!);
       final sync = mmlSyncAggregateFieldFromMml(
@@ -540,6 +620,96 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     }
   }
 
+  /// #15 Feed Volume (ml/kg/d) = #14 Cumulative ÷ effective weight.
+  /// Effective weight is latest DMS 5.7.A (kg) once recovered to/past birth
+  /// weight; otherwise birth weight. Fill-if-blank unless [force].
+  Future<void> _applyFeedVolumeCalcFromWeight({bool force = false}) async {
+    final eid = widget.enrollmentId.trim();
+    final recordDate = _activeDayYmd;
+    if (eid.isEmpty || recordDate == null) return;
+    if (_isFutureDay) return;
+    if (_isSubmitted && !_isOverrideActive) return;
+    try {
+      final dmsWeightKg = await _api.loadLatestWeightKg(eid, recordDate);
+      if (!mounted || _activeDayYmd != recordDate) return;
+      final effective = effectiveFeedWeightKg(
+        dmsWeightKg: dmsWeightKg,
+        birthWeightGrams: _birthWeightGrams,
+      );
+      if (effective == null || !(effective > 0)) return;
+
+      final cumRaw = _cumulativeFeedCtrl.text.trim();
+      final cumVol = cumRaw.isEmpty ? null : double.tryParse(cumRaw);
+      final calc = feedVolumeMlPerKgDay(cumVol, effective);
+      final calcStr = calc == null ? null : formatFeedVolumeMlPerKgDay(calc);
+
+      final current = _feedVolumeCtrl.text.trim();
+      final stillMatchesLastAuto =
+          _lastFeedVolCalcAutoDate == recordDate &&
+          _lastFeedVolCalcAutoValue != null &&
+          current == _lastFeedVolCalcAutoValue;
+      final sync = mmlSyncAggregateFieldFromMml(
+        current: current.isEmpty ? null : current,
+        blockedByNotDone: _feedVolumeStatus != null,
+        wasAutofilled: _feedVolumeCalcAutofilled,
+        stillMatchesLastAuto: stillMatchesLastAuto,
+        looksSourced: (c, _) => false,
+        entryValuesForSourced: const [],
+        mmlValue: calcStr,
+        force: force,
+      );
+
+      if (!sync.changed) {
+        if (sync.nextAutofilled && mounted && !_feedVolumeCalcAutofilled) {
+          setState(() => _feedVolumeCalcAutofilled = true);
+        }
+        return;
+      }
+
+      _lastFeedVolCalcAutoDate = recordDate;
+      _lastFeedVolCalcAutoValue = calcStr;
+
+      if (!mounted) return;
+      setState(() {
+        _feedVolumeCtrl.text = sync.nextValue;
+        _feedVolumeCalcAutofilled = sync.nextAutofilled;
+        _isEditing = true;
+      });
+    } catch (_) {
+      // DMS weight optional
+    }
+  }
+
+  Future<void> _confirmForceRefillFeedVolume() async {
+    if (!_isFieldEditable) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Recalculate Feed Volume?'),
+        content: const Text(
+          'Recalculate Feed Volume (ml/kg/d) from the latest Cumulative Feed '
+          'Volume and weight, overwriting whatever is currently in the field '
+          '(including a manually-typed value)?\n\n'
+          'Use this if the number looks wrong — e.g. it was calculated before '
+          'a weight was corrected. If there is no weight or feed volume to '
+          'calculate from, this will clear the field rather than guess.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Overwrite'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _applyFeedVolumeCalcFromWeight(force: true);
+  }
+
   static String _formatFeedVol(double vol) {
     return vol == vol.roundToDouble() ? '${vol.round()}' : '$vol';
   }
@@ -554,16 +724,30 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       savedAt: DateTime.now().toUtc().toIso8601String(),
       savedBy: 'local-draft',
     );
+    final sid = widget.screeningId.trim();
+    if (sid.isNotEmpty) body['screening_id'] = sid;
     await HelperDayDraftStorage.save(_kIghDraftKey, eid, _activeDay, body);
   }
 
-  Future<bool> _applyLocalDraftIfAny(int day) async {
+  Future<bool> _applyLocalDraftIfAny(
+    int day, {
+    bool serverConfirmedEmpty = false,
+  }) async {
+    final eid = widget.enrollmentId.trim();
     final raw = await HelperDayDraftStorage.load(
       _kIghDraftKey,
-      widget.enrollmentId.trim(),
+      eid,
       day,
     );
     if (raw == null) return false;
+    if (!helperLocalDraftIsForScreening(
+      draft: raw,
+      screeningId: widget.screeningId,
+      serverConfirmedEmpty: serverConfirmedEmpty,
+    )) {
+      await HelperDayDraftStorage.clear(_kIghDraftKey, eid, day);
+      return false;
+    }
     _applyDay(InfectGiHemaDay.fromJson(raw));
     return true;
   }
@@ -576,6 +760,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _sepsisSuspected = null;
     _bloodCultureSent = null;
     _bloodCulturePositive = null;
+    _bloodCultureStatus = null;
     _antibiotics = null;
     _lpDone = null;
     _meningitis = null;
@@ -588,6 +773,8 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _men = null;
     _enteralFeedsReceived = null;
     _feedType = [];
+    _cumulativeFeedVolumeStatus = null;
+    _feedVolumeStatus = null;
     _ivFluids = null;
     _parenteralNutrition = null;
     _probiotic = null;
@@ -595,6 +782,8 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _necSuspected = null;
     _necConfirmedStage = null;
     _cholestasis = null;
+    _hbValueStatus = null;
+    _peakTsbStatus = null;
     _jaundice = null;
     _phototherapy = null;
     _exchangeTransfusion = null;
@@ -607,6 +796,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _sepsisSuspected = d.sepsisSuspected;
     _bloodCultureSent = d.bloodCultureSent;
     _bloodCulturePositive = d.bloodCulturePositive;
+    _bloodCultureStatus = d.bloodCultureStatus;
     _antibiotics = d.antibiotics;
     _lpDone = d.lpDone;
     _meningitis = d.meningitis;
@@ -617,15 +807,16 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _sepsisScreens = d.sepsisScreens.isEmpty
         ? [SepsisScreenEntry.blank()]
         : d.sepsisScreens
-            .map((e) => SepsisScreenEntry.fromJson(e.toJson()))
-            .toList();
+              .map((e) => SepsisScreenEntry.fromJson(e.toJson()))
+              .toList();
     _npo = d.npo;
     _men = d.men;
     _enteralFeedsReceived = d.enteralFeedsReceived;
     _feedType = List.of(d.feedType);
-    _cumulativeFeedCtrl.text =
-        d.cumulativeFeedVolume?.toString() ?? '';
+    _cumulativeFeedCtrl.text = d.cumulativeFeedVolume?.toString() ?? '';
+    _cumulativeFeedVolumeStatus = d.cumulativeFeedVolumeStatus;
     _feedVolumeCtrl.text = d.feedVolume?.toString() ?? '';
+    _feedVolumeStatus = d.feedVolumeStatus;
     _ivFluids = d.ivFluids;
     _parenteralNutrition = d.parenteralNutrition;
     _probiotic = d.probiotic;
@@ -634,9 +825,11 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     _necConfirmedStage = d.necConfirmedStage;
     _cholestasis = d.cholestasis;
     _hbCtrl.text = d.hbValue?.toString() ?? '';
+    _hbValueStatus = d.hbValueStatus;
     _jaundice = d.jaundice;
     _phototherapy = d.phototherapy;
     _peakTsbCtrl.text = d.peakTsb?.toString() ?? '';
+    _peakTsbStatus = d.peakTsbStatus;
     _exchangeTransfusion = d.exchangeTransfusion;
     _prbcTransfusion = d.prbcTransfusion;
     _plateletTransfusion = d.plateletTransfusion;
@@ -651,6 +844,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     d.sepsisSuspected = _sepsisSuspected;
     d.bloodCultureSent = _bloodCultureSent;
     d.bloodCulturePositive = _bloodCulturePositive;
+    d.bloodCultureStatus = _bloodCultureStatus;
     d.antibiotics = _antibiotics;
     d.lpDone = _lpDone;
     d.meningitis = _meningitis;
@@ -658,15 +852,17 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     d.clabsi = _clabsi;
     d.vap = _vap;
     d.sepsisScreenSent = _sepsisScreenSent;
-    d.sepsisScreens =
-        _sepsisScreens.map((e) => SepsisScreenEntry.fromJson(e.toJson())).toList();
+    d.sepsisScreens = _sepsisScreens
+        .map((e) => SepsisScreenEntry.fromJson(e.toJson()))
+        .toList();
     d.npo = _npo;
     d.men = _men;
     d.enteralFeedsReceived = _enteralFeedsReceived;
     d.feedType = List.of(_feedType);
-    d.cumulativeFeedVolume =
-        double.tryParse(_cumulativeFeedCtrl.text.trim());
+    d.cumulativeFeedVolume = double.tryParse(_cumulativeFeedCtrl.text.trim());
+    d.cumulativeFeedVolumeStatus = _cumulativeFeedVolumeStatus;
     d.feedVolume = double.tryParse(_feedVolumeCtrl.text.trim());
+    d.feedVolumeStatus = _feedVolumeStatus;
     d.ivFluids = _ivFluids;
     d.parenteralNutrition = _parenteralNutrition;
     d.probiotic = _probiotic;
@@ -675,9 +871,11 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     d.necConfirmedStage = _necConfirmedStage;
     d.cholestasis = _cholestasis;
     d.hbValue = double.tryParse(_hbCtrl.text.trim());
+    d.hbValueStatus = _hbValueStatus;
     d.jaundice = _jaundice;
     d.phototherapy = _phototherapy;
     d.peakTsb = double.tryParse(_peakTsbCtrl.text.trim());
+    d.peakTsbStatus = _peakTsbStatus;
     d.exchangeTransfusion = _exchangeTransfusion;
     d.prbcTransfusion = _prbcTransfusion;
     d.plateletTransfusion = _plateletTransfusion;
@@ -689,8 +887,10 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     if (model.sepsisSuspected == false) {
       model.bloodCultureSent = null;
       model.bloodCulturePositive = null;
+      model.bloodCultureStatus = null;
     } else if (model.bloodCultureSent == false) {
       model.bloodCulturePositive = null;
+      model.bloodCultureStatus = null;
     }
     if (model.meningitis == false) model.meningitisType = null;
     if (model.npo == true) {
@@ -698,7 +898,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       model.enteralFeedsReceived = null;
       model.feedType = [];
       model.cumulativeFeedVolume = null;
+      model.cumulativeFeedVolumeStatus = null;
       model.feedVolume = null;
+      model.feedVolumeStatus = null;
     } else if (model.enteralFeedsReceived == false) {
       model.feedType = [];
     }
@@ -718,11 +920,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     }
     await _stashCurrentDayDraft();
     setState(() => _activeDay = day);
-    unawaited(rememberActiveDay(
-      helperSessionKeyInfectGiHema,
-      widget.enrollmentId,
-      day,
-    ));
+    unawaited(
+      rememberActiveDay(helperSessionKeyInfectGiHema, widget.enrollmentId, day),
+    );
     await _loadActiveDay();
   }
 
@@ -745,7 +945,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     if (!_isFieldEditable || _activeDay <= 1) return;
     try {
       final raw = await _api.loadInfectGiHemaDay(
-          widget.enrollmentId.trim(), _activeDay - 1);
+        widget.enrollmentId.trim(),
+        _activeDay - 1,
+      );
       if (raw == null) {
         _toast('No data on Day ${_activeDay - 1} to copy', error: true);
         return;
@@ -765,8 +967,10 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
 
   Future<bool> _save({bool forLater = false, bool force = false}) async {
     if (_dayLoadFailed) {
-      _toast('Day failed to load — switch day or reopen form before saving',
-          error: true);
+      _toast(
+        'Day failed to load — switch day or reopen form before saving',
+        error: true,
+      );
       return false;
     }
     if (!force && !_isFieldEditable && !_isEditing) return false;
@@ -782,16 +986,24 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       return false;
     }
     // Block invalid numeric text so tryParse→null cannot wipe a good server value.
+    // Status sidecars count as the answer — skip the number check when set.
     for (final entry in [
-      ('Cumulative feed volume', _cumulativeFeedCtrl.text),
-      ('Feed volume', _feedVolumeCtrl.text),
-      ('Hb', _hbCtrl.text),
-      ('Peak TSB', _peakTsbCtrl.text),
+      (
+        'Cumulative feed volume',
+        _cumulativeFeedCtrl.text,
+        _cumulativeFeedVolumeStatus,
+      ),
+      ('Feed volume', _feedVolumeCtrl.text, _feedVolumeStatus),
+      ('Hb', _hbCtrl.text, _hbValueStatus),
+      ('Peak TSB', _peakTsbCtrl.text, _peakTsbStatus),
     ]) {
+      if ((entry.$3 ?? '').trim().isNotEmpty) continue;
       final t = entry.$2.trim();
       if (t.isNotEmpty && double.tryParse(t) == null) {
-        _toast('${entry.$1} is not a valid number — fix before saving',
-            error: true);
+        _toast(
+          '${entry.$1} is not a valid number — fix before saving',
+          error: true,
+        );
         return false;
       }
     }
@@ -804,7 +1016,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       _applyGatedClearsOnSave(model);
 
       final body = model.toJson(
-        submissionStatus: 'draft',
+        submissionStatus: helperDaySaveStatus(_completion.percent),
         savedAt: now,
         savedBy: name,
       );
@@ -860,11 +1072,13 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
           ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Submit & Lock')),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Submit & Lock'),
+          ),
         ],
       ),
     );
@@ -908,11 +1122,13 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
 
   void _toast(String msg, {bool error = false}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg),
-      backgroundColor: error ? AppTheme.of(context).danger : null,
-      behavior: SnackBarBehavior.floating,
-    ));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: error ? AppTheme.of(context).danger : null,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   @override
@@ -958,80 +1174,81 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
             child: _dayLoading
                 ? const Center(child: CircularProgressIndicator())
                 : _isFutureDay
-                    ? _lockedPanel(c, 'Not Available Yet',
-                        'Day $_activeDay is in the future.')
-                    : ListView(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                        children: [
-                          _progressHeader(c),
-                          if (_isPastActiveDay && !_isSubmitted)
-                            _infoChip(c, 'Past day — still editable', c.warning),
-                          if (_isSubmitted && !_isOverrideActive)
-                            _infoChip(c, 'Submitted — locked', c.success),
-                          if (_isSubmitted && _isOverrideActive)
-                            _infoChip(c, 'Locked — override active', c.warning),
-                          if (_recordExists &&
-                              !_isEditing &&
-                              (!_isSubmitted || _isOverrideActive))
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
-                              child: OutlinedButton.icon(
-                                onPressed: () =>
-                                    setState(() => _isEditing = true),
-                                icon: const Icon(Icons.edit_outlined, size: 18),
-                                label: Text('Edit Day $_activeDay'),
-                              ),
-                            ),
-                          if (editable && _activeDay > 1)
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: TextButton.icon(
-                                onPressed: _copyPrevious,
-                                icon: const Icon(Icons.copy_all_outlined,
-                                    size: 18),
-                                label: const Text('Copy from previous day'),
-                              ),
-                            ),
-                          _section(
-                            c,
-                            title: 'Infection Assessment',
-                            icon: Icons.coronavirus_rounded,
-                            color: c.primary,
-                            children: _infectionFields(
-                              c,
-                              editable,
-                              sepsisYes: sepsisYes,
-                              cultureSentYes: cultureSentYes,
-                              sepsisScreenSentYes: sepsisScreenSentYes,
-                              meningitisYes: meningitisYes,
-                            ),
+                ? _lockedPanel(
+                    c,
+                    'Not Available Yet',
+                    'Day $_activeDay is in the future.',
+                  )
+                : ListView(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                    children: [
+                      _progressHeader(c),
+                      if (_isPastActiveDay && !_isSubmitted)
+                        _infoChip(c, 'Past day — still editable', c.warning),
+                      if (_isSubmitted && !_isOverrideActive)
+                        _infoChip(c, 'Submitted — locked', c.success),
+                      if (_isSubmitted && _isOverrideActive)
+                        _infoChip(c, 'Locked — override active', c.warning),
+                      if (_recordExists &&
+                          !_isEditing &&
+                          (!_isSubmitted || _isOverrideActive))
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: OutlinedButton.icon(
+                            onPressed: () => setState(() => _isEditing = true),
+                            icon: const Icon(Icons.edit_outlined, size: 18),
+                            label: Text('Edit Day $_activeDay'),
                           ),
-                          _section(
-                            c,
-                            title: 'Gastrointestinal Assessment',
-                            icon: Icons.restaurant_rounded,
-                            color: c.warning,
-                            children: _giFields(
-                              c,
-                              editable,
-                              npoNo: npoNo,
-                              enteralYes: enteralYes,
-                              necYes: necYes,
-                            ),
+                        ),
+                      if (editable && _activeDay > 1)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            onPressed: _copyPrevious,
+                            icon: const Icon(Icons.copy_all_outlined, size: 18),
+                            label: const Text('Copy from previous day'),
                           ),
-                          _section(
-                            c,
-                            title: 'Hematology Assessment',
-                            icon: Icons.bloodtype_rounded,
-                            color: c.danger,
-                            children: _hemaFields(
-                              c,
-                              editable,
-                              jaundiceYes: jaundiceYes,
-                            ),
-                          ),
-                        ],
+                        ),
+                      _section(
+                        c,
+                        title: 'Infection Assessment',
+                        icon: Icons.coronavirus_rounded,
+                        color: c.primary,
+                        children: _infectionFields(
+                          c,
+                          editable,
+                          sepsisYes: sepsisYes,
+                          cultureSentYes: cultureSentYes,
+                          sepsisScreenSentYes: sepsisScreenSentYes,
+                          meningitisYes: meningitisYes,
+                        ),
                       ),
+                      _section(
+                        c,
+                        title: 'Gastrointestinal Assessment',
+                        icon: Icons.restaurant_rounded,
+                        color: c.warning,
+                        children: _giFields(
+                          c,
+                          editable,
+                          npoNo: npoNo,
+                          enteralYes: enteralYes,
+                          necYes: necYes,
+                        ),
+                      ),
+                      _section(
+                        c,
+                        title: 'Hematology Assessment',
+                        icon: Icons.bloodtype_rounded,
+                        color: c.danger,
+                        children: _hemaFields(
+                          c,
+                          editable,
+                          jaundiceYes: jaundiceYes,
+                        ),
+                      ),
+                    ],
+                  ),
           ),
         ],
       ),
@@ -1040,11 +1257,12 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   }
 
   HelperFormPatientContext get _helperPatient => HelperFormPatientContext(
-        enrollmentId: widget.enrollmentId,
-        gestation: widget.gestation,
-        motherName: widget.motherName,
-        babyUid: widget.babyUid,
-      );
+    enrollmentId: widget.enrollmentId,
+    gestation: widget.gestation,
+    motherName: widget.motherName,
+    babyUid: widget.babyUid,
+    screeningId: widget.screeningId,
+  );
 
   AppBar _appBar(AppColors c) {
     return AppBar(
@@ -1133,7 +1351,13 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       activeDay: _activeDay,
       todayNicuDay: _todayNicuDay,
       day1Date: _day1Date,
-      dayStatus: _dayStatus,
+      dayStatus: {
+        ..._dayStatus,
+        _activeDay: helperDayDisplayStatus(
+          _isSubmitted ? 'submitted' : (_dayStatus[_activeDay] ?? 'empty'),
+          _completion.percent,
+        ),
+      },
       dischargeDay: _dischargeDay,
       showAddDay: _dischargeDay == null,
       canShowEarlier: _stripStart > 1,
@@ -1160,8 +1384,10 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         width: double.infinity,
         color: c.warningSoft,
         padding: const EdgeInsets.all(10),
-        child: Text('Set Day 1 Date to enable NICU day logging.',
-            style: TextStyle(color: c.warning, fontSize: 12)),
+        child: Text(
+          'Set Day 1 Date to enable NICU day logging.',
+          style: TextStyle(color: c.warning, fontSize: 12),
+        ),
       );
     }
     return const SizedBox.shrink();
@@ -1172,9 +1398,13 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       width: double.infinity,
       color: _bannerError ? c.dangerSoft : c.successSoft,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      child: Text(_banner!,
-          style: TextStyle(
-              color: _bannerError ? c.danger : c.success, fontSize: 12)),
+      child: Text(
+        _banner!,
+        style: TextStyle(
+          color: _bannerError ? c.danger : c.success,
+          fontSize: 12,
+        ),
+      ),
     );
   }
 
@@ -1196,11 +1426,14 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
                   backgroundColor: c.borderLight,
                   color: pct == 100 ? c.success : c.primary,
                 ),
-                Text('$pct%',
-                    style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        color: c.textPrimary)),
+                Text(
+                  '$pct%',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: c.textPrimary,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1209,11 +1442,14 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Day $_activeDay',
-                    style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 16,
-                        color: c.textPrimary)),
+                Text(
+                  'Day $_activeDay',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                    color: c.textPrimary,
+                  ),
+                ),
                 Text(
                   '${_completion.answered}/${_completion.total} fields · Gestation ${widget.gestation}',
                   style: TextStyle(color: c.textTertiary, fontSize: 12),
@@ -1239,9 +1475,14 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         children: [
           Icon(Icons.lock_outline, size: 16, color: color),
           const SizedBox(width: 8),
-          Text(text,
-              style: TextStyle(
-                  color: color, fontWeight: FontWeight.w700, fontSize: 12)),
+          Text(
+            text,
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+            ),
+          ),
         ],
       ),
     );
@@ -1256,15 +1497,20 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
           children: [
             Icon(Icons.lock_clock_outlined, size: 48, color: c.textTertiary),
             const SizedBox(height: 12),
-            Text(title,
-                style: TextStyle(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 18,
-                    color: c.textPrimary)),
+            Text(
+              title,
+              style: TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 18,
+                color: c.textPrimary,
+              ),
+            ),
             const SizedBox(height: 6),
-            Text(body,
-                textAlign: TextAlign.center,
-                style: TextStyle(color: c.textSecondary)),
+            Text(
+              body,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: c.textSecondary),
+            ),
           ],
         ),
       ),
@@ -1311,11 +1557,14 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Sepsis Screens',
-              style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 12,
-                  color: c.textTertiary)),
+          Text(
+            'Sepsis Screens',
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+              color: c.textTertiary,
+            ),
+          ),
           const SizedBox(height: 6),
           for (var i = 0; i < _sepsisScreens.length; i++)
             _SepsisScreenEntryRow(
@@ -1357,6 +1606,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
           if (v != true) {
             _bloodCultureSent = null;
             _bloodCulturePositive = null;
+            _bloodCultureStatus = null;
           }
         });
       }, c),
@@ -1364,12 +1614,29 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         _yn('2. Blood Culture Sent', _bloodCultureSent, editable, (v) {
           setState(() {
             _bloodCultureSent = v;
-            if (v != true) _bloodCulturePositive = null;
+            if (v != true) {
+              _bloodCulturePositive = null;
+              _bloodCultureStatus = null;
+            }
           });
         }, c),
         if (cultureSentYes)
-          _yn('3. Blood Culture Positive', _bloodCulturePositive, editable,
-              (v) => setState(() => _bloodCulturePositive = v), c),
+          _yn(
+            '3. Blood Culture Positive',
+            _bloodCulturePositive,
+            editable,
+            (v) => setState(() {
+              _bloodCulturePositive = v;
+              if (v != null) _bloodCultureStatus = null;
+            }),
+            c,
+            status: _bloodCultureStatus,
+            allowAwaited: true,
+            onStatus: (s) => setState(() {
+              _bloodCultureStatus = s;
+              if (s != null) _bloodCulturePositive = null;
+            }),
+          ),
         // Not part of the original numbered CRF sequence — mirrors web's
         // sepsis_screen_sent gate + repeatable sepsis_screens list, added
         // so Form H's Infection auto-fill can distinguish clinical vs.
@@ -1382,10 +1649,20 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         }, c),
         if (sepsisScreenSentYes) _sepsisScreensBlock(c, editable),
       ],
-      _yn('4. Antibiotics', _antibiotics, editable,
-          (v) => setState(() => _antibiotics = v), c),
-      _yn('5. LP Done', _lpDone, editable,
-          (v) => setState(() => _lpDone = v), c),
+      _yn(
+        '4. Antibiotics',
+        _antibiotics,
+        editable,
+        (v) => setState(() => _antibiotics = v),
+        c,
+      ),
+      _yn(
+        '5. LP Done',
+        _lpDone,
+        editable,
+        (v) => setState(() => _lpDone = v),
+        c,
+      ),
       _yn('6. Meningitis (Y/N)', _meningitis, editable, (v) {
         setState(() {
           _meningitis = v;
@@ -1405,8 +1682,13 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
             c,
           ),
         ),
-      _yn('8. CLABSI', _clabsi, editable,
-          (v) => setState(() => _clabsi = v), c),
+      _yn(
+        '8. CLABSI',
+        _clabsi,
+        editable,
+        (v) => setState(() => _clabsi = v),
+        c,
+      ),
       _yn('9. VAP', _vap, editable, (v) => setState(() => _vap = v), c),
     ];
   }
@@ -1428,14 +1710,20 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
             _feedType = [];
             _cumulativeFeedCtrl.clear();
             _feedVolumeCtrl.clear();
+            _cumulativeFeedVolumeStatus = null;
+            _feedVolumeStatus = null;
           }
         });
       }, c),
       if (npoNo) ...[
-        _yn('11. MEN (Minimal Enteral Nutrition)', _men, editable,
-            (v) => setState(() => _men = v), c),
-        _yn('12. Enteral Feeds Received', _enteralFeedsReceived, editable,
-            (v) {
+        _yn(
+          '11. MEN (Minimal Enteral Nutrition)',
+          _men,
+          editable,
+          (v) => setState(() => _men = v),
+          c,
+        ),
+        _yn('12. Enteral Feeds Received', _enteralFeedsReceived, editable, (v) {
           setState(() {
             _enteralFeedsReceived = v;
             if (v != true) _feedType = [];
@@ -1460,33 +1748,84 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
           number: '14',
           label: 'Cumulative Feed Volume',
           hint: 'ml',
-          child: _textField(_cumulativeFeedCtrl, c,
-              enabled: editable,
-              keyboard: const TextInputType.numberWithOptions(decimal: true),
-              hint: '0',
-              error: InfectGiHemaValidators.cumulativeFeedVolume(
-                  _cumulativeFeedCtrl.text)),
+          status: _cumulativeFeedVolumeStatus,
+          allowNotDone: true,
+          enabled: editable,
+          onStatus: (s) => setState(() {
+            _cumulativeFeedVolumeStatus = s;
+            if (s != null) _cumulativeFeedCtrl.clear();
+          }),
+          child: _textField(
+            _cumulativeFeedCtrl,
+            c,
+            enabled: editable && _cumulativeFeedVolumeStatus == null,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+            hint: '0',
+            error: InfectGiHemaValidators.cumulativeFeedVolume(
+              _cumulativeFeedCtrl.text,
+            ),
+          ),
         ),
         _fieldCard(
           c,
           number: '15',
           label: 'Feed Volume',
           hint: 'ml/kg/d',
-          child: _textField(_feedVolumeCtrl, c,
-              enabled: editable,
-              keyboard: const TextInputType.numberWithOptions(decimal: true),
-              hint: '0',
-              error: InfectGiHemaValidators.feedVolume(_feedVolumeCtrl.text)),
+          status: _feedVolumeStatus,
+          allowNotDone: true,
+          enabled: editable,
+          onStatus: (s) => setState(() {
+            _feedVolumeStatus = s;
+            if (s != null) _feedVolumeCtrl.clear();
+          }),
+          child: _textField(
+            _feedVolumeCtrl,
+            c,
+            enabled: editable && _feedVolumeStatus == null,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+            hint: '0',
+            error: InfectGiHemaValidators.feedVolume(_feedVolumeCtrl.text),
+          ),
         ),
+        if (editable)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: _confirmForceRefillFeedVolume,
+              child: const Text(
+                'Force refill Feed Volume (overwrite existing answer)',
+              ),
+            ),
+          ),
       ],
-      _yn('16. IV Fluids', _ivFluids, editable,
-          (v) => setState(() => _ivFluids = v), c),
-      _yn('17. Parenteral Nutrition', _parenteralNutrition, editable,
-          (v) => setState(() => _parenteralNutrition = v), c),
-      _yn('18. Probiotic', _probiotic, editable,
-          (v) => setState(() => _probiotic = v), c),
-      _yn('19. Feed Intolerance', _feedIntolerance, editable,
-          (v) => setState(() => _feedIntolerance = v), c),
+      _yn(
+        '16. IV Fluids',
+        _ivFluids,
+        editable,
+        (v) => setState(() => _ivFluids = v),
+        c,
+      ),
+      _yn(
+        '17. Parenteral Nutrition',
+        _parenteralNutrition,
+        editable,
+        (v) => setState(() => _parenteralNutrition = v),
+        c,
+      ),
+      _yn(
+        '18. Probiotic',
+        _probiotic,
+        editable,
+        (v) => setState(() => _probiotic = v),
+        c,
+      ),
+      _yn(
+        '19. Feed Intolerance',
+        _feedIntolerance,
+        editable,
+        (v) => setState(() => _feedIntolerance = v),
+        c,
+      ),
       _yn('20. NEC Suspected', _necSuspected, editable, (v) {
         setState(() {
           _necSuspected = v;
@@ -1506,8 +1845,13 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
             c,
           ),
         ),
-      _yn('22. Cholestasis', _cholestasis, editable,
-          (v) => setState(() => _cholestasis = v), c),
+      _yn(
+        '22. Cholestasis',
+        _cholestasis,
+        editable,
+        (v) => setState(() => _cholestasis = v),
+        c,
+      ),
     ];
   }
 
@@ -1522,11 +1866,22 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         number: '23',
         label: 'Hb Value',
         hint: 'g/dL',
-        child: _textField(_hbCtrl, c,
-            enabled: editable,
-            keyboard: const TextInputType.numberWithOptions(decimal: true),
-            hint: '0.0',
-            error: InfectGiHemaValidators.hb(_hbCtrl.text)),
+        status: _hbValueStatus,
+        allowAwaited: true,
+        allowNotDone: true,
+        enabled: editable,
+        onStatus: (s) => setState(() {
+          _hbValueStatus = s;
+          if (s != null) _hbCtrl.clear();
+        }),
+        child: _textField(
+          _hbCtrl,
+          c,
+          enabled: editable && _hbValueStatus == null,
+          keyboard: const TextInputType.numberWithOptions(decimal: true),
+          hint: '0.0',
+          error: InfectGiHemaValidators.hb(_hbCtrl.text),
+        ),
       ),
       _yn('24. Jaundice', _jaundice, editable, (v) {
         setState(() {
@@ -1535,21 +1890,42 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         });
       }, c),
       if (jaundiceYes)
-        _yn('25. Phototherapy', _phototherapy, editable,
-            (v) => setState(() => _phototherapy = v), c),
+        _yn(
+          '25. Phototherapy',
+          _phototherapy,
+          editable,
+          (v) => setState(() => _phototherapy = v),
+          c,
+        ),
       _fieldCard(
         c,
         number: '26',
         label: 'Peak TSB',
         hint: 'mg/dL',
-        child: _textField(_peakTsbCtrl, c,
-            enabled: editable,
-            keyboard: const TextInputType.numberWithOptions(decimal: true),
-            hint: '0.0',
-            error: InfectGiHemaValidators.peakTsb(_peakTsbCtrl.text)),
+        status: _peakTsbStatus,
+        allowAwaited: true,
+        allowNotDone: true,
+        enabled: editable,
+        onStatus: (s) => setState(() {
+          _peakTsbStatus = s;
+          if (s != null) _peakTsbCtrl.clear();
+        }),
+        child: _textField(
+          _peakTsbCtrl,
+          c,
+          enabled: editable && _peakTsbStatus == null,
+          keyboard: const TextInputType.numberWithOptions(decimal: true),
+          hint: '0.0',
+          error: InfectGiHemaValidators.peakTsb(_peakTsbCtrl.text),
+        ),
       ),
-      _yn('27. Exchange Transfusion', _exchangeTransfusion, editable,
-          (v) => setState(() => _exchangeTransfusion = v), c),
+      _yn(
+        '27. Exchange Transfusion',
+        _exchangeTransfusion,
+        editable,
+        (v) => setState(() => _exchangeTransfusion = v),
+        c,
+      ),
       _yn('28. PRBC Transfusion', _prbcTransfusion, editable, (v) {
         setState(() {
           _hemaPrbcAutofilled = false;
@@ -1572,7 +1948,8 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
   }
 
   Widget _bottomBar(AppColors c) {
-    final canEdit = _isFieldEditable ||
+    final canEdit =
+        _isFieldEditable ||
         (_recordExists &&
             (!_isSubmitted || _isOverrideActive) &&
             !_isFutureDay);
@@ -1587,14 +1964,17 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
               color: Colors.black.withOpacity(0.05),
               blurRadius: 10,
               offset: const Offset(0, -3),
-            )
+            ),
           ],
         ),
         child: Row(
           children: [
             Expanded(
               child: OutlinedButton(
-                onPressed: (_saving || !canEdit || (_isSubmitted && !_isOverrideActive))
+                onPressed:
+                    (_saving ||
+                        !canEdit ||
+                        (_isSubmitted && !_isOverrideActive))
                     ? null
                     : () {
                         setState(() => _isEditing = true);
@@ -1606,7 +1986,10 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
             const SizedBox(width: 8),
             Expanded(
               child: ElevatedButton(
-                onPressed: (_saving || !canEdit || (_isSubmitted && !_isOverrideActive))
+                onPressed:
+                    (_saving ||
+                        !canEdit ||
+                        (_isSubmitted && !_isOverrideActive))
                     ? null
                     : () {
                         setState(() => _isEditing = true);
@@ -1616,7 +1999,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
                 child: Text(
                   _saving ? 'Saving…' : 'Save',
                   style: const TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.w700),
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
             ),
@@ -1629,7 +2014,9 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
                   child: Text(
                     _submitting ? '…' : 'Submit',
                     style: const TextStyle(
-                        color: Colors.white, fontWeight: FontWeight.w700),
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
@@ -1663,11 +2050,14 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
               children: [
                 Icon(icon, color: color, size: 20),
                 const SizedBox(width: 8),
-                Text(title,
-                    style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 14,
-                        color: c.textPrimary)),
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 14,
+                    color: c.textPrimary,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1687,28 +2077,95 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     required String label,
     String? hint,
     required Widget child,
+    String? status,
+    bool allowAwaited = false,
+    bool allowNotDone = false,
+    bool enabled = true,
+    ValueChanged<String?>? onStatus,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            number.isEmpty ? label : '$number. $label',
-            style: TextStyle(
-                fontWeight: FontWeight.w700,
-                fontSize: 13,
-                color: c.textPrimary),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(
+                  number.isEmpty ? label : '$number. $label',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    color: c.textPrimary,
+                  ),
+                ),
+              ),
+              if (onStatus != null)
+                _statusChips(
+                  status: status,
+                  enabled: enabled,
+                  allowAwaited: allowAwaited,
+                  allowNotDone: allowNotDone,
+                  onChanged: onStatus,
+                  c: c,
+                ),
+            ],
           ),
           if (hint != null) ...[
             const SizedBox(height: 2),
-            Text(hint,
-                style: TextStyle(fontSize: 11, color: c.textTertiary)),
+            Text(hint, style: TextStyle(fontSize: 11, color: c.textTertiary)),
           ],
           const SizedBox(height: 6),
           child,
         ],
       ),
+    );
+  }
+
+  Widget _statusChips({
+    required String? status,
+    required bool enabled,
+    required bool allowAwaited,
+    required bool allowNotDone,
+    required ValueChanged<String?> onChanged,
+    required AppColors c,
+  }) {
+    Widget chip(String label, String value) {
+      final on = status == value;
+      return Padding(
+        padding: const EdgeInsets.only(left: 4),
+        child: InkWell(
+          onTap: !enabled ? null : () => onChanged(on ? null : value),
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: on ? c.warningSoft : c.surfaceAlt,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: on ? c.warning : c.border),
+            ),
+            child: Text(
+              on ? 'Undo' : label,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                color: on ? c.warning : c.textSecondary,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Wrap(
+      alignment: WrapAlignment.end,
+      children: [
+        if (allowAwaited)
+          chip(InfectGiHemaDay.statusAwaited, InfectGiHemaDay.statusAwaited),
+        if (allowNotDone)
+          chip(InfectGiHemaDay.statusNotDone, InfectGiHemaDay.statusNotDone),
+      ],
     );
   }
 
@@ -1719,7 +2176,11 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     ValueChanged<bool?> onChanged,
     AppColors c, {
     String? hint,
+    String? status,
+    bool allowAwaited = false,
+    ValueChanged<String?>? onStatus,
   }) {
+    final sentinel = status != null && status.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Row(
@@ -1729,19 +2190,32 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(label,
-                    style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 13,
-                        color: c.textPrimary)),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                    color: c.textPrimary,
+                  ),
+                ),
                 if (hint != null)
-                  Text(hint,
-                      style:
-                          TextStyle(fontSize: 11, color: c.textTertiary)),
+                  Text(
+                    hint,
+                    style: TextStyle(fontSize: 11, color: c.textTertiary),
+                  ),
               ],
             ),
           ),
-          _ynToggle(value, enabled, onChanged, c),
+          if (onStatus != null)
+            _statusChips(
+              status: status,
+              enabled: enabled,
+              allowAwaited: allowAwaited,
+              allowNotDone: false,
+              onChanged: onStatus,
+              c: c,
+            ),
+          _ynToggle(value, enabled && !sentinel, onChanged, c),
         ],
       ),
     );
@@ -1756,9 +2230,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
     Widget btn(String text, bool? target, Color activeColor) {
       final active = value == target;
       return InkWell(
-        onTap: !enabled
-            ? null
-            : () => onChanged(active ? null : target),
+        onTap: !enabled ? null : () => onChanged(active ? null : target),
         borderRadius: BorderRadius.circular(8),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -1804,9 +2276,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
         return ChoiceChip(
           label: Text(opt),
           selected: sel,
-          onSelected: !enabled
-              ? null
-              : (_) => onChanged(sel ? null : opt),
+          onSelected: !enabled ? null : (_) => onChanged(sel ? null : opt),
         );
       }).toList(),
     );
@@ -1895,7 +2365,7 @@ class _HelperForm3InfectGIHemaState extends State<HelperForm3InfectGIHema> {
       'Sep',
       'Oct',
       'Nov',
-      'Dec'
+      'Dec',
     ];
     return names[m - 1];
   }
@@ -1979,8 +2449,10 @@ class _SepsisScreenEntryRowState extends State<_SepsisScreenEntryRow> {
         children: [
           SizedBox(
             width: 56,
-            child: Text(label,
-                style: TextStyle(fontSize: 12, color: c.textSecondary)),
+            child: Text(
+              label,
+              style: TextStyle(fontSize: 12, color: c.textSecondary),
+            ),
           ),
           Expanded(
             child: Wrap(
@@ -1993,8 +2465,7 @@ class _SepsisScreenEntryRowState extends State<_SepsisScreenEntryRow> {
                   selected: sel,
                   onSelected: !widget.editable
                       ? null
-                      : (_) => onSelect(
-                          clearable && sel ? '' : o),
+                      : (_) => onSelect(clearable && sel ? '' : o),
                 );
               }).toList(),
             ),
@@ -2021,11 +2492,14 @@ class _SepsisScreenEntryRowState extends State<_SepsisScreenEntryRow> {
           Row(
             children: [
               if (widget.canDelete)
-                Text('#${widget.index + 1}',
-                    style: TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 12,
-                        color: c.textTertiary)),
+                Text(
+                  '#${widget.index + 1}',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                    color: c.textTertiary,
+                  ),
+                ),
               const Spacer(),
               if (widget.canDelete && widget.editable)
                 IconButton(
@@ -2065,22 +2539,29 @@ class _SepsisScreenEntryRowState extends State<_SepsisScreenEntryRow> {
             ],
           ),
           const SizedBox(height: 8),
-          _choiceRow('Type', _typeOptions, widget.entry.type,
-              (v) => widget.onChanged('type', v)),
+          _choiceRow(
+            'Type',
+            _typeOptions,
+            widget.entry.type,
+            (v) => widget.onChanged('type', v),
+          ),
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               SizedBox(
                 width: 56,
-                child: Text('Value',
-                    style: TextStyle(fontSize: 12, color: c.textSecondary)),
+                child: Text(
+                  'Value',
+                  style: TextStyle(fontSize: 12, color: c.textSecondary),
+                ),
               ),
               Expanded(
                 child: TextField(
                   controller: _valueCtrl,
                   enabled: widget.editable,
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
                   decoration: const InputDecoration(isDense: true),
                   onChanged: (v) => widget.onChanged('value', v),
                 ),

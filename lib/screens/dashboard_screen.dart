@@ -16,6 +16,8 @@ import 'package:open_filex/open_filex.dart';
 import '../screens/form_b_birth_resuscitation.dart';
 import '../navigation/helper_forms_navigation.dart';
 import '../services/screening_api_service.dart';
+import '../utils/form_b_local_guard.dart';
+import '../utils/participant_name.dart';
 import '../utils/screening_status.dart';
 import '../widgets/shimmer_loader.dart';
 
@@ -189,8 +191,6 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
     final prefs = await SharedPreferences.getInstance();
     final keys = prefs.getStringList("screening_draft_keys") ?? [];
 
-    // Remove drafts that have already been submitted
-    final submittedIds = _crfList.map((c) => c.screeningId).toSet();
     final List<Map<String, dynamic>> drafts = [];
     final List<String> validKeys = [];
 
@@ -200,10 +200,6 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
       final data = jsonDecode(jsonStr) as Map<String, dynamic>;
       final screeningId = data["screeningId"] as String? ?? "";
 
-      if (screeningId.isNotEmpty && submittedIds.contains(screeningId)) {
-        await prefs.remove(key);
-        continue;
-      }
       validKeys.add(key);
       drafts.add({
         "key": key,
@@ -233,14 +229,12 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
 
   bool _isExcluded(CRF c) => _isNotEligible(c) || _isScreenFailure(c);
 
-  String _babyOfLabel(CRF c) {
-    final first = c.motherFirstName.trim();
-    final upper = first.toUpperCase();
-    if (first.isEmpty || upper == 'DRAFT' || upper == 'NAME PENDING') {
-      return c.enrollmentId.isNotEmpty ? c.enrollmentId : c.screeningId;
-    }
-    return 'B/o $first';
-  }
+  String _babyOfLabel(CRF c) => participantListName(
+        motherFirstName: c.motherFirstName,
+        motherSurname: c.motherSurname,
+        screeningId: c.screeningId,
+        formBStarted: c.enrollmentId.trim().isNotEmpty,
+      );
 
   List<CRF> get _filteredCrfs {
     var list = _crfList.where((c) {
@@ -538,7 +532,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
                 letterSpacing: .3)),
         onPressed: () async {
           await Navigator.push(context,
-              MaterialPageRoute(builder: (_) => const ScreeningForm(loadDraft: false)));
+              MaterialPageRoute(builder: (_) => ScreeningForm(key: UniqueKey(), loadDraft: false)));
           await _loadCrfs();
         },
       ),
@@ -891,6 +885,35 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
             ]),
           ),
         ),
+        IconButton(
+          tooltip: 'Delete draft',
+          icon: const Icon(Icons.delete_outline_rounded, color: _danger, size: 20),
+          onPressed: () async {
+            final ok = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('Delete this draft?'),
+                content: const Text(
+                  'This removes the on-device Form A draft. A screening already saved on the web portal is not deleted.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Delete'),
+                  ),
+                ],
+              ),
+            );
+            if (ok == true) {
+              await deleteLocalScreeningDraft(draft['key'] as String? ?? '');
+              await _refresh();
+            }
+          },
+        ),
       ]),
     );
   }
@@ -1033,6 +1056,8 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
                           screeningId: crf.screeningId,
                           maternalUid: crf.maternalUid,
                           motherName: "${crf.motherFirstName} ${crf.motherSurname}",
+                          motherFirstName: crf.motherFirstName,
+                          motherSurname: crf.motherSurname,
                           motherPhone: crf.motherPhone,
                           husbandPhone: crf.husbandPhone,
                           gestWeeks: crf.gestationWeeks,
@@ -1226,7 +1251,7 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
 
   // ── HELPER NAVIGATION ────────────────────────────────────────────────────
 
-  void _openHelper(String value, CRF crf) {
+  Future<void> _openHelper(String value, CRF crf) async {
     // Helpers are keyed by enrollment_id on the backend/web — never screeningId.
     final enrollment = crf.enrollmentId.trim();
     if (enrollment.isEmpty) {
@@ -1236,11 +1261,23 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
       ));
       return;
     }
+    String babyUid = '';
+    try {
+      final remote =
+          await FormsApiService.instance.loadBirthResuscitation(enrollment);
+      if (helperBirthRowMatchesScreening(
+        birth: remote,
+        screeningId: crf.screeningId,
+      )) {
+        babyUid = (remote?['baby_uid'] ?? '').toString().trim();
+      }
+    } catch (_) {}
+    if (!mounted) return;
     final patient = HelperFormPatientContext(
       enrollmentId: enrollment,
       gestation: '${crf.gestationWeeks}w ${crf.gestationDays}d',
       motherName: '${crf.motherFirstName} ${crf.motherSurname}',
-      babyUid: crf.maternalUid,
+      babyUid: babyUid,
       screeningId: crf.screeningId,
     );
 
@@ -1266,13 +1303,15 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
   Future<void> _generatePdf(CRF crf) async {
     try {
       final apiService = ApiService();
-      final formB = await apiService.loadFormB(crf.screeningId);
+      final formB = await apiService.loadFormB(
+        crf.screeningId,
+        maternalUid: crf.maternalUid,
+        motherFirstName: crf.motherFirstName,
+      );
       final formC = await apiService.loadFormC(crf.screeningId);
 
       BirthResuscitationData? birth;
-      final eid = (formB?.enrollmentId.trim().isNotEmpty == true)
-          ? formB!.enrollmentId.trim()
-          : crf.enrollmentId.trim();
+      final eid = crf.enrollmentId.trim();
       if (eid.isNotEmpty) {
         try {
           final remote =

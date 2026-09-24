@@ -19,6 +19,7 @@ import '../utils/clock_time_24.dart';
 import '../data/form_b_indications.dart';
 import '../models/crf.dart';
 import '../services/pdf_service.dart';
+import '../utils/form_b_local_guard.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../services/api_client.dart';
@@ -33,8 +34,13 @@ class _AdmissionRule {
   final int min;
   final int max;
   final bool required;
-  const _AdmissionRule(this.label, this.placeholder, this.min, this.max,
-      {this.required = false});
+  const _AdmissionRule(
+    this.label,
+    this.placeholder,
+    this.min,
+    this.max, {
+    this.required = false,
+  });
 }
 
 class _AnnualRule {
@@ -43,37 +49,59 @@ class _AnnualRule {
   final int min;
   final int max;
   final bool numeric;
-  const _AnnualRule(this.label, this.placeholder, this.min, this.max,
-      {this.numeric = false});
+  const _AnnualRule(
+    this.label,
+    this.placeholder,
+    this.min,
+    this.max, {
+    this.numeric = false,
+  });
 }
 
 const Map<String, _AdmissionRule> _kBabyAdmissionRules = {
-  "PGIMER": _AdmissionRule(
-      "6. Baby Admission No.", "Not assigned yet", 10, 10),
-  "GMCH-A":
-      _AdmissionRule("6. MRD Number for Baby", "Not assigned yet", 4, 6),
-  "AMC": _AdmissionRule("6. Baby Admission No. (NICU only)",
-      "Not assigned yet", 11, 11),
+  "PGIMER": _AdmissionRule("6. Baby Admission No.", "Not assigned yet", 10, 10),
+  "GMCH-A": _AdmissionRule("6. MRD Number for Baby", "Not assigned yet", 4, 6),
+  "AMC": _AdmissionRule(
+    "6. Baby Admission No. (NICU only)",
+    "Not assigned yet",
+    11,
+    11,
+  ),
   "GMCH": _AdmissionRule("6. Baby Admission No.", "Not assigned yet", 9, 11),
-  "IOG": _AdmissionRule("6. Baby MRD No. (same as UID)",
-      "Not assigned yet", 4, 6),
+  "IOG": _AdmissionRule(
+    "6. Baby MRD No. (same as UID)",
+    "Not assigned yet",
+    4,
+    6,
+  ),
 };
 
 // Fallback for any site not in the map above — optional, up to 15 chars,
 // no numeric restriction (matches web's inline fallback object).
-const _AdmissionRule _kBabyAdmissionDefaultRule =
-    _AdmissionRule("6. Baby Admission No.", "Not assigned yet", 0, 15);
+const _AdmissionRule _kBabyAdmissionDefaultRule = _AdmissionRule(
+  "6. Baby Admission No.",
+  "Not assigned yet",
+  0,
+  15,
+);
 
 // Sites with no entry here (GMCH-A, GMCH, and anything else unlisted) get
 // babyAnnualRule == null on web, which hides the field entirely.
 const Map<String, _AnnualRule> _kBabyAnnualRules = {
   "PGIMER": _AnnualRule(
-      "7. Baby Annual No.", "4-digit annual number", 4, 4,
-      numeric: true),
-  "AMC": _AnnualRule("7. Delivery Room Logbook Serial No.",
-      "Logbook serial number", 0, 20),
-  "IOG": _AnnualRule("7. SNCU No.", "4-digit SNCU number", 4, 4,
-      numeric: true),
+    "7. Baby Annual No.",
+    "4-digit annual number",
+    4,
+    4,
+    numeric: true,
+  ),
+  "AMC": _AnnualRule(
+    "7. Delivery Room Logbook Serial No.",
+    "Logbook serial number",
+    0,
+    20,
+  ),
+  "IOG": _AnnualRule("7. SNCU No.", "4-digit SNCU number", 4, 4, numeric: true),
 };
 
 /// Maps site codes (CRF.siteId) → site names used by the rule tables / web.
@@ -133,7 +161,9 @@ class _EnrollmentIdInputFormatter extends TextInputFormatter {
 
   @override
   TextEditingValue formatEditUpdate(
-      TextEditingValue oldValue, TextEditingValue newValue) {
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
     final formatted = _formatEnrollmentId(newValue.text, siteCode);
     return TextEditingValue(
       text: formatted,
@@ -146,14 +176,18 @@ class FormBBirthResuscitation extends StatefulWidget {
   final String screeningId;
   final String maternalUid;
   final String motherName;
+  final String? motherFirstName;
+  final String? motherSurname;
   final String motherPhone;
   final String husbandPhone;
   final int gestWeeks;
   final int gestDays;
   final String siteId;
+
   /// Form A screening datetime (ISO or DD/MM/YYYY…) — needed to compute
   /// Gestation at Randomization = screening GA + (DOB − screening date).
   final String screeningDateTime;
+
   /// When true, form is read-only (previously filled review).
   final bool viewOnly;
 
@@ -162,6 +196,8 @@ class FormBBirthResuscitation extends StatefulWidget {
     required this.screeningId,
     required this.maternalUid,
     required this.motherName,
+    this.motherFirstName,
+    this.motherSurname,
     required this.motherPhone,
     required this.husbandPhone,
     required this.gestWeeks,
@@ -180,17 +216,17 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   final _formKey = GlobalKey<FormState>();
 
   // ── Controllers ────────────────────────────────────────────────────────────
-  final TextEditingController _babyUidCtrl            = TextEditingController();
-  final TextEditingController _babyAdmissionCtrl      = TextEditingController();
-  final TextEditingController _birthWeightCtrl        = TextEditingController();
-  final TextEditingController _randomizationDateCtrl  = TextEditingController();
-  final TextEditingController _enrollmentIdCtrl       = TextEditingController();
+  final TextEditingController _babyUidCtrl = TextEditingController();
+  final TextEditingController _babyAdmissionCtrl = TextEditingController();
+  final TextEditingController _birthWeightCtrl = TextEditingController();
+  final TextEditingController _randomizationDateCtrl = TextEditingController();
+  final TextEditingController _enrollmentIdCtrl = TextEditingController();
   final TextEditingController _notRandomizedOtherCtrl = TextEditingController();
-  final TextEditingController _indicationOtherCtrl    = TextEditingController();
-  final TextEditingController _dobController          = TextEditingController();
-  final TextEditingController _timeController         = TextEditingController();
-  final TextEditingController _babyAnnualNumberCtrl   = TextEditingController();
-  final TextEditingController _growthCentileCtrl      = TextEditingController();
+  final TextEditingController _indicationOtherCtrl = TextEditingController();
+  final TextEditingController _dobController = TextEditingController();
+  final TextEditingController _timeController = TextEditingController();
+  final TextEditingController _babyAnnualNumberCtrl = TextEditingController();
+  final TextEditingController _growthCentileCtrl = TextEditingController();
   // NOTE: web's indication_edf_detail / fetal_indication_detail /
   // obstetric_indication_detail are dead backend columns with NO rendered
   // input anywhere in BirthResuscitationForm.jsx (verified) — not added here
@@ -206,14 +242,14 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   // ── Condition at birth ─────────────────────────────────────────────────────
   bool? _poorRespiratoryEffort;
   bool? _poorMuscleTone;
-  bool? _hrAbove100;                 // B3.21 (webform)
+  bool? _hrAbove100; // B3.21 (webform)
   bool? _initialStepsRequired;
   bool? _requiredResuscitation;
 
   // ── Inline validation flags ────────────────────────────────────────────────
-  bool _submitted         = false;
-  bool _isSaved           = false;
-  bool _isEditing         = false;
+  bool _submitted = false;
+  bool _isSaved = false;
+  bool _isEditing = false;
   bool _babyUidMaxReached = false;
   String _babyUidDuplicateMsg = '';
   Timer? _babyUidCheckTimer;
@@ -361,8 +397,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     final cur = _enrollmentIdCtrl.text.trim();
     if (cur.isEmpty || cur == "-" || !cur.startsWith(_siteCode)) {
       _enrollmentIdCtrl.text = "$_siteCode-";
-      _enrollmentIdCtrl.selection =
-          TextSelection.collapsed(offset: _enrollmentIdCtrl.text.length);
+      _enrollmentIdCtrl.selection = TextSelection.collapsed(
+        offset: _enrollmentIdCtrl.text.length,
+      );
     }
   }
 
@@ -399,17 +436,28 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   }
 
   Future<void> _bootstrapFormB() async {
-    if (_screeningDateTime.isEmpty && widget.screeningId.trim().isNotEmpty) {
+    String screeningEnrollment = '';
+    DateTime? screeningCreatedAt;
+    if (widget.screeningId.trim().isNotEmpty) {
       try {
-        final clinical = await ScreeningApiService.instance
-            .getScreening(widget.screeningId);
+        final clinical = await ScreeningApiService.instance.getScreening(
+          widget.screeningId,
+        );
         final dt = clinical?['screening_datetime']?.toString() ?? '';
-        if (dt.isNotEmpty && mounted) {
+        screeningEnrollment =
+            (clinical?['enrollment_id'] ?? '').toString().trim();
+        screeningCreatedAt = DateTime.tryParse(
+          (clinical?['created_at'] ?? '').toString(),
+        );
+        if (dt.isNotEmpty && mounted && _screeningDateTime.isEmpty) {
           setState(() => _screeningDateTime = dt);
         }
       } catch (_) {}
     }
-    await _loadExistingFormB();
+    await _loadExistingFormB(
+      screeningEnrollment: screeningEnrollment,
+      screeningCreatedAt: screeningCreatedAt,
+    );
   }
 
   // IOG-only: keep Baby Admission No. equal to Baby UID, including when
@@ -449,9 +497,10 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         if (!mounted) return;
         if (res['duplicate'] == true) {
           setState(() {
-            _babyUidDuplicateMsg = (res['message'] ??
-                    'This Baby UID is already used at this site.')
-                .toString();
+            _babyUidDuplicateMsg =
+                (res['message'] ??
+                        'This Baby UID is already used at this site.')
+                    .toString();
           });
         } else if (_babyUidDuplicateMsg.isNotEmpty) {
           setState(() => _babyUidDuplicateMsg = '');
@@ -481,9 +530,10 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       if (!mounted) return;
       if (res['duplicate'] == true) {
         setState(() {
-          _enrollmentDuplicateMsg = (res['message'] ??
-                  'This Enrollment ID is already used by another patient.')
-              .toString();
+          _enrollmentDuplicateMsg =
+              (res['message'] ??
+                      'This Enrollment ID is already used by another patient.')
+                  .toString();
         });
       } else if (_enrollmentDuplicateMsg.isNotEmpty) {
         setState(() => _enrollmentDuplicateMsg = '');
@@ -547,8 +597,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         ? null
         : classifyVeryPretermCentile(w / 1000, rand.$1, rand.$2, _gender);
     final current = _growthCentileCtrl.text.trim();
-    final wasUntouchedOrAuto =
-        current.isEmpty || current == _lastAutoCentile;
+    final wasUntouchedOrAuto = current.isEmpty || current == _lastAutoCentile;
 
     if (result == null) {
       if (wasUntouchedOrAuto && current.isNotEmpty) {
@@ -686,8 +735,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     if (existing.enrollmentId.trim().isNotEmpty &&
         !existing.enrollmentId.trim().startsWith("NR-")) {
       setText(
-          _enrollmentIdCtrl,
-          _formatEnrollmentId(existing.enrollmentId.trim(), _siteCode));
+        _enrollmentIdCtrl,
+        _formatEnrollmentId(existing.enrollmentId.trim(), _siteCode),
+      );
     }
     setText(_randomizationDateCtrl, existing.randomizationDate);
     if (!overlayOnly || existing.notRandomizedReason.isNotEmpty) {
@@ -763,14 +813,14 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     if ((d.randomisationDate ?? "").trim().isNotEmpty) {
       _randomizationDateCtrl.text =
           _isoToDisplayDate(d.randomisationDate!.trim()) ??
-              d.randomisationDate!.trim();
+          d.randomisationDate!.trim();
     }
     if ((d.enrollmentReasonNotRandomized ?? "").isNotEmpty) {
       _notRandomizedReason = d.enrollmentReasonNotRandomized;
     }
     if ((d.enrollmentReasonNotRandomizedOther ?? "").trim().isNotEmpty) {
-      _notRandomizedOtherCtrl.text =
-          d.enrollmentReasonNotRandomizedOther!.trim();
+      _notRandomizedOtherCtrl.text = d.enrollmentReasonNotRandomizedOther!
+          .trim();
     }
     if (_birthConditionAllNormal) {
       _applyAllNormalBirthCondition();
@@ -788,7 +838,10 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     }
   }
 
-  Future<void> _loadExistingFormB() async {
+  Future<void> _loadExistingFormB({
+    String screeningEnrollment = '',
+    DateTime? screeningCreatedAt,
+  }) async {
     debugPrint(
       '[FORMB_DEBUG] _loadExistingFormB start — '
       'widget.screeningId=${widget.screeningId} '
@@ -796,7 +849,13 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       'widget.motherName=${widget.motherName}',
     );
 
-    final existing = await ApiService().loadFormB(widget.screeningId);
+    final existing = await ApiService().loadFormB(
+      widget.screeningId,
+      maternalUid: widget.maternalUid,
+      motherFirstName: (widget.motherFirstName ?? '').trim(),
+      screeningCreatedAt: screeningCreatedAt,
+      serverHasBirthLink: screeningEnrollment.trim().isNotEmpty,
+    );
 
     if (existing == null) {
       debugPrint('[FORMB_DEBUG] local draft existing=null');
@@ -808,29 +867,38 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       );
     }
 
-    // Prefer server row when we have an enrollment id (local or NR- fallback).
-    final draftEid = (existing?.enrollmentId ?? "").trim();
-    String eid = draftEid;
-    final eidSource = eid.isNotEmpty
-        ? 'existing.enrollmentId'
-        : 'NR-fallback(NR-${widget.screeningId})';
-    if (eid.isEmpty) eid = "NR-${widget.screeningId}";
+    // Same source as web: screenings.enrollment_id. Never guess NR-{sid}.
+    final eid = linkedBirthEnrollmentId(screeningEnrollment);
     debugPrint(
       '[FORMB_DEBUG] resolved eid="$eid" '
-      '(draft enrollmentId="$draftEid", source=$eidSource)',
+      '(screening.enrollment_id="$screeningEnrollment")',
     );
 
     BirthResuscitationData? remote;
-    try {
-      final json =
-          await FormsApiService.instance.loadBirthResuscitation(eid);
-      if (json != null) {
-        remote = BirthResuscitationData.fromJson(json);
-      }
-    } catch (_) {}
+    if (eid.isNotEmpty) {
+      try {
+        final json = await FormsApiService.instance.loadBirthResuscitation(eid);
+        if (json != null) {
+          remote = BirthResuscitationData.fromJson(json);
+          if (!remoteBirthRowIsForScreening(
+            remoteScreeningId: remote.screeningId,
+            screeningId: widget.screeningId,
+          )) {
+            debugPrint(
+              '[FORMB_DEBUG] ignoring remote row for '
+              'screeningId=${remote.screeningId} '
+              '(this form is ${widget.screeningId})',
+            );
+            remote = null;
+          }
+        }
+      } catch (_) {}
+    }
 
     if (remote == null) {
-      debugPrint('[FORMB_DEBUG] remote=null (GET birth-resuscitation for eid="$eid")');
+      debugPrint(
+        '[FORMB_DEBUG] remote=null (GET birth-resuscitation for eid="$eid")',
+      );
     } else {
       debugPrint(
         '[FORMB_DEBUG] remote loaded: '
@@ -855,8 +923,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       final explicitSaved = remote?.explicitlySaved == true;
       _isSaved = widget.viewOnly || explicitSaved;
       _isEditing = !_isSaved;
-      _b2Complete =
-          explicitSaved && remote?.hasB2ClinicalData == true;
+      _b2Complete = explicitSaved && remote?.hasB2ClinicalData == true;
     });
   }
 
@@ -877,9 +944,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       indication: _indications.join(", "),
       indicationOther: _indicationOtherCtrl.text,
       delivery: _delivery ?? "",
-      labor: _delivery == "Vaginal"
-          ? (_vaginalType ?? "")
-          : (_lscsType ?? ""),
+      labor: _delivery == "Vaginal" ? (_vaginalType ?? "") : (_lscsType ?? ""),
       gender: _gender ?? "",
       requiredResuscitation: _requiredResuscitation,
       randomized: _randomized,
@@ -893,6 +958,11 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       randomizationDate: _randomizationDateCtrl.text,
       notRandomizedReason: _notRandomizedReason ?? "",
       notRandomizedOther: _notRandomizedOtherCtrl.text,
+      maternalUid: widget.maternalUid,
+      motherFirstName: (widget.motherFirstName ?? '').trim().isNotEmpty
+          ? widget.motherFirstName!.trim()
+          : splitPersonName(widget.motherName).$1,
+      savedAt: DateTime.now(),
     );
   }
 
@@ -909,11 +979,10 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   /// Build B1–B3 BirthResuscitationData for draft/full POST (same keys as web).
   BirthResuscitationData _buildBirthPayload(String enrollmentId) {
     String? randDateIso;
-    if (_randomized == true &&
-        _randomizationDateCtrl.text.trim().isNotEmpty) {
+    if (_randomized == true && _randomizationDateCtrl.text.trim().isNotEmpty) {
       randDateIso = _toIsoDate(_randomizationDateCtrl.text.trim());
     }
-    return BirthResuscitationData()
+    final d = BirthResuscitationData()
       ..screeningId = widget.screeningId
       ..enrollmentId = enrollmentId
       ..babyUid = _babyUidCtrl.text.trim().isEmpty
@@ -941,8 +1010,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           ? null
           : _growthCentileCtrl.text.trim()
       ..deliveryMode = _delivery
-      ..vaginalDeliveryType =
-          _delivery == "Vaginal" ? _vaginalType : null
+      ..vaginalDeliveryType = _delivery == "Vaginal" ? _vaginalType : null
       ..lscsType = _delivery == "LSCS" ? _lscsType : null
       ..indicationForDelivery = List<String>.from(_indications)
       ..indicationForDeliveryOther = _indications.contains("Other")
@@ -955,18 +1023,25 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       ..requiredResuscitation = _requiredResuscitation
       // Match web buildPayload: ppv_required true only if Q23 = Yes;
       // randomised only when Q23 = Yes (Q22/Q23 No clears the UI fields).
-      ..ppvRequired =
-          _requiredResuscitation == true ? true : null
-      ..randomised =
-          _requiredResuscitation == true ? _randomized : null
+      ..ppvRequired = _requiredResuscitation == true ? true : null
+      ..randomised = _requiredResuscitation == true ? _randomized : null
       ..randomisationDate = randDateIso
       ..strata = _randomized == true ? _strata : null
-      ..enrollmentReasonNotRandomized =
-          _randomized == false ? _notRandomizedReason : null
-      ..enrollmentReasonNotRandomizedOther =
-          _notRandomizedReason == "Other"
-              ? _notRandomizedOtherCtrl.text.trim()
-              : null;
+      ..enrollmentReasonNotRandomized = _randomized == false
+          ? _notRandomizedReason
+          : null
+      ..enrollmentReasonNotRandomizedOther = _notRandomizedReason == "Other"
+          ? _notRandomizedOtherCtrl.text.trim()
+          : null;
+    d.applyPii(
+      motherFirst: widget.motherFirstName,
+      motherSurname: widget.motherSurname,
+      maternalUid: widget.maternalUid,
+      contactMother: widget.motherPhone,
+      contactHusband: widget.husbandPhone,
+      concatenatedMotherName: widget.motherName,
+    );
+    return d;
   }
 
   /// Form B owns Q12/Q23/Q24/Q27 — send explicit nulls so a PUT can clear
@@ -1011,19 +1086,22 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     // Best-effort server sync when we already have an enrollment / NR- id.
     if (eid.isNotEmpty) {
       try {
-        await FormsApiService.instance
-            .saveBirthResuscitation(_formBJson(_buildBirthPayload(eid)));
+        await FormsApiService.instance.saveBirthResuscitation(
+          _formBJson(_buildBirthPayload(eid)),
+        );
       } catch (_) {
         // Offline / partial — local draft still kept.
       }
     }
 
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: const Text("Draft saved"),
-      backgroundColor: AppTheme.of(context).success,
-      behavior: SnackBarBehavior.floating,
-    ));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text("Draft saved"),
+        backgroundColor: AppTheme.of(context).success,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
     if (popAfter) Navigator.of(context).pop(true);
   }
 
@@ -1034,12 +1112,19 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       _showMsg(_enrollmentDuplicateMsg);
       return;
     }
-    if (_babyUidCtrl.text.trim().isNotEmpty && _babyUidDuplicateMsg.isNotEmpty) {
+    if (_babyUidCtrl.text.trim().isNotEmpty &&
+        _babyUidDuplicateMsg.isNotEmpty) {
       _showMsg(_babyUidDuplicateMsg);
       return;
     }
-    if (_dobController.text.isEmpty) { _showMsg("Please select Date of Birth"); return; }
-    if (_timeController.text.isEmpty) { _showMsg("Please select Time of Birth"); return; }
+    if (_dobController.text.isEmpty) {
+      _showMsg("Please select Date of Birth");
+      return;
+    }
+    if (_timeController.text.isEmpty) {
+      _showMsg("Please select Time of Birth");
+      return;
+    }
     // Persist as HH:MM:SS (web Form B1 / ModernTimeInput).
     _timeController.text = _normalizeHms(_timeController.text);
     final dob = _parseDobText(_dobController.text);
@@ -1052,51 +1137,80 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       _showMsg(birthIssue);
       return;
     }
-    if (_indications.isEmpty) { _showMsg("Please select at least one indication"); return; }
-    if (_indications.contains("Other") && _indicationOtherCtrl.text.trim().isEmpty) {
-      _showMsg("Please specify other indication"); return;
+    if (_indications.isEmpty) {
+      _showMsg("Please select at least one indication");
+      return;
     }
-    if (_delivery == null) { _showMsg("Please select delivery type"); return; }
+    if (_indications.contains("Other") &&
+        _indicationOtherCtrl.text.trim().isEmpty) {
+      _showMsg("Please specify other indication");
+      return;
+    }
+    if (_delivery == null) {
+      _showMsg("Please select delivery type");
+      return;
+    }
     if (_delivery == "Vaginal" && _vaginalType == null) {
-      _showMsg("Please select vaginal delivery type"); return;
+      _showMsg("Please select vaginal delivery type");
+      return;
     }
     if (_delivery == "LSCS" && _lscsType == null) {
-      _showMsg("Please select LSCS type"); return;
+      _showMsg("Please select LSCS type");
+      return;
     }
-    if (_gender == null) { _showMsg("Please select gender"); return; }
+    if (_gender == null) {
+      _showMsg("Please select gender");
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
     if (_poorRespiratoryEffort == null) {
-      _showMsg("Please select respiratory effort status"); return;
+      _showMsg("Please select respiratory effort status");
+      return;
     }
-    if (_poorMuscleTone == null) { _showMsg("Please select muscle tone status"); return; }
-    if (_hrAbove100 == null) { _showMsg("Please select HR < 100 status"); return; }
+    if (_poorMuscleTone == null) {
+      _showMsg("Please select muscle tone status");
+      return;
+    }
+    if (_hrAbove100 == null) {
+      _showMsg("Please select HR < 100 status");
+      return;
+    }
     if (!_birthConditionAllNormal && _initialStepsRequired == null) {
-      _showMsg("Please select initial steps status"); return;
+      _showMsg("Please select initial steps status");
+      return;
     }
     // Q23 only when initial steps = Required
     if (!_birthConditionAllNormal &&
         _initialStepsRequired == true &&
         _requiredResuscitation == null) {
-      _showMsg("Please select whether baby requires ventilation (PPV)"); return;
+      _showMsg(
+        "Please select whether baby required respiratory support for resuscitation (T-piece CPAP or PPV)",
+      );
+      return;
     }
 
     // Build shared B1–B3 payload for ALL exits (including end-participation).
     // Backend requires enrollment_id — only randomised cases sync to server.
     if (_requiredResuscitation == true && _randomized == null) {
-      _showMsg("Please select randomization status"); return;
+      _showMsg("Please select randomization status");
+      return;
     }
     if (!_endParticipation &&
         _randomized == false &&
         _notRandomizedReason == null) {
-      _showMsg("Please select reason for not randomizing"); return;
+      _showMsg("Please select reason for not randomizing");
+      return;
     }
-    if (_notRandomizedReason == "Other" && _notRandomizedOtherCtrl.text.trim().isEmpty) {
-      _showMsg("Please specify other reason"); return;
+    if (_notRandomizedReason == "Other" &&
+        _notRandomizedOtherCtrl.text.trim().isEmpty) {
+      _showMsg("Please specify other reason");
+      return;
     }
     if (_randomized == true) {
       if (_enrollmentIdCtrl.text.trim().isEmpty ||
           !_isCompleteEnrollmentId(_enrollmentIdCtrl.text.trim())) {
-        _showMsg("Enrollment ID must be $_siteCode-A-001 format"); return;
+        _showMsg("Enrollment ID must be $_siteCode-A-001 format");
+        return;
       }
     }
 
@@ -1119,7 +1233,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
     try {
       await FormsApiService.instance.saveBirthResuscitation(
-          _formBJson(shared, explicitlySaved: true));
+        _formBJson(shared, explicitlySaved: true),
+      );
     } catch (e) {
       if (!mounted) return;
       _showMsg("Save failed — check connection and try again. ($e)");
@@ -1137,24 +1252,28 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         _applyAllNormalBirthCondition();
       }
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: const Text(
-          "Form B1 saved. PPV not required — complete Forms A–C only; "
-          "Forms D and later stay locked.",
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+            "Form B1 saved. PPV not required — complete Forms A–C only; "
+            "Forms D and later stay locked.",
+          ),
+          backgroundColor: AppTheme.of(context).success,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 5),
         ),
-        backgroundColor: AppTheme.of(context).success,
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 5),
-      ));
+      );
       return;
     }
 
     if (_randomized == false) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: const Text("Form B1 saved and synced (not randomised)"),
-        backgroundColor: AppTheme.of(context).success,
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text("Form B1 saved and synced (not randomised)"),
+          backgroundColor: AppTheme.of(context).success,
+        ),
+      );
       return;
     }
 
@@ -1165,13 +1284,18 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         builder: (_) => FormCResuscitationDetails(
           key: ValueKey('form-c-${widget.screeningId}'),
           screeningId: widget.screeningId,
-          gestation  : widget.gestDays == 0
+          gestation: widget.gestDays == 0
               ? "${widget.gestWeeks} weeks"
               : "${widget.gestWeeks} weeks ${widget.gestDays} days",
-          motherName : widget.motherName,
-          babyUid    : _babyUidCtrl.text.trim(),
-          formB      : formB,
-          shared     : shared,
+          motherName: widget.motherName,
+          motherFirstName: widget.motherFirstName,
+          motherSurname: widget.motherSurname,
+          maternalUid: widget.maternalUid,
+          motherPhone: widget.motherPhone,
+          husbandPhone: widget.husbandPhone,
+          babyUid: _babyUidCtrl.text.trim(),
+          formB: formB,
+          shared: shared,
         ),
       ),
     ).then((result) async {
@@ -1336,119 +1460,183 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDlg) => AlertDialog(
           backgroundColor: c.surface,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: Row(children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: c.primary.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(10),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: c.primary.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  Icons.access_time_rounded,
+                  color: c.primary,
+                  size: 18,
+                ),
               ),
-              child: Icon(Icons.access_time_rounded,
-                  color: c.primary, size: 18),
-            ),
-            const SizedBox(width: 12),
-            Text("Time of Birth",
+              const SizedBox(width: 12),
+              Text(
+                "Time of Birth",
                 style: TextStyle(
-                    color: c.textPrimary,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 15)),
-          ]),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [
-            Row(children: [
-              Expanded(
-                  child: Center(
-                      child: Text("HH (24h)",
-                          style: TextStyle(
-                              color: c.textTertiary,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600)))),
-              const SizedBox(width: 20),
-              Expanded(
-                  child: Center(
-                      child: Text("Minutes",
-                          style: TextStyle(
-                              color: c.textTertiary,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600)))),
-              const SizedBox(width: 20),
-              Expanded(
-                  child: Center(
-                      child: Text("Seconds",
-                          style: TextStyle(
-                              color: c.textTertiary,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600)))),
-            ]),
-            const SizedBox(height: 8),
-            Row(children: [
-              Expanded(
-                  child: _timeSpinner(
-                      hh, 0, 23, c, (v) => setDlg(() => hh = v))),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Text(":",
-                    style: TextStyle(
+                  color: c.textPrimary,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 15,
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Center(
+                      child: Text(
+                        "HH (24h)",
+                        style: TextStyle(
+                          color: c.textTertiary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 20),
+                  Expanded(
+                    child: Center(
+                      child: Text(
+                        "Minutes",
+                        style: TextStyle(
+                          color: c.textTertiary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 20),
+                  Expanded(
+                    child: Center(
+                      child: Text(
+                        "Seconds",
+                        style: TextStyle(
+                          color: c.textTertiary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: _timeSpinner(
+                      hh,
+                      0,
+                      23,
+                      c,
+                      (v) => setDlg(() => hh = v),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Text(
+                      ":",
+                      style: TextStyle(
                         color: c.textSecondary,
                         fontSize: 24,
-                        fontWeight: FontWeight.bold)),
-              ),
-              Expanded(
-                  child: _timeSpinner(
-                      mm, 0, 59, c, (v) => setDlg(() => mm = v))),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Text(":",
-                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: _timeSpinner(
+                      mm,
+                      0,
+                      59,
+                      c,
+                      (v) => setDlg(() => mm = v),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Text(
+                      ":",
+                      style: TextStyle(
                         color: c.textSecondary,
                         fontSize: 24,
-                        fontWeight: FontWeight.bold)),
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: _timeSpinner(
+                      ss,
+                      0,
+                      59,
+                      c,
+                      (v) => setDlg(() => ss = v),
+                    ),
+                  ),
+                ],
               ),
-              Expanded(
-                  child: _timeSpinner(
-                      ss, 0, 59, c, (v) => setDlg(() => ss = v))),
-            ]),
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              decoration: BoxDecoration(
-                color: c.primarySoft,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: c.primary.withOpacity(0.3)),
-              ),
-              child: Center(
-                child: Text(
-                  "${hh.toString().padLeft(2, '0')}:"
-                  "${mm.toString().padLeft(2, '0')}:"
-                  "${ss.toString().padLeft(2, '0')}",
-                  style: TextStyle(
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                decoration: BoxDecoration(
+                  color: c.primarySoft,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: c.primary.withOpacity(0.3)),
+                ),
+                child: Center(
+                  child: Text(
+                    "${hh.toString().padLeft(2, '0')}:"
+                    "${mm.toString().padLeft(2, '0')}:"
+                    "${ss.toString().padLeft(2, '0')}",
+                    style: TextStyle(
                       color: c.primary,
                       fontSize: 22,
                       fontWeight: FontWeight.w800,
-                      letterSpacing: 3),
+                      letterSpacing: 3,
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ]),
+            ],
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child: Text("Cancel",
-                  style: TextStyle(
-                      color: c.textTertiary, fontWeight: FontWeight.w600)),
+              child: Text(
+                "Cancel",
+                style: TextStyle(
+                  color: c.textTertiary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
-                  backgroundColor: c.primary,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10))),
+                backgroundColor: c.primary,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
               onPressed: () =>
                   Navigator.pop(ctx, (hour: hh, minute: mm, second: ss)),
-              child: const Text("Confirm",
-                  style: TextStyle(fontWeight: FontWeight.w700)),
+              child: const Text(
+                "Confirm",
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
             ),
           ],
         ),
@@ -1457,7 +1645,12 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   }
 
   Widget _timeSpinner(
-      int value, int min, int max, AppColors c, void Function(int) onChange) {
+    int value,
+    int min,
+    int max,
+    AppColors c,
+    void Function(int) onChange,
+  ) {
     return Container(
       height: 120,
       decoration: BoxDecoration(
@@ -1465,45 +1658,58 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: c.border),
       ),
-      child: Column(children: [
-        GestureDetector(
-          onTap: () => onChange(value < max ? value + 1 : min),
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            decoration: BoxDecoration(
-              color: c.primary.withOpacity(0.06),
-              borderRadius:
-                  const BorderRadius.vertical(top: Radius.circular(11)),
+      child: Column(
+        children: [
+          GestureDetector(
+            onTap: () => onChange(value < max ? value + 1 : min),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              decoration: BoxDecoration(
+                color: c.primary.withOpacity(0.06),
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(11),
+                ),
+              ),
+              child: Icon(
+                Icons.keyboard_arrow_up_rounded,
+                color: c.primary,
+                size: 20,
+              ),
             ),
-            child: Icon(Icons.keyboard_arrow_up_rounded,
-                color: c.primary, size: 20),
           ),
-        ),
-        Expanded(
-          child: Center(
-            child: Text(value.toString().padLeft(2, '0'),
+          Expanded(
+            child: Center(
+              child: Text(
+                value.toString().padLeft(2, '0'),
                 style: TextStyle(
-                    color: c.textPrimary,
-                    fontSize: 22,
-                    fontWeight: FontWeight.w800)),
-          ),
-        ),
-        GestureDetector(
-          onTap: () => onChange(value > min ? value - 1 : max),
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            decoration: BoxDecoration(
-              color: c.primary.withOpacity(0.06),
-              borderRadius:
-                  const BorderRadius.vertical(bottom: Radius.circular(11)),
+                  color: c.textPrimary,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
             ),
-            child: Icon(Icons.keyboard_arrow_down_rounded,
-                color: c.primary, size: 20),
           ),
-        ),
-      ]),
+          GestureDetector(
+            onTap: () => onChange(value > min ? value - 1 : max),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              decoration: BoxDecoration(
+                color: c.primary.withOpacity(0.06),
+                borderRadius: const BorderRadius.vertical(
+                  bottom: Radius.circular(11),
+                ),
+              ),
+              child: Icon(
+                Icons.keyboard_arrow_down_rounded,
+                color: c.primary,
+                size: 20,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1511,18 +1717,25 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     final c = AppTheme.of(context);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        behavior        : SnackBarBehavior.floating,
-        backgroundColor : c.surface,
-        margin          : const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        shape           : RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-            side: BorderSide(color: c.danger.withOpacity(0.4))),
-        content: Row(children: [
-          Icon(Icons.error_outline_rounded, color: c.danger, size: 18),
-          const SizedBox(width: 10),
-          Expanded(child: Text(msg,
-              style: TextStyle(color: c.textPrimary, fontSize: 13))),
-        ]),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: c.surface,
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: c.danger.withOpacity(0.4)),
+        ),
+        content: Row(
+          children: [
+            Icon(Icons.error_outline_rounded, color: c.danger, size: 18),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                msg,
+                style: TextStyle(color: c.textPrimary, fontSize: 13),
+              ),
+            ),
+          ],
+        ),
         duration: const Duration(seconds: 3),
       ),
     );
@@ -1530,9 +1743,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   Future<void> _pickRandomizationDate() async {
     final picked = await showModernDatePicker(
-      context  : context,
+      context: context,
       firstDate: DateTime(2020),
-      lastDate : DateTime.now(),
+      lastDate: DateTime.now(),
       initialDate: DateTime.now(),
     );
     if (picked != null) {
@@ -1544,8 +1757,13 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   // THEME-AWARE HELPERS  (aligned with Form A style)
   // ============================================================
 
-  InputDecoration _input(String label, AppColors c,
-      {String? helper, FieldLogicType? logic, String? logicTitle}) {
+  InputDecoration _input(
+    String label,
+    AppColors c, {
+    String? helper,
+    FieldLogicType? logic,
+    String? logicTitle,
+  }) {
     final labelStyle = TextStyle(color: c.textSecondary, fontSize: 13);
     final labelWidget = logic == null
         ? requiredLabel(label, style: labelStyle)
@@ -1558,35 +1776,45 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
             ],
           );
     return InputDecoration(
-      label        : labelWidget,
-      helperText   : helper,
-      helperStyle  : TextStyle(color: c.textTertiary, fontSize: 11),
-      labelStyle   : labelStyle,
+      label: labelWidget,
+      helperText: helper,
+      helperStyle: TextStyle(color: c.textTertiary, fontSize: 11),
+      labelStyle: labelStyle,
       floatingLabelStyle: labelStyle,
-      filled       : true,
-      fillColor    : c.surfaceAlt,
+      filled: true,
+      fillColor: c.surfaceAlt,
       contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
       border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.border)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.border),
+      ),
       enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.border)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.border),
+      ),
       focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.primary, width: 1.5)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.primary, width: 1.5),
+      ),
       errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.danger)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.danger),
+      ),
       focusedErrorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.danger, width: 1.5)),
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.danger, width: 1.5),
+      ),
     );
   }
 
   /// Read-only info tile — identical to Form A style
-  Widget _infoTile(String label, String value, AppColors c,
-      {FieldLogicType? logic, String? logicTitle}) {
+  Widget _infoTile(
+    String label,
+    String value,
+    AppColors c, {
+    FieldLogicType? logic,
+    String? logicTitle,
+  }) {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -1594,27 +1822,36 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: c.border),
       ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Wrap(
-          crossAxisAlignment: WrapCrossAlignment.center,
-          spacing: 4,
-          children: [
-            Text(label,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 4,
+            children: [
+              Text(
+                label,
                 style: TextStyle(
-                    color: c.textTertiary,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600)),
-            if (logic != null)
-              FieldLogicBadge(type: logic, title: logicTitle ?? ''),
-          ],
-        ),
-        const SizedBox(height: 4),
-        Text(value,
+                  color: c.textTertiary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              if (logic != null)
+                FieldLogicBadge(type: logic, title: logicTitle ?? ''),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
             style: TextStyle(
-                color: c.textPrimary,
-                fontWeight: FontWeight.w700,
-                fontSize: 13)),
-      ]),
+              color: c.textPrimary,
+              fontWeight: FontWeight.w700,
+              fontSize: 13,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1637,52 +1874,67 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         border: Border.all(color: c.border),
         boxShadow: [
           BoxShadow(
-              color: Colors.black.withOpacity(0.04),
-              blurRadius: 8,
-              offset: const Offset(0, 2))
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
         ],
       ),
-      child: Column(children: [
-        // Header
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: c.surfaceAlt,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-            border: Border(bottom: BorderSide(color: c.borderLight)),
-          ),
-          child: Row(children: [
-            Container(
-              padding: const EdgeInsets.all(7),
-              decoration: BoxDecoration(
-                  color: color.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(9)),
-              child: Icon(icon, color: color, size: 16),
+      child: Column(
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: c.surfaceAlt,
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(16),
+              ),
+              border: Border(bottom: BorderSide(color: c.borderLight)),
             ),
-            const SizedBox(width: 10),
-            Container(
-                width: 3,
-                height: 16,
-                decoration: BoxDecoration(
-                    color: color, borderRadius: BorderRadius.circular(2))),
-            const SizedBox(width: 8),
-            Text(title,
-                style: TextStyle(
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(7),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Icon(icon, color: color, size: 16),
+                ),
+                const SizedBox(width: 10),
+                Container(
+                  width: 3,
+                  height: 16,
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  title,
+                  style: TextStyle(
                     color: c.textPrimary,
                     fontWeight: FontWeight.w800,
                     fontSize: 13,
-                    letterSpacing: .4)),
-            if (trailing != null) ...[const Spacer(), trailing],
-          ]),
-        ),
-        // Body
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
+                    letterSpacing: .4,
+                  ),
+                ),
+                if (trailing != null) ...[const Spacer(), trailing],
+              ],
+            ),
+          ),
+          // Body
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: children),
-        ),
-      ]),
+              children: children,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1699,44 +1951,63 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     FieldLogicType? logic,
     String? logicTitle,
   }) {
-    final tColor     = trueColor  ?? c.danger;
-    final fColor     = falseColor ?? c.success;
-    final showError  = _submitted && value == null;
+    final tColor = trueColor ?? c.danger;
+    final fColor = falseColor ?? c.success;
+    final showError = _submitted && value == null;
 
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Wrap(
-        crossAxisAlignment: WrapCrossAlignment.center,
-        spacing: 4,
-        children: [
-          requiredLabel(
-            title,
-            style: TextStyle(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 4,
+          children: [
+            requiredLabel(
+              title,
+              style: TextStyle(
                 color: c.textSecondary,
                 fontSize: 13,
-                fontWeight: FontWeight.w600),
-          ),
-          if (logic != null)
-            FieldLogicBadge(type: logic, title: logicTitle ?? ''),
-        ],
-      ),
-      const SizedBox(height: 8),
-      Row(children: [
-        _chip(trueLabel,  value == true,  tColor, c, () => onChanged(true)),
-        const SizedBox(width: 10),
-        _chip(falseLabel, value == false, fColor, c, () => onChanged(false)),
-      ]),
-      if (showError)
-        Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Text("Required",
-              style: TextStyle(color: c.danger, fontSize: 11)),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (logic != null)
+              FieldLogicBadge(type: logic, title: logicTitle ?? ''),
+          ],
         ),
-      const SizedBox(height: 16),
-    ]);
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _chip(trueLabel, value == true, tColor, c, () => onChanged(true)),
+            const SizedBox(width: 10),
+            _chip(
+              falseLabel,
+              value == false,
+              fColor,
+              c,
+              () => onChanged(false),
+            ),
+          ],
+        ),
+        if (showError)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              "Required",
+              style: TextStyle(color: c.danger, fontSize: 11),
+            ),
+          ),
+        const SizedBox(height: 16),
+      ],
+    );
   }
 
-  Widget _chip(String label, bool selected, Color color, AppColors c,
-      VoidCallback onTap) {
+  Widget _chip(
+    String label,
+    bool selected,
+    Color color,
+    AppColors c,
+    VoidCallback onTap,
+  ) {
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -1747,11 +2018,14 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           borderRadius: BorderRadius.circular(22),
           border: Border.all(color: selected ? color : c.border, width: 1.5),
         ),
-        child: Text(label,
-            style: TextStyle(
-                color: selected ? color : c.textSecondary,
-                fontWeight: FontWeight.w700,
-                fontSize: 12)),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? color : c.textSecondary,
+            fontWeight: FontWeight.w700,
+            fontSize: 12,
+          ),
+        ),
       ),
     );
   }
@@ -1765,55 +2039,71 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     required AppColors c,
     bool showError = false,
   }) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      requiredLabel(
-        title,
-        style: TextStyle(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        requiredLabel(
+          title,
+          style: TextStyle(
             color: c.textSecondary,
             fontSize: 13,
-            fontWeight: FontWeight.w600),
-      ),
-      const SizedBox(height: 8),
-      Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: options.map((opt) {
-          final sel = value == opt;
-          return GestureDetector(
-            onTap: () => setState(() => onChanged(opt)),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 140),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: sel ? c.primary : c.surfaceAlt,
-                borderRadius: BorderRadius.circular(20),
-                border:
-                    Border.all(color: sel ? c.primary : c.border, width: 1.5),
-                boxShadow: sel
-                    ? [
-                        BoxShadow(
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: options.map((opt) {
+            final sel = value == opt;
+            return GestureDetector(
+              onTap: () => setState(() => onChanged(opt)),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 140),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: sel ? c.primary : c.surfaceAlt,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: sel ? c.primary : c.border,
+                    width: 1.5,
+                  ),
+                  boxShadow: sel
+                      ? [
+                          BoxShadow(
                             color: c.primary.withOpacity(0.2),
                             blurRadius: 6,
-                            offset: const Offset(0, 2))
-                      ]
-                    : [],
-              ),
-              child: Text(opt,
+                            offset: const Offset(0, 2),
+                          ),
+                        ]
+                      : [],
+                ),
+                child: Text(
+                  opt,
                   style: TextStyle(
-                      color: sel ? Colors.white : c.textSecondary,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12)),
-            ),
-          );
-        }).toList(),
-      ),
-      if (showError)
-        Padding(
+                    color: sel ? Colors.white : c.textSecondary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+        if (showError)
+          Padding(
             padding: const EdgeInsets.only(top: 4),
-            child: Text("Required",
-                style: TextStyle(color: c.danger, fontSize: 11))),
-      const SizedBox(height: 14),
-    ]);
+            child: Text(
+              "Required",
+              style: TextStyle(color: c.danger, fontSize: 11),
+            ),
+          ),
+        const SizedBox(height: 14),
+      ],
+    );
   }
 
   /// Date / time picker tile
@@ -1826,78 +2116,96 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     required VoidCallback onTap,
   }) {
     final filled = controller.text.isNotEmpty;
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      requiredLabel(
-        label,
-        style: TextStyle(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        requiredLabel(
+          label,
+          style: TextStyle(
             color: c.textSecondary,
             fontSize: 13,
-            fontWeight: FontWeight.w600),
-      ),
-      const SizedBox(height: 6),
-      GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          padding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-          decoration: BoxDecoration(
-            color: c.surfaceAlt,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: _submitted && !filled
-                  ? c.danger
-                  : filled
-                      ? c.success.withOpacity(0.5)
-                      : c.border,
-              width: 1.5,
-            ),
+            fontWeight: FontWeight.w600,
           ),
-          child: Row(children: [
-            Icon(icon,
-                color: filled ? c.success : c.textTertiary, size: 18),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                filled ? controller.text : hint,
-                style: TextStyle(
-                    color: filled ? c.textPrimary : c.textTertiary,
-                    fontSize: 13),
+        ),
+        const SizedBox(height: 6),
+        GestureDetector(
+          onTap: onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+            decoration: BoxDecoration(
+              color: c.surfaceAlt,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: _submitted && !filled
+                    ? c.danger
+                    : filled
+                    ? c.success.withOpacity(0.5)
+                    : c.border,
+                width: 1.5,
               ),
             ),
-            if (filled)
-              Icon(Icons.check_circle_rounded,
-                  color: c.success, size: 16),
-          ]),
+            child: Row(
+              children: [
+                Icon(
+                  icon,
+                  color: filled ? c.success : c.textTertiary,
+                  size: 18,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    filled ? controller.text : hint,
+                    style: TextStyle(
+                      color: filled ? c.textPrimary : c.textTertiary,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                if (filled)
+                  Icon(Icons.check_circle_rounded, color: c.success, size: 16),
+              ],
+            ),
+          ),
         ),
-      ),
-      if (_submitted && !filled)
-        Padding(
+        if (_submitted && !filled)
+          Padding(
             padding: const EdgeInsets.only(top: 4),
-            child: Text("Required",
-                style: TextStyle(color: c.danger, fontSize: 11))),
-    ]);
+            child: Text(
+              "Required",
+              style: TextStyle(color: c.danger, fontSize: 11),
+            ),
+          ),
+      ],
+    );
   }
 
   /// Sub-section label — matches Form A's "Baby Details" divider style
   Widget _subLabel(String text, AppColors c) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: Row(children: [
-        Container(
+      child: Row(
+        children: [
+          Container(
             width: 3,
             height: 14,
             decoration: BoxDecoration(
-                color: c.primary.withOpacity(0.5),
-                borderRadius: BorderRadius.circular(2))),
-        const SizedBox(width: 8),
-        Text(text,
+              color: c.primary.withOpacity(0.5),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            text,
             style: TextStyle(
-                color: c.textSecondary,
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                letterSpacing: .3)),
-      ]),
+              color: c.textSecondary,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              letterSpacing: .3,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1910,36 +2218,46 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: c.primary.withOpacity(0.3)),
       ),
-      child: Row(children: [
-        Icon(Icons.layers_rounded, color: c.primary, size: 16),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                crossAxisAlignment: WrapCrossAlignment.center,
-                spacing: 4,
-                children: [
-                  Text("27. Strata",
-                      style: TextStyle(color: c.textTertiary, fontSize: 11,
-                          fontWeight: FontWeight.w600)),
-                  const FieldLogicBadge(
-                    type: FieldLogicType.auto,
-                    title: "Auto from Gestation at Randomization",
-                  ),
-                ],
-              ),
-              const SizedBox(height: 2),
-              Text(_strata ?? "—",
+      child: Row(
+        children: [
+          Icon(Icons.layers_rounded, color: c.primary, size: 16),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 4,
+                  children: [
+                    Text(
+                      "27. Strata",
+                      style: TextStyle(
+                        color: c.textTertiary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const FieldLogicBadge(
+                      type: FieldLogicType.auto,
+                      title: "Auto from Gestation at Randomization",
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _strata ?? "—",
                   style: TextStyle(
-                      color: c.primary,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 13)),
-            ],
+                    color: c.primary,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-      ]),
+        ],
+      ),
     );
   }
 
@@ -1970,61 +2288,67 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
             child: Form(
               key: _formKey,
-              child: Column(children: [
-                if (_formReadOnly) ...[
-                  Container(
-                    width: double.infinity,
-                    margin: const EdgeInsets.only(bottom: 12),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: c.primary.withOpacity(0.08),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: c.primary.withOpacity(0.25)),
-                    ),
-                    child: Text(
-                      "Saved — tap Edit Form in the header to make changes",
-                      style: TextStyle(
-                        color: c.primary,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 13,
+              child: Column(
+                children: [
+                  if (_formReadOnly) ...[
+                    Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: c.primary.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: c.primary.withOpacity(0.25)),
+                      ),
+                      child: Text(
+                        "Saved — tap Edit Form in the header to make changes",
+                        style: TextStyle(
+                          color: c.primary,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                        ),
                       ),
                     ),
-                  ),
-                ],
-                if (_isEditing && (_isSaved || widget.viewOnly)) ...[
-                  Container(
-                    width: double.infinity,
-                    margin: const EdgeInsets.only(bottom: 12),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: c.warningSoft,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: c.warning.withOpacity(0.35)),
-                    ),
-                    child: Text(
-                      "Editing saved Form B1",
-                      style: TextStyle(
-                        color: c.warning,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 13,
+                  ],
+                  if (_isEditing && (_isSaved || widget.viewOnly)) ...[
+                    Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: c.warningSoft,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: c.warning.withOpacity(0.35)),
+                      ),
+                      child: Text(
+                        "Editing saved Form B1",
+                        style: TextStyle(
+                          color: c.warning,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                        ),
                       ),
                     ),
-                  ),
+                  ],
+                  if (_showEndParticipationBanner) ...[
+                    _buildEndParticipationBanner(c),
+                    const SizedBox(height: 14),
+                  ],
+                  const FieldLogicLegend(),
+                  _buildIdentificationSection(c),
+                  _buildBirthDetailsSection(c),
+                  _buildConditionSection(c),
+                  const SizedBox(height: 20),
                 ],
-                if (_showEndParticipationBanner) ...[
-                  _buildEndParticipationBanner(c),
-                  const SizedBox(height: 14),
-                ],
-                const FieldLogicLegend(),
-                _buildIdentificationSection(c),
-              _buildBirthDetailsSection(c),
-              _buildConditionSection(c),
-              const SizedBox(height: 20),
-            ]),
+              ),
+            ),
           ),
-        ),
         ),
       ),
     );
@@ -2034,28 +2358,37 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   AppBar _buildAppBar(AppColors c) {
     return AppBar(
-      backgroundColor   : c.surface,
-      elevation         : 0,
-      surfaceTintColor  : Colors.transparent,
-      toolbarHeight     : 66,
+      backgroundColor: c.surface,
+      elevation: 0,
+      surfaceTintColor: Colors.transparent,
+      toolbarHeight: 66,
       bottom: PreferredSize(
         preferredSize: const Size.fromHeight(1),
         child: Container(height: 1, color: c.borderLight),
       ),
-      title: Column(mainAxisSize: MainAxisSize.min, children: [
-        Text("Birth & Resuscitation",
+      title: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            "Birth & Resuscitation",
             style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w800,
-                color: c.textPrimary,
-                letterSpacing: .3)),
-        const SizedBox(height: 2),
-        Text("Fill for all consented subjects · CRF Birth & Resuscitation",
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+              color: c.textPrimary,
+              letterSpacing: .3,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            "Fill for all consented subjects · CRF Birth & Resuscitation",
             style: TextStyle(
-                fontSize: 11,
-                color: c.primary.withOpacity(0.7),
-                fontWeight: FontWeight.w500)),
-      ]),
+              fontSize: 11,
+              color: c.primary.withOpacity(0.7),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
       actions: [
         Padding(
           padding: const EdgeInsets.only(right: 2),
@@ -2073,11 +2406,11 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                       color: c.primary,
                     ),
                   )
-                : Icon(Icons.ios_share_rounded,
-                    color: _formBExportEnabled
-                        ? c.textPrimary
-                        : c.textTertiary,
-                    size: 20),
+                : Icon(
+                    Icons.ios_share_rounded,
+                    color: _formBExportEnabled ? c.textPrimary : c.textTertiary,
+                    size: 20,
+                  ),
           ),
         ),
         if (_showEditAction)
@@ -2152,8 +2485,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
     var complete = false;
     if (eid.isNotEmpty) {
       try {
-        final json =
-            await FormsApiService.instance.loadBirthResuscitation(eid);
+        final json = await FormsApiService.instance.loadBirthResuscitation(eid);
         if (json != null) {
           final d = BirthResuscitationData.fromJson(json);
           complete = d.explicitlySaved == true && d.hasB2ClinicalData;
@@ -2197,8 +2529,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       } catch (_) {}
       if (eid.isNotEmpty) {
         try {
-          final json =
-              await FormsApiService.instance.loadBirthResuscitation(eid);
+          final json = await FormsApiService.instance.loadBirthResuscitation(
+            eid,
+          );
           if (json != null) birth = BirthResuscitationData.fromJson(json);
         } catch (_) {}
       }
@@ -2236,69 +2569,87 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           border: Border(top: BorderSide(color: c.borderLight)),
           boxShadow: [
             BoxShadow(
-                color: Colors.black.withOpacity(0.05),
-                blurRadius: 10,
-                offset: const Offset(0, -3))
+              color: Colors.black.withOpacity(0.05),
+              blurRadius: 10,
+              offset: const Offset(0, -3),
+            ),
           ],
         ),
-        child: Row(children: [
-          Expanded(
-            child: OutlinedButton.icon(
-              icon: Icon(Icons.save_outlined, size: 15, color: c.warning),
-              label: Text("Save for Later",
+        child: Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                icon: Icon(Icons.save_outlined, size: 15, color: c.warning),
+                label: Text(
+                  "Save for Later",
                   style: TextStyle(
-                      color: c.warning,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 11)),
-              onPressed: () => _saveDraft(popAfter: true),
-              style: OutlinedButton.styleFrom(
-                side: BorderSide(color: c.warning.withOpacity(0.5)),
-                backgroundColor: c.warningSoft,
-                padding: const EdgeInsets.symmetric(vertical: 13),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
+                    color: c.warning,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 11,
+                  ),
+                ),
+                onPressed: () => _saveDraft(popAfter: true),
+                style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: c.warning.withOpacity(0.5)),
+                  backgroundColor: c.warningSoft,
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            flex: 2,
-            child: ElevatedButton.icon(
-              icon: const Icon(Icons.arrow_forward_rounded,
-                  size: 16, color: Colors.white),
-              label: const Text("Save",
+            const SizedBox(width: 8),
+            Expanded(
+              flex: 2,
+              child: ElevatedButton.icon(
+                icon: const Icon(
+                  Icons.arrow_forward_rounded,
+                  size: 16,
+                  color: Colors.white,
+                ),
+                label: const Text(
+                  "Save",
                   style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 13)),
-              onPressed: _onSaveContinue,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: c.primary,
-                padding: const EdgeInsets.symmetric(vertical: 13),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-                elevation: 0,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+                onPressed: _onSaveContinue,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: c.primary,
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  elevation: 0,
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: OutlinedButton(
-              onPressed: () => _saveDraft(popAfter: true),
-              style: OutlinedButton.styleFrom(
-                side: BorderSide(color: c.border),
-                padding: const EdgeInsets.symmetric(vertical: 13),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-              ),
-              child: Text("Cancel",
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () => _saveDraft(popAfter: true),
+                style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: c.border),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: Text(
+                  "Cancel",
                   style: TextStyle(
-                      color: c.textSecondary,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12)),
+                    color: c.textSecondary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
             ),
-          ),
-        ]),
+          ],
+        ),
       ),
     );
   }
@@ -2307,19 +2658,31 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   Widget _buildIdentificationSection(AppColors c) {
     return _sectionCard(
-      title      : "B1 · Identification",
-      icon       : Icons.badge_rounded,
+      title: "B1 · Identification",
+      icon: Icons.badge_rounded,
       accentColor: c.primary,
-      c          : c,
-      children   : [
+      c: c,
+      children: [
         // Web order: 1 → 2 → 3 → 4 → 5 → 5 → 6 → 7
-        Row(children: [
-          Expanded(child: _infoTile("1. Screening ID", widget.screeningId, c)),
-          const SizedBox(width: 10),
-          Expanded(child: _infoTile("2. Maternal UID", widget.maternalUid, c)),
-        ]),
+        Row(
+          children: [
+            Expanded(
+              child: _infoTile("1. Screening ID", widget.screeningId, c),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _infoTile("2. Maternal UID", widget.maternalUid, c),
+            ),
+          ],
+        ),
         const SizedBox(height: 10),
-        _infoTile("3. Mother's First Name", widget.motherName, c),
+        _infoTile(
+          "3. Mother's First Name",
+          (widget.motherFirstName ?? '').trim().isNotEmpty
+              ? widget.motherFirstName!.trim()
+              : splitPersonName(widget.motherName).$1,
+          c,
+        ),
         const SizedBox(height: 14),
 
         // 4. Baby UID — optional until the hospital file exists
@@ -2336,8 +2699,9 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                 ? "Maximum 12 digits reached"
                 : "Optional — fill when assigned (up to 12 digits)",
             helperStyle: TextStyle(
-                color: _babyUidMaxReached ? c.success : c.textTertiary,
-                fontSize: 11),
+              color: _babyUidMaxReached ? c.success : c.textTertiary,
+              fontSize: 11,
+            ),
           ),
           style: TextStyle(color: c.textPrimary),
           onChanged: (v) {
@@ -2366,11 +2730,21 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         const SizedBox(height: 12),
 
         // 5. Mobile numbers (same number on web for both)
-        Row(children: [
-          Expanded(child: _infoTile("5. Mobile No. — Mother",  widget.motherPhone,  c)),
-          const SizedBox(width: 10),
-          Expanded(child: _infoTile("5. Mobile No. — Husband", widget.husbandPhone, c)),
-        ]),
+        Row(
+          children: [
+            Expanded(
+              child: _infoTile("5. Mobile No. — Mother", widget.motherPhone, c),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _infoTile(
+                "5. Mobile No. — Husband",
+                widget.husbandPhone,
+                c,
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 12),
 
         // 6. Site-specific admission / MRD
@@ -2391,7 +2765,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           // still enforced once a value is present.
           validator: (v) {
             final rule = _babyAdmissionRule;
-            final val  = (v ?? "").trim();
+            final val = (v ?? "").trim();
             if (val.isEmpty) return null;
             if (!RegExp('^\\d{${rule.min},${rule.max}}\$').hasMatch(val)) {
               return rule.min == rule.max
@@ -2420,15 +2794,17 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
               if (!(_babyAnnualRule!.numeric && _babyAnnualRule!.max == 4))
                 LengthLimitingTextInputFormatter(_babyAnnualRule!.max),
             ],
-            decoration: _input(_babyAnnualRule!.label, c)
-                .copyWith(hintText: _babyAnnualRule!.placeholder),
+            decoration: _input(
+              _babyAnnualRule!.label,
+              c,
+            ).copyWith(hintText: _babyAnnualRule!.placeholder),
             style: TextStyle(color: c.textPrimary),
             // Mirrors web: length range is only enforced for numeric rules
             // (AMC's logbook serial is free text with no length check at
             // submit, exactly like BirthResuscitationForm.jsx validate()).
             validator: (v) {
               final rule = _babyAnnualRule!;
-              final val  = (v ?? "").trim();
+              final val = (v ?? "").trim();
               if (rule.numeric &&
                   val.isNotEmpty &&
                   !RegExp('^\\d{${rule.min},${rule.max}}\$').hasMatch(val)) {
@@ -2447,29 +2823,29 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   Widget _buildBirthDetailsSection(AppColors c) {
     return _sectionCard(
-      title      : "B2 · Birth Details",
-      icon       : Icons.child_care_rounded,
+      title: "B2 · Birth Details",
+      icon: Icons.child_care_rounded,
       accentColor: c.success,
-      c          : c,
+      c: c,
       // Web serial order: 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16/17 → 18
-      children   : [
+      children: [
         _dateTile(
-          label     : "8. Date of Birth *",
-          hint      : "Select date (dd-MM-yyyy)",
+          label: "8. Date of Birth *",
+          hint: "Select date (dd-MM-yyyy)",
           controller: _dobController,
-          icon      : Icons.calendar_today_rounded,
-          c         : c,
-          onTap     : () async {
+          icon: Icons.calendar_today_rounded,
+          c: c,
+          onTap: () async {
             final first = _dobPickerFirstDate();
             final last = _dobPickerLastDate();
             var initial = _parseDobText(_dobController.text) ?? last;
             if (initial.isBefore(first)) initial = first;
             if (initial.isAfter(last)) initial = last;
             final picked = await showModernDatePicker(
-              context    : context,
+              context: context,
               initialDate: initial,
-              firstDate  : first,
-              lastDate   : last.isBefore(first) ? first : last,
+              firstDate: first,
+              lastDate: last.isBefore(first) ? first : last,
             );
             if (picked != null) {
               final pickedDay = _dateOnly(picked);
@@ -2492,12 +2868,12 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         const SizedBox(height: 14),
 
         _dateTile(
-          label     : "9. Time of Birth *",
-          hint      : "Select time (HH:MM:SS)",
+          label: "9. Time of Birth *",
+          hint: "Select time (HH:MM:SS)",
           controller: _timeController,
-          icon      : Icons.access_time_rounded,
-          c         : c,
-          onTap     : () async {
+          icon: Icons.access_time_rounded,
+          c: c,
+          onTap: () async {
             if (_dobController.text.trim().isEmpty) {
               _showMsg('Please select Date of Birth first');
               return;
@@ -2560,30 +2936,32 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         const SizedBox(height: 14),
 
         _pillRadio(
-          title    : "10. Gender *",
-          options  : const ["Female", "Male", "DSD"],
-          value    : _gender,
+          title: "10. Gender *",
+          options: const ["Female", "Male", "DSD"],
+          value: _gender,
           onChanged: (v) => setState(() {
             _gender = v;
             _syncAutoCentile();
           }),
-          c        : c,
+          c: c,
           showError: _submitted && _gender == null,
         ),
 
         _infoTile(
-            "11. Gestation at Screening",
-            "${widget.gestWeeks}w ${widget.gestDays}d",
-            c,
-            logic: FieldLogicType.carried,
-            logicTitle: "From Form A — Screening"),
+          "11. Gestation at Screening",
+          "${widget.gestWeeks}w ${widget.gestDays}d",
+          c,
+          logic: FieldLogicType.carried,
+          logicTitle: "From Form A — Screening",
+        ),
         const SizedBox(height: 10),
         _infoTile(
-            "12. Gestation at Randomization",
-            _gestationRandDisplay,
-            c,
-            logic: FieldLogicType.auto,
-            logicTitle: "Auto from Form A gestational age and date of birth"),
+          "12. Gestation at Randomization",
+          _gestationRandDisplay,
+          c,
+          logic: FieldLogicType.auto,
+          logicTitle: "Auto from Form A gestational age and date of birth",
+        ),
         const SizedBox(height: 14),
 
         TextFormField(
@@ -2596,11 +2974,12 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           decoration: _input("13. Birth Weight (g) *", c),
           style: TextStyle(color: c.textPrimary),
           validator: (v) {
-            if (v == null || v.trim().isEmpty) return "Birth weight is required";
+            if (v == null || v.trim().isEmpty)
+              return "Birth weight is required";
             final w = int.tryParse(v);
             if (w == null) return "Enter a valid number";
-            if (w < 300)   return "Too low (min 300 g)";
-            if (w > 6000)  return "Too high (max 6000 g)";
+            if (w < 300) return "Too low (min 300 g)";
+            if (w > 6000) return "Too high (max 6000 g)";
             return null;
           },
         ),
@@ -2608,41 +2987,41 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
         TextFormField(
           controller: _growthCentileCtrl,
-          keyboardType:
-              const TextInputType.numberWithOptions(decimal: true),
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
           inputFormatters: [
-            FilteringTextInputFormatter.allow(
-                RegExp(r'^\d{0,3}(\.\d{0,2})?$')),
+            FilteringTextInputFormatter.allow(RegExp(r'^\d{0,3}(\.\d{0,2})?$')),
           ],
           decoration:
-              _input("14. Intrauterine Growth Status (centile)", c,
-                      logic: FieldLogicType.auto,
-                      logicTitle:
-                          "Auto-calculated from birth weight, GA at randomization and gender — INTERGROWTH-21st Very Preterm")
-                  .copyWith(
-            hintText: "0–100",
-            helperMaxLines: 6,
-            helperText: () {
-              final r = _centileClass;
-              if (r != null) {
-                const cols = [
-                  "3rd",
-                  "5th",
-                  "10th",
-                  "50th",
-                  "90th",
-                  "95th",
-                  "97th"
-                ];
-                final refs = [
-                  for (var i = 0; i < cols.length; i++)
-                    "${cols[i]} ${r.row[i].toStringAsFixed(2)}kg"
-                ].join("  ");
-                return "Auto (INTERGROWTH-21st Very Preterm) — ${r.label}\n$refs";
-              }
-              return "Auto-fills once GA at randomization, birth weight and gender (Male/Female) are entered — covers 24+0–32+6 weeks only";
-            }(),
-          ),
+              _input(
+                "14. Intrauterine Growth Status (centile)",
+                c,
+                logic: FieldLogicType.auto,
+                logicTitle:
+                    "Auto-calculated from birth weight, GA at randomization and gender — INTERGROWTH-21st Very Preterm",
+              ).copyWith(
+                hintText: "0–100",
+                helperMaxLines: 6,
+                helperText: () {
+                  final r = _centileClass;
+                  if (r != null) {
+                    const cols = [
+                      "3rd",
+                      "5th",
+                      "10th",
+                      "50th",
+                      "90th",
+                      "95th",
+                      "97th",
+                    ];
+                    final refs = [
+                      for (var i = 0; i < cols.length; i++)
+                        "${cols[i]} ${r.row[i].toStringAsFixed(2)}kg",
+                    ].join("  ");
+                    return "Auto (INTERGROWTH-21st Very Preterm) — ${r.label}\n$refs";
+                  }
+                  return "Auto-fills once GA at randomization, birth weight and gender (Male/Female) are entered — covers 24+0–32+6 weeks only";
+                }(),
+              ),
           style: TextStyle(color: c.textPrimary),
           onChanged: (v) {
             if (v.isNotEmpty && (double.tryParse(v) ?? 0) > 100) {
@@ -2668,35 +3047,35 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         const SizedBox(height: 14),
 
         _pillRadio(
-          title    : "15. Delivery Mode *",
-          options  : const ["Vaginal", "LSCS"],
-          value    : _delivery,
+          title: "15. Delivery Mode *",
+          options: const ["Vaginal", "LSCS"],
+          value: _delivery,
           onChanged: (v) => setState(() {
-            _delivery    = v;
+            _delivery = v;
             _vaginalType = null;
-            _lscsType    = null;
+            _lscsType = null;
           }),
-          c        : c,
+          c: c,
           showError: _submitted && _delivery == null,
         ),
 
         if (_delivery == "Vaginal")
           _pillRadio(
-            title    : "16. Vaginal Delivery Type *",
-            options  : const ["Spontaneous", "Augmented", "Induced"],
-            value    : _vaginalType,
+            title: "16. Vaginal Delivery Type *",
+            options: const ["Spontaneous", "Augmented", "Induced"],
+            value: _vaginalType,
             onChanged: (v) => setState(() => _vaginalType = v),
-            c        : c,
+            c: c,
             showError: _submitted && _vaginalType == null,
           ),
 
         if (_delivery == "LSCS")
           _pillRadio(
-            title    : "17. LSCS Type *",
-            options  : const ["Emergency", "Elective"],
-            value    : _lscsType,
+            title: "17. LSCS Type *",
+            options: const ["Emergency", "Elective"],
+            value: _lscsType,
             onChanged: (v) => setState(() => _lscsType = v),
-            c        : c,
+            c: c,
             showError: _submitted && _lscsType == null,
           ),
 
@@ -2704,17 +3083,21 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
           "18. Indication",
           required: true,
           style: TextStyle(
-              color: c.textSecondary,
-              fontSize: 13,
-              fontWeight: FontWeight.w600),
+            color: c.textSecondary,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
         ),
         Padding(
           padding: const EdgeInsets.only(top: 2, bottom: 8),
-          child: Text("(select all that apply)",
-              style: TextStyle(
-                  color: c.textTertiary,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500)),
+          child: Text(
+            "(select all that apply)",
+            style: TextStyle(
+              color: c.textTertiary,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
         ),
         ...kFormBIndicationOptions.map((opt) {
           final sel = _indications.contains(opt);
@@ -2751,42 +3134,47 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
                       ]
                     : null,
               ),
-              child: Row(children: [
-                Container(
-                  width: 18,
-                  height: 18,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(5),
-                    border: Border.all(
-                      color: sel ? Colors.white : c.border,
-                      width: 2,
+              child: Row(
+                children: [
+                  Container(
+                    width: 18,
+                    height: 18,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(
+                        color: sel ? Colors.white : c.border,
+                        width: 2,
+                      ),
+                      color: sel ? Colors.white : Colors.transparent,
                     ),
-                    color: sel ? Colors.white : Colors.transparent,
+                    child: sel
+                        ? Icon(Icons.check, color: c.primary, size: 13)
+                        : null,
                   ),
-                  child: sel
-                      ? Icon(Icons.check, color: c.primary, size: 13)
-                      : null,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    opt,
-                    style: TextStyle(
-                      color: sel ? Colors.white : c.textSecondary,
-                      fontWeight: sel ? FontWeight.w800 : FontWeight.w500,
-                      fontSize: 13,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      opt,
+                      style: TextStyle(
+                        color: sel ? Colors.white : c.textSecondary,
+                        fontWeight: sel ? FontWeight.w800 : FontWeight.w500,
+                        fontSize: 13,
+                      ),
                     ),
                   ),
-                ),
-              ]),
+                ],
+              ),
             ),
           );
         }),
         if (_submitted && _indications.isEmpty)
           Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text("Select at least one indication",
-                  style: TextStyle(color: c.danger, fontSize: 11))),
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              "Select at least one indication",
+              style: TextStyle(color: c.danger, fontSize: 11),
+            ),
+          ),
         if (_indications.contains("Other")) ...[
           const SizedBox(height: 10),
           TextFormField(
@@ -2795,7 +3183,8 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
             style: TextStyle(color: c.textPrimary),
             validator: (v) {
               if (_indications.contains("Other") &&
-                  (v == null || v.trim().isEmpty)) return "Required";
+                  (v == null || v.trim().isEmpty))
+                return "Required";
               return null;
             },
           ),
@@ -2808,98 +3197,102 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   Widget _buildConditionSection(AppColors c) {
     return _sectionCard(
-      title      : "B3 · Condition at Birth & Randomization",
-      icon       : Icons.monitor_heart_rounded,
+      title: "B3 · Condition at Birth & Randomization",
+      icon: Icons.monitor_heart_rounded,
       accentColor: c.warning,
-      c          : c,
+      c: c,
       // Collapse toggle as trailing TextButton — matches Form A pattern
       trailing: TextButton.icon(
         onPressed: () =>
             setState(() => _conditionExpanded = !_conditionExpanded),
         icon: AnimatedRotation(
-          turns   : _conditionExpanded ? 0.5 : 0,
+          turns: _conditionExpanded ? 0.5 : 0,
           duration: const Duration(milliseconds: 200),
-          child   : Icon(Icons.keyboard_arrow_down_rounded,
-              size: 16, color: c.textSecondary),
+          child: Icon(
+            Icons.keyboard_arrow_down_rounded,
+            size: 16,
+            color: c.textSecondary,
+          ),
         ),
         label: Text(
           _conditionExpanded ? "Collapse" : "Expand",
           style: TextStyle(color: c.textSecondary, fontSize: 12),
         ),
         style: TextButton.styleFrom(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 6)),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        ),
       ),
       children: [
         if (_conditionExpanded) ...[
-              _boolChoiceChip(
-                title     : "19. Respiratory effort *",
-                trueLabel : "Absent/poor",
-                falseLabel: "Normal",
-                value     : _poorRespiratoryEffort,
-                onChanged : (v) => _onBirthConditionFieldChanged(
-                    () => _poorRespiratoryEffort = v),
-                trueColor : c.danger,
-                falseColor: c.success,
-                c         : c,
-              ),
-              _boolChoiceChip(
-                title     : "20. Muscle tone *",
-                trueLabel : "Limp/poor",
-                falseLabel: "Normal",
-                value     : _poorMuscleTone,
-                onChanged : (v) => _onBirthConditionFieldChanged(
-                    () => _poorMuscleTone = v),
-                trueColor : c.danger,
-                falseColor: c.success,
-                c         : c,
-              ),
-              // CRF asks HR < 100; stored inverted as hr_above_100 (same as web).
-              _boolChoiceChip(
-                title     : "21. HR < 100 *",
-                trueLabel : "YES",
-                falseLabel: "NO",
-                value     : _hrAbove100 == null ? null : !_hrAbove100!,
-                onChanged : (v) => _onBirthConditionFieldChanged(
-                    () => _hrAbove100 = !v),
-                trueColor : c.danger,
-                falseColor: c.success,
-                c         : c,
-              ),
-              if (!_birthConditionAllNormal)
-                _boolChoiceChip(
-                  title     : "22. Initial steps *",
-                  trueLabel : "Required",
-                  falseLabel: "Not required",
-                  value     : _initialStepsRequired,
-                  onChanged : (v) => setState(() {
-                    _initialStepsRequired = v;
-                    // Q23 only applies when initial steps are required.
-                    if (v) {
-                      _requiredResuscitation = null;
-                    } else {
-                      _requiredResuscitation = false;
-                      _clearRandomizationFields();
-                    }
-                  }),
-                  trueColor : c.danger,
-                  falseColor: c.success,
-                  c         : c,
-                ),
-              if (!_birthConditionAllNormal && _initialStepsRequired == true)
-                _boolChoiceChip(
-                  title     : "23. Does baby require ventilation (PPV)? *",
-                  trueLabel : "Required",
-                  falseLabel: "Not required",
-                  value     : _requiredResuscitation,
-                  onChanged : (v) => setState(() {
-                    _requiredResuscitation = v;
-                    if (!v) _clearRandomizationFields();
-                  }),
-                  trueColor : c.danger,
-                  falseColor: c.success,
-                  c         : c,
-                ),
+          _boolChoiceChip(
+            title: "19. Respiratory effort *",
+            trueLabel: "Absent/poor",
+            falseLabel: "Normal",
+            value: _poorRespiratoryEffort,
+            onChanged: (v) =>
+                _onBirthConditionFieldChanged(() => _poorRespiratoryEffort = v),
+            trueColor: c.danger,
+            falseColor: c.success,
+            c: c,
+          ),
+          _boolChoiceChip(
+            title: "20. Muscle tone *",
+            trueLabel: "Limp/poor",
+            falseLabel: "Normal",
+            value: _poorMuscleTone,
+            onChanged: (v) =>
+                _onBirthConditionFieldChanged(() => _poorMuscleTone = v),
+            trueColor: c.danger,
+            falseColor: c.success,
+            c: c,
+          ),
+          // CRF asks HR < 100; stored inverted as hr_above_100 (same as web).
+          _boolChoiceChip(
+            title: "21. HR < 100 *",
+            trueLabel: "YES",
+            falseLabel: "NO",
+            value: _hrAbove100 == null ? null : !_hrAbove100!,
+            onChanged: (v) =>
+                _onBirthConditionFieldChanged(() => _hrAbove100 = !v),
+            trueColor: c.danger,
+            falseColor: c.success,
+            c: c,
+          ),
+          if (!_birthConditionAllNormal)
+            _boolChoiceChip(
+              title: "22. Initial steps *",
+              trueLabel: "Required",
+              falseLabel: "Not required",
+              value: _initialStepsRequired,
+              onChanged: (v) => setState(() {
+                _initialStepsRequired = v;
+                // Q23 only applies when initial steps are required.
+                if (v) {
+                  _requiredResuscitation = null;
+                } else {
+                  _requiredResuscitation = false;
+                  _clearRandomizationFields();
+                }
+              }),
+              trueColor: c.danger,
+              falseColor: c.success,
+              c: c,
+            ),
+          if (!_birthConditionAllNormal && _initialStepsRequired == true)
+            _boolChoiceChip(
+              title:
+                  "23. Did baby require respiratory support for resuscitation (T-piece CPAP or PPV)? *",
+              trueLabel: "Required",
+              falseLabel: "Not required",
+              value: _requiredResuscitation,
+              onChanged: (v) => setState(() {
+                _requiredResuscitation = v;
+                if (!v) _clearRandomizationFields();
+              }),
+              trueColor: c.danger,
+              falseColor: c.success,
+              c: c,
+            ),
         ],
         if (_conditionExpanded && _requiredResuscitation == true)
           ..._randomizationFields(c),
@@ -2912,27 +3305,30 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
   Widget _buildEndParticipationBanner(AppColors c) {
     return Container(
       width: double.infinity,
-      padding : const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color        : c.dangerSoft,
-        borderRadius : BorderRadius.circular(10),
-        border       : Border.all(color: c.danger.withOpacity(0.4)),
+        color: c.dangerSoft,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.danger.withOpacity(0.4)),
       ),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Icon(Icons.warning_amber_rounded, color: c.danger, size: 18),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text(
-            "Resuscitation (PPV) not required — Forms D and later stay locked. Complete Forms A–C only, then stop.",
-            style: TextStyle(
-              color: c.danger,
-              fontSize: 12.5,
-              fontWeight: FontWeight.w600,
-              height: 1.35,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_rounded, color: c.danger, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              "Resuscitation (PPV) not required — Forms D and later stay locked. Complete Forms A–C only, then stop.",
+              style: TextStyle(
+                color: c.danger,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                height: 1.35,
+              ),
             ),
           ),
-        ),
-      ]),
+        ],
+      ),
     );
   }
 
@@ -2940,172 +3336,173 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
 
   List<Widget> _randomizationFields(AppColors c) {
     return [
-              Padding(
-                padding: const EdgeInsets.only(top: 12, bottom: 8),
-                child: Text("Randomization details",
-                    style: TextStyle(
-                        color: c.textSecondary,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: .3)),
+      Padding(
+        padding: const EdgeInsets.only(top: 12, bottom: 8),
+        child: Text(
+          "Randomization details",
+          style: TextStyle(
+            color: c.textSecondary,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            letterSpacing: .3,
+          ),
+        ),
+      ),
+      _boolChoiceChip(
+        title: "24. Randomised? *",
+        trueLabel: "Yes",
+        falseLabel: "No",
+        value: _randomized,
+        onChanged: (v) => setState(() {
+          _randomized = v;
+          _notRandomizedReason = null;
+          _notRandomizedOtherCtrl.clear();
+          if (v) _ensureEnrollmentIdPrefix();
+        }),
+        trueColor: c.success,
+        falseColor: c.danger,
+        c: c,
+        logic: FieldLogicType.conditional,
+        logicTitle: "Gates strata (if Yes) and reason not randomized (if No)",
+      ),
+
+      // ── Randomized = YES ──────────────────────────────────────
+      if (_randomized == true) ...[
+        TextFormField(
+          controller: _randomizationDateCtrl,
+          readOnly: true,
+          onTap: _pickRandomizationDate,
+          decoration: _input("25. Randomization Date *", c).copyWith(
+            suffixIcon: Icon(
+              Icons.calendar_today_rounded,
+              color: c.textTertiary,
+              size: 18,
+            ),
+          ),
+          style: TextStyle(color: c.textPrimary),
+          validator: (v) => v == null || v.isEmpty ? "Required" : null,
+        ),
+        const SizedBox(height: 16),
+
+        TextFormField(
+          controller: _enrollmentIdCtrl,
+          decoration: _input("26. Enrollment ID *", c).copyWith(
+            hintText: "$_siteCode-A-001",
+            helperText: "Site $_siteCode · letter A–D · 3-digit serial",
+            helperMaxLines: 1,
+          ),
+          style: TextStyle(
+            color: c.textPrimary,
+            letterSpacing: 0.6,
+            fontWeight: FontWeight.w700,
+          ),
+          keyboardType: TextInputType.text,
+          textCapitalization: TextCapitalization.characters,
+          inputFormatters: [_EnrollmentIdInputFormatter(_siteCode)],
+          onTap: _ensureEnrollmentIdPrefix,
+          onChanged: (_) => _scheduleEnrollmentDuplicateCheck(),
+          validator: (v) {
+            if (_randomized != true) return null;
+            final t = (v ?? "").trim();
+            if (t.isEmpty || t == "$_siteCode-") {
+              return "Required";
+            }
+            if (!_isCompleteEnrollmentId(t)) {
+              return "Format: $_siteCode-A-001";
+            }
+            if (_enrollmentDuplicateMsg.isNotEmpty) {
+              return _enrollmentDuplicateMsg;
+            }
+            return null;
+          },
+        ),
+        if (_enrollmentDuplicateMsg.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(
+            _enrollmentDuplicateMsg,
+            style: TextStyle(
+              color: c.warning,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+        const SizedBox(height: 12),
+        _strataBanner(c),
+      ],
+
+      // ── Randomized = NO ───────────────────────────────────────
+      if (_randomized == false) ...[
+        requiredLabel(
+          "28. Reason Not Randomized *",
+          style: TextStyle(
+            color: c.textSecondary,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 8),
+        ...[
+          "GA ≥ 32 weeks",
+          "Trial nurse could not reach",
+          "Non-trial location",
+          "Missed delivery",
+          "Multiple deliveries",
+          "Consent withdrawn",
+          "Other",
+        ].map((opt) {
+          final sel = _notRandomizedReason == opt;
+          return GestureDetector(
+            onTap: () => setState(() => _notRandomizedReason = opt),
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 7),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: sel ? c.primarySoft : c.surfaceAlt,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: sel ? c.primary : c.border),
               ),
-              _boolChoiceChip(
-                title     : "24. Randomised? *",
-                trueLabel : "Yes",
-                falseLabel: "No",
-                value     : _randomized,
-                onChanged : (v) => setState(() {
-                  _randomized           = v;
-                  _notRandomizedReason  = null;
-                  _notRandomizedOtherCtrl.clear();
-                  if (v) _ensureEnrollmentIdPrefix();
-                }),
-                trueColor : c.success,
-                falseColor: c.danger,
-                c         : c,
-                logic     : FieldLogicType.conditional,
-                logicTitle: "Gates strata (if Yes) and reason not randomized (if No)",
-              ),
-
-              // ── Randomized = YES ──────────────────────────────────────
-              if (_randomized == true) ...[
-                TextFormField(
-                  controller: _randomizationDateCtrl,
-                  readOnly  : true,
-                  onTap     : _pickRandomizationDate,
-                  decoration: _input("25. Randomization Date *", c).copyWith(
-                    suffixIcon: Icon(Icons.calendar_today_rounded,
-                        color: c.textTertiary, size: 18),
-                  ),
-                  style    : TextStyle(color: c.textPrimary),
-                  validator: (v) =>
-                      v == null || v.isEmpty ? "Required" : null,
-                ),
-                const SizedBox(height: 16),
-
-                TextFormField(
-                  controller: _enrollmentIdCtrl,
-                  decoration: _input("26. Enrollment ID *", c).copyWith(
-                    hintText: "$_siteCode-A-001",
-                    helperText: "Site $_siteCode · letter A–D · 3-digit serial",
-                    helperMaxLines: 1,
-                  ),
-                  style: TextStyle(
-                      color: c.textPrimary,
-                      letterSpacing: 0.6,
-                      fontWeight: FontWeight.w700),
-                  keyboardType: TextInputType.text,
-                  textCapitalization: TextCapitalization.characters,
-                  inputFormatters: [
-                    _EnrollmentIdInputFormatter(_siteCode),
-                  ],
-                  onTap: _ensureEnrollmentIdPrefix,
-                  onChanged: (_) => _scheduleEnrollmentDuplicateCheck(),
-                  validator: (v) {
-                    if (_randomized != true) return null;
-                    final t = (v ?? "").trim();
-                    if (t.isEmpty || t == "$_siteCode-") {
-                      return "Required";
-                    }
-                    if (!_isCompleteEnrollmentId(t)) {
-                      return "Format: $_siteCode-A-001";
-                    }
-                    if (_enrollmentDuplicateMsg.isNotEmpty) {
-                      return _enrollmentDuplicateMsg;
-                    }
-                    return null;
-                  },
-                ),
-                if (_enrollmentDuplicateMsg.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    _enrollmentDuplicateMsg,
-                    style: TextStyle(
-                      color: c.warning,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 12),
-                _strataBanner(c),
-              ],
-
-              // ── Randomized = NO ───────────────────────────────────────
-              if (_randomized == false) ...[
-                requiredLabel(
-                  "28. Reason Not Randomized *",
-                  style: TextStyle(
-                        color: c.textSecondary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600)),
-                const SizedBox(height: 8),
-                ...[
-                  "GA ≥ 32 weeks",
-                  "Trial nurse could not reach",
-                  "Non-trial location",
-                  "Missed delivery",
-                  "Multiple deliveries",
-                  "Consent withdrawn",
-                  "Other",
-                ].map((opt) {
-                  final sel = _notRandomizedReason == opt;
-                  return GestureDetector(
-                    onTap: () =>
-                        setState(() => _notRandomizedReason = opt),
-                    child: Container(
-                      margin : const EdgeInsets.only(bottom: 7),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 10),
-                      decoration: BoxDecoration(
-                        color       : sel ? c.primarySoft : c.surfaceAlt,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                            color: sel ? c.primary : c.border),
+              child: Row(
+                children: [
+                  Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: sel ? c.primary : c.border,
+                        width: 2,
                       ),
-                      child: Row(children: [
-                        Container(
-                          width: 16,
-                          height: 16,
-                          decoration: BoxDecoration(
-                            shape : BoxShape.circle,
-                            border: Border.all(
-                                color: sel ? c.primary : c.border,
-                                width: 2),
-                            color: sel
-                                ? c.primary
-                                : Colors.transparent,
-                          ),
-                          child: sel
-                              ? const Icon(Icons.circle,
-                                  color: Colors.white, size: 8)
-                              : null,
-                        ),
-                        const SizedBox(width: 10),
-                        Text(opt,
-                            style: TextStyle(
-                                color: sel
-                                    ? c.primary
-                                    : c.textSecondary,
-                                fontWeight: sel
-                                    ? FontWeight.w600
-                                    : FontWeight.normal,
-                                fontSize: 13)),
-                      ]),
+                      color: sel ? c.primary : Colors.transparent,
                     ),
-                  );
-                }),
-                if (_notRandomizedReason == "Other") ...[
-                  const SizedBox(height: 8),
-                  TextFormField(
-                    controller: _notRandomizedOtherCtrl,
-                    decoration: _input("Specify other reason *", c),
-                    style: TextStyle(color: c.textPrimary),
-                    validator: (v) =>
-                        v == null || v.isEmpty ? "Required" : null,
+                    child: sel
+                        ? const Icon(Icons.circle, color: Colors.white, size: 8)
+                        : null,
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    opt,
+                    style: TextStyle(
+                      color: sel ? c.primary : c.textSecondary,
+                      fontWeight: sel ? FontWeight.w600 : FontWeight.normal,
+                      fontSize: 13,
+                    ),
                   ),
                 ],
-              ],
+              ),
+            ),
+          );
+        }),
+        if (_notRandomizedReason == "Other") ...[
+          const SizedBox(height: 8),
+          TextFormField(
+            controller: _notRandomizedOtherCtrl,
+            decoration: _input("Specify other reason *", c),
+            style: TextStyle(color: c.textPrimary),
+            validator: (v) => v == null || v.isEmpty ? "Required" : null,
+          ),
+        ],
+      ],
     ];
   }
 }

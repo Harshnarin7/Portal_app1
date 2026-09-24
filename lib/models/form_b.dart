@@ -28,6 +28,12 @@ class FormB {
   final String notRandomizedReason;
   final String notRandomizedOther;
 
+  /// Identity stamps so a leftover `formB_{screeningId}` cannot fill B1
+  /// after Form A is re-created under a reused screening ID.
+  final String maternalUid;
+  final String motherFirstName;
+  final DateTime? savedAt;
+
   FormB({
     required this.screeningId,
     required this.babyUid,
@@ -52,6 +58,9 @@ class FormB {
     this.randomizationDate = "",
     this.notRandomizedReason = "",
     this.notRandomizedOther = "",
+    this.maternalUid = "",
+    this.motherFirstName = "",
+    this.savedAt,
   });
 
   Map<String, dynamic> toJson() => {
@@ -78,6 +87,9 @@ class FormB {
         "randomizationDate": randomizationDate,
         "notRandomizedReason": notRandomizedReason,
         "notRandomizedOther": notRandomizedOther,
+        "maternalUid": maternalUid,
+        "motherFirstName": motherFirstName,
+        if (savedAt != null) "savedAt": savedAt!.toIso8601String(),
       };
 
   factory FormB.fromJson(Map<String, dynamic> json) {
@@ -105,6 +117,9 @@ class FormB {
       randomizationDate: (json["randomizationDate"] ?? "").toString(),
       notRandomizedReason: (json["notRandomizedReason"] ?? "").toString(),
       notRandomizedOther: (json["notRandomizedOther"] ?? "").toString(),
+      maternalUid: (json["maternalUid"] ?? "").toString(),
+      motherFirstName: (json["motherFirstName"] ?? "").toString(),
+      savedAt: DateTime.tryParse((json["savedAt"] ?? "").toString()),
     );
   }
 }

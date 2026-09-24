@@ -6,13 +6,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/forms_api_service.dart';
 import '../theme/app_theme.dart';
 import '../navigation/helper_forms_navigation.dart';
+import '../utils/form_b_local_guard.dart';
 import '../utils/helper_day_strip.dart';
 import '../utils/helper_dob_day1.dart';
 import '../utils/mml_helper_linkages.dart';
 import '../widgets/theme_toggle_widget.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Helper Form 3 — FiO₂ AUC
+// Helper Form 3 — FiO₂ AUC (this IS web sidebar Helper 3).
+// Infect / GI / Hema is helper_form3_infect_gi_hema.dart (web Helper 4).
 // Parity with web frontend-app/src/FiO2AUC.jsx
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -22,7 +24,7 @@ class _FiO2Row {
   String dur;
 
   _FiO2Row({String? id, this.fio2 = '', this.dur = ''})
-      : id = id ?? UniqueKey().toString();
+    : id = id ?? UniqueKey().toString();
 
   double get rowAuc {
     final f = double.tryParse(fio2) ?? 0;
@@ -48,8 +50,8 @@ class _FiO2Day {
     this.start2 = '',
     List<_FiO2Row>? w1,
     List<_FiO2Row>? w2,
-  })  : w1 = w1 ?? [_FiO2Row(dur: '12')],
-        w2 = w2 ?? [_FiO2Row(dur: '12')];
+  }) : w1 = w1 ?? [_FiO2Row(dur: '12')],
+       w2 = w2 ?? [_FiO2Row(dur: '12')];
 
   double windowHours(List<_FiO2Row> rows) =>
       rows.fold(0.0, (s, r) => s + (double.tryParse(r.dur) ?? 0));
@@ -96,6 +98,7 @@ class HelperFiO2AUC extends StatefulWidget {
   final String gestation;
   final String motherName;
   final String babyUid;
+  final String screeningId;
 
   const HelperFiO2AUC({
     super.key,
@@ -103,6 +106,7 @@ class HelperFiO2AUC extends StatefulWidget {
     required this.gestation,
     required this.motherName,
     required this.babyUid,
+    this.screeningId = '',
   });
 
   @override
@@ -117,9 +121,11 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
   bool _saving = false;
   bool _hasExistingRecord = false;
   bool _dirty = false;
+
   /// False until FiO₂ GET succeeds — blocks server autosave so a failed load
   /// cannot PUT empty stubs over good web data.
   bool _serverLoadOk = false;
+
   /// Last known server fio2_logs — merged on save so days not currently shown
   /// (e.g. Supplemental O₂ flipped to No) are not wiped.
   List<Map<String, dynamic>> _lastServerLogs = [];
@@ -142,9 +148,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
   @override
   void dispose() {
     _autoSaveTimer?.cancel();
-    if (_dirty &&
-        _serverLoadOk &&
-        widget.enrollmentId.trim().isNotEmpty) {
+    if (_dirty && _serverLoadOk && widget.enrollmentId.trim().isNotEmpty) {
       _persist(silent: true, validate: false);
     }
     super.dispose();
@@ -160,8 +164,21 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     );
     setState(() => _loading = true);
     try {
-      final birth =
-          await _api.loadBirthResuscitation(widget.enrollmentId.trim());
+      final birth = await _api.loadBirthResuscitation(
+        widget.enrollmentId.trim(),
+      );
+      if (!helperBirthRowMatchesScreening(
+        birth: birth,
+        screeningId: widget.screeningId,
+      )) {
+        if (mounted) {
+          setState(() {
+            _loading = false;
+            _days = [];
+          });
+        }
+        return;
+      }
       _day1Date = parseIsoDateOnly(birth?['date_of_birth']?.toString());
     } catch (_) {}
     await _syncDaysFromHelper2(preserveLocal: true, showToast: false);
@@ -211,7 +228,10 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         );
       }
 
-      final localLogs = await _loadLocalLogs(eid);
+      final localLogs = await _loadLocalLogs(
+        eid,
+        serverConfirmedEmpty: record == null,
+      );
       debugPrint(
         '[FIO2_DEBUG] local FiO2 draft: '
         '${localLogs.isEmpty ? "empty" : "${localLogs.length} block(s)"} '
@@ -225,12 +245,14 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         );
       }
 
-      final serverLogs = (record?['fio2_logs'] as List?)
+      final serverLogs =
+          (record?['fio2_logs'] as List?)
               ?.map((e) => Map<String, dynamic>.from(e as Map))
               .toList() ??
           [];
-      _lastServerLogs =
-          serverLogs.map((e) => Map<String, dynamic>.from(e)).toList();
+      _lastServerLogs = serverLogs
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
       _serverLoadOk = true;
       if (record != null) _hasExistingRecord = true;
 
@@ -243,9 +265,11 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         final day = _asInt(l['day']);
         final block = (l['block']?.toString() ?? '');
         if (day == null || block.isEmpty) continue;
-        final idx = mergedLogs.indexWhere((m) =>
-            _asInt(m['day']) == day &&
-            (m['block']?.toString() ?? '') == block);
+        final idx = mergedLogs.indexWhere(
+          (m) =>
+              _asInt(m['day']) == day &&
+              (m['block']?.toString() ?? '') == block,
+        );
         if (idx < 0) {
           if (_logHasFio2(l)) mergedLogs.add(Map<String, dynamic>.from(l));
         } else if (_logHasFio2(l) && !_logHasFio2(mergedLogs[idx])) {
@@ -263,9 +287,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       }
       final sortedDays = dayNums.toList()..sort();
 
-      final prevByDay = {
-        for (final d in _days) d.day: d,
-      };
+      final prevByDay = {for (final d in _days) d.day: d};
 
       final built = <_FiO2Day>[];
       for (var i = 0; i < sortedDays.length; i++) {
@@ -279,7 +301,8 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         }
         final expand = !preserveLocal
             ? i == 0
-            : (prevByDay[n]?.expanded ?? (i == 0 && built.every((d) => !d.expanded)));
+            : (prevByDay[n]?.expanded ??
+                  (i == 0 && built.every((d) => !d.expanded)));
         built.add(_dayFromLogs(n, mergedLogs, expand: expand));
       }
 
@@ -290,31 +313,38 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       }
 
       if (mounted) {
-    setState(() {
+        setState(() {
           _days = built;
           _refreshing = false;
         });
         if (showToast) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(sortedDays.isEmpty
-                ? 'No Supplemental O₂ days in Helper Form 2 yet'
-                : 'Synced ${sortedDays.length} day'
-                    '${sortedDays.length == 1 ? '' : 's'} for FiO₂ AUC'),
-            behavior: SnackBarBehavior.floating,
-          ));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                sortedDays.isEmpty
+                    ? 'No Supplemental O₂ days in Helper Form 2 yet'
+                    : 'Synced ${sortedDays.length} day'
+                          '${sortedDays.length == 1 ? '' : 's'} for FiO₂ AUC',
+              ),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
         }
       }
     } catch (e) {
       _serverLoadOk = false;
       if (mounted) {
         setState(() => _refreshing = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              'Could not load FiO₂ / Helper 2 data — server save disabled until refresh succeeds: $e'),
-          backgroundColor: AppTheme.of(context).danger,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 5),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Could not load FiO₂ / Helper 2 data — server save disabled until refresh succeeds: $e',
+            ),
+            backgroundColor: AppTheme.of(context).danger,
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 5),
+          ),
+        );
       }
     }
   }
@@ -343,8 +373,11 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     return false;
   }
 
-  _FiO2Day _dayFromLogs(int dayNum, List<Map<String, dynamic>> logs,
-      {required bool expand}) {
+  _FiO2Day _dayFromLogs(
+    int dayNum,
+    List<Map<String, dynamic>> logs, {
+    required bool expand,
+  }) {
     Map<String, dynamic>? w1Log;
     Map<String, dynamic>? w2Log;
     for (final l in logs) {
@@ -362,13 +395,13 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       }
     }
     w1Log ??= logs.cast<Map<String, dynamic>?>().firstWhere(
-          (l) => l != null && l['block']?.toString() == '$dayNum-0',
-          orElse: () => null,
-        );
+      (l) => l != null && l['block']?.toString() == '$dayNum-0',
+      orElse: () => null,
+    );
     w2Log ??= logs.cast<Map<String, dynamic>?>().firstWhere(
-          (l) => l != null && l['block']?.toString() == '$dayNum-1',
-          orElse: () => null,
-        );
+      (l) => l != null && l['block']?.toString() == '$dayNum-1',
+      orElse: () => null,
+    );
 
     return _FiO2Day(
       day: dayNum,
@@ -389,20 +422,16 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       // Web: dur; legacy mobile: hours
       final dur = m['dur'] ?? m['hours'] ?? '';
       final fio2 = m['fio2'] ?? '';
-      return _FiO2Row(
-        fio2: fio2.toString(),
-        dur: dur.toString(),
-      );
+      return _FiO2Row(fio2: fio2.toString(), dur: dur.toString());
     }).toList();
   }
 
   // ── KPIs (match web hours-logged formulas) ────────────────────────────────
 
-  double get _hoursLogged => _days.fold(
-      0.0, (s, d) => s + d.windowHours(d.w1) + d.windowHours(d.w2));
+  double get _hoursLogged =>
+      _days.fold(0.0, (s, d) => s + d.windowHours(d.w1) + d.windowHours(d.w2));
 
-  double get _grandTotal =>
-      _days.fold(0.0, (s, d) => s + d.dayAuc);
+  double get _grandTotal => _days.fold(0.0, (s, d) => s + d.dayAuc);
 
   double get _meanFiO2 {
     final h = _hoursLogged;
@@ -444,11 +473,14 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
   Future<void> _prefillDayFromDms(int dayNum) async {
     final eid = widget.enrollmentId.trim();
     if (eid.isEmpty || _day1Date == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text(
-            "Need the baby's Date of Birth (Form B) before prefilling from DMS"),
-        behavior: SnackBarBehavior.floating,
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            "Need the baby's Date of Birth (Form B) before prefilling from DMS",
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
       return;
     }
     final cal = calendarDateForNicuDay(_day1Date, dayNum);
@@ -463,14 +495,16 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       final canW1 = built.w1.isNotEmpty && _FiO2Day.windowIsBlank(day.w1);
       final canW2 = built.w2.isNotEmpty && _FiO2Day.windowIsBlank(day.w2);
       if (!canW1 && !canW2) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-            (built.w1.isNotEmpty || built.w2.isNotEmpty)
-                ? 'That window already has entries — clear it first to prefill from DMS'
-                : 'No Daily Monitoring Sheet respiratory readings found for this day',
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              (built.w1.isNotEmpty || built.w2.isNotEmpty)
+                  ? 'That window already has entries — clear it first to prefill from DMS'
+                  : 'No Daily Monitoring Sheet respiratory readings found for this day',
+            ),
+            behavior: SnackBarBehavior.floating,
           ),
-          behavior: SnackBarBehavior.floating,
-        ));
+        );
         return;
       }
       setState(() {
@@ -486,17 +520,22 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         }
         _dirty = true;
       });
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text(
-            'Prefilled from Daily Monitoring Sheet — review and adjust as needed'),
-        behavior: SnackBarBehavior.floating,
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Prefilled from Daily Monitoring Sheet — review and adjust as needed',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     } catch (_) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Could not load Daily Monitoring Sheet for this day'),
-        behavior: SnackBarBehavior.floating,
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not load Daily Monitoring Sheet for this day'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     } finally {
       if (mounted) setState(() => _dmsPrefillingDay = null);
     }
@@ -507,13 +546,17 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     setState(() {
       final rows = isW1 ? day.w1 : day.w2;
       final last = rows.isNotEmpty ? rows.last : null;
-      final remaining =
-          (12 - day.windowHours(rows)).clamp(0.0, 12.0);
-      rows.add(_FiO2Row(
-        fio2: last?.fio2 ?? '',
-        dur: remaining > 0 ? remaining.toStringAsFixed(
-            remaining == remaining.roundToDouble() ? 0 : 2) : '',
-      ));
+      final remaining = (12 - day.windowHours(rows)).clamp(0.0, 12.0);
+      rows.add(
+        _FiO2Row(
+          fio2: last?.fio2 ?? '',
+          dur: remaining > 0
+              ? remaining.toStringAsFixed(
+                  remaining == remaining.roundToDouble() ? 0 : 2,
+                )
+              : '',
+        ),
+      );
       _markDirty();
     });
   }
@@ -527,7 +570,13 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     });
   }
 
-  void _updateRow(_FiO2Day day, bool isW1, String id, String field, String value) {
+  void _updateRow(
+    _FiO2Day day,
+    bool isW1,
+    String id,
+    String field,
+    String value,
+  ) {
     final rows = isW1 ? day.w1 : day.w2;
     final prevHrs = day.windowHours(rows);
     final wasComplete = day.isComplete;
@@ -543,12 +592,15 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       final justHitTwelve =
           (newHrs - 12).abs() < 0.01 && (prevHrs - 12).abs() >= 0.01;
       if (justHitTwelve && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              'Day ${day.day} · ${isW1 ? '1–12h' : '13–24h'} window complete (12 h)'),
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 3),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Day ${day.day} · ${isW1 ? '1–12h' : '13–24h'} window complete (12 h)',
+            ),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 3),
+          ),
+        );
       }
 
       // Auto-collapse only when the day *newly* becomes complete (FiO₂ filled
@@ -606,7 +658,8 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
 
   /// Upsert UI day/blocks onto last server logs so hidden days are preserved.
   List<Map<String, dynamic>> _mergeLogsForSave(
-      List<Map<String, dynamic>> uiLogs) {
+    List<Map<String, dynamic>> uiLogs,
+  ) {
     final merged = _lastServerLogs
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
@@ -614,8 +667,10 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       final day = _asInt(u['day']);
       final block = (u['block']?.toString() ?? '');
       if (day == null || block.isEmpty) continue;
-      final idx = merged.indexWhere((m) =>
-          _asInt(m['day']) == day && (m['block']?.toString() ?? '') == block);
+      final idx = merged.indexWhere(
+        (m) =>
+            _asInt(m['day']) == day && (m['block']?.toString() ?? '') == block,
+      );
       if (idx < 0) {
         merged.add(Map<String, dynamic>.from(u));
       } else {
@@ -629,20 +684,48 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
-          'fio2_auc_${widget.enrollmentId}', jsonEncode(logs));
+        'fio2_auc_${widget.enrollmentId}',
+        jsonEncode({
+          'screening_id': widget.screeningId.trim(),
+          'logs': logs,
+        }),
+      );
     } catch (_) {}
   }
 
-  Future<List<Map<String, dynamic>>> _loadLocalLogs(String eid) async {
+  Future<List<Map<String, dynamic>>> _loadLocalLogs(
+    String eid, {
+    required bool serverConfirmedEmpty,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString('fio2_auc_$eid');
       if (raw == null) return [];
       final decoded = jsonDecode(raw);
-      if (decoded is! List) return [];
-      return decoded
-          .map((e) => Map<String, dynamic>.from(e as Map))
-          .toList();
+      if (decoded is List) {
+        // Legacy cache has no screening_id — leftover after ID reuse.
+        if (serverConfirmedEmpty) return [];
+        return decoded
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+      }
+      if (decoded is Map) {
+        final draft = Map<String, dynamic>.from(decoded);
+        if (!helperLocalDraftIsForScreening(
+          draft: draft,
+          screeningId: widget.screeningId,
+          serverConfirmedEmpty: serverConfirmedEmpty,
+        )) {
+          await prefs.remove('fio2_auc_$eid');
+          return [];
+        }
+        final logs = draft['logs'];
+        if (logs is! List) return [];
+        return logs
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+      }
+      return [];
     } catch (_) {
       return [];
     }
@@ -682,9 +765,9 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     final eid = widget.enrollmentId.trim();
     if (eid.isEmpty) {
       if (!silent && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Enrollment ID missing'),
-        ));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Enrollment ID missing')));
       }
       return false;
     }
@@ -693,11 +776,14 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       final localOnly = _buildLogs();
       await _saveLocal(localOnly);
       if (!silent && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text(
-              'Server data not loaded yet — draft kept on device. Tap Refresh, then Save.'),
-          backgroundColor: AppTheme.of(context).warning,
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'Server data not loaded yet — draft kept on device. Tap Refresh, then Save.',
+            ),
+            backgroundColor: AppTheme.of(context).warning,
+          ),
+        );
       }
       return false;
     }
@@ -705,10 +791,12 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       final err = _validate();
       if (err != null) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(err),
-            backgroundColor: AppTheme.of(context).danger,
-          ));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(err),
+              backgroundColor: AppTheme.of(context).danger,
+            ),
+          );
         }
         return false;
       }
@@ -733,17 +821,18 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
         hasExistingRecord: true, // PUT upsert — shared row with web
       );
       _hasExistingRecord = true;
-      _lastServerLogs =
-          logs.map((e) => Map<String, dynamic>.from(e)).toList();
+      _lastServerLogs = logs.map((e) => Map<String, dynamic>.from(e)).toList();
       _dirty = false;
       if (!mounted) return true;
       setState(() => _saving = false);
       if (!silent) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(validate ? 'FiO₂ data saved' : 'Draft saved'),
-          backgroundColor: AppTheme.of(context).success,
-          behavior: SnackBarBehavior.floating,
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(validate ? 'FiO₂ data saved' : 'Draft saved'),
+            backgroundColor: AppTheme.of(context).success,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
       }
       if (popAfter) Navigator.of(context).pop(true);
       return true;
@@ -751,10 +840,12 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       if (!mounted) return false;
       setState(() => _saving = false);
       if (!silent) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Save failed (kept locally): $e'),
-          backgroundColor: AppTheme.of(context).warning,
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Save failed (kept locally): $e'),
+            backgroundColor: AppTheme.of(context).warning,
+          ),
+        );
       }
       if (popAfter) Navigator.of(context).pop(true);
       return false;
@@ -771,23 +862,26 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       appBar: AppBar(
         backgroundColor: c.surface,
         elevation: 0,
-      title: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-            Text('Helper Form 3 — FiO₂ Logging',
-                style: TextStyle(
-                    color: c.textPrimary,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 16)),
-          Text(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Helper Form 3 — FiO₂ Logging',
+              style: TextStyle(
+                color: c.textPrimary,
+                fontWeight: FontWeight.w800,
+                fontSize: 16,
+              ),
+            ),
+            Text(
               widget.enrollmentId.isEmpty
                   ? 'No enrollment'
                   : widget.enrollmentId,
-            style: TextStyle(color: c.textTertiary, fontSize: 11),
-          ),
-        ],
-      ),
-      actions: [
+              style: TextStyle(color: c.textTertiary, fontSize: 11),
+            ),
+          ],
+        ),
+        actions: [
           HelperFormSwitcherButton(
             current: HelperFormKind.fio2Auc,
             patient: HelperFormPatientContext(
@@ -795,6 +889,7 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
               gestation: widget.gestation,
               motherName: widget.motherName,
               babyUid: widget.babyUid,
+              screeningId: widget.screeningId,
             ),
           ),
           IconButton(
@@ -802,57 +897,60 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
             onPressed: _refreshing
                 ? null
                 : () => _syncDaysFromHelper2(
-                    preserveLocal: true, showToast: true),
+                    preserveLocal: true,
+                    showToast: true,
+                  ),
             icon: _refreshing
                 ? SizedBox(
                     width: 18,
                     height: 18,
                     child: CircularProgressIndicator(
-                        strokeWidth: 2, color: c.primary))
+                      strokeWidth: 2,
+                      color: c.primary,
+                    ),
+                  )
                 : Icon(Icons.refresh_rounded, color: c.primary),
-        ),
-        const Padding(
-          padding: EdgeInsets.only(right: 8),
-              child: Center(child: ThemeToggle())),
+          ),
+          const Padding(
+            padding: EdgeInsets.only(right: 8),
+            child: Center(child: ThemeToggle()),
+          ),
         ],
       ),
       bottomNavigationBar: _buildBottomBar(c),
       body: _loading
           ? Center(child: CircularProgressIndicator(color: c.primary))
           : _days.isEmpty
-              ? _emptyState(c)
-              : ListView(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-                  children: [
-                    // Header meta matches web: Enrollment ID + Gestation only
-                    // (no mother name / baby UID — those are not on web FiO2AUC).
-                    _headerMeta(c),
-                    const SizedBox(height: 12),
-                    _kpiStrip(c),
-                    const SizedBox(height: 14),
-                    if (!_showAllFio2Days &&
-                        _days.length > kMobileDayStripWindow)
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: TextButton(
-                          onPressed: () =>
-                              setState(() => _showAllFio2Days = true),
-                          child: Text(
-                            'Show earlier O₂ days (${_days.length - kMobileDayStripWindow} hidden)',
-                          ),
-                        ),
+          ? _emptyState(c)
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+              children: [
+                // Header meta matches web: Enrollment ID + Gestation only
+                // (no mother name / baby UID — those are not on web FiO2AUC).
+                _headerMeta(c),
+                const SizedBox(height: 12),
+                _kpiStrip(c),
+                const SizedBox(height: 14),
+                if (!_showAllFio2Days && _days.length > kMobileDayStripWindow)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      onPressed: () => setState(() => _showAllFio2Days = true),
+                      child: Text(
+                        'Show earlier O₂ days (${_days.length - kMobileDayStripWindow} hidden)',
                       ),
-                    ...List.generate(_visibleDays.length, (i) {
-                      final day = _visibleDays[i];
-                      final fullIdx =
-                          _days.indexWhere((d) => d.day == day.day);
-                      final locked = _isDayLocked(fullIdx);
-                      return _dayCard(c, day, locked);
-                    }),
-                    const SizedBox(height: 10),
-                    _formulaInfo(c),
-                  ],
-                ),
+                    ),
+                  ),
+                ...List.generate(_visibleDays.length, (i) {
+                  final day = _visibleDays[i];
+                  final fullIdx = _days.indexWhere((d) => d.day == day.day);
+                  final locked = _isDayLocked(fullIdx);
+                  return _dayCard(c, day, locked);
+                }),
+                const SizedBox(height: 10),
+                _formulaInfo(c),
+              ],
+            ),
     );
   }
 
@@ -860,29 +958,39 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(28),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.air_rounded, size: 48, color: c.textTertiary),
-          const SizedBox(height: 14),
-          Text('No Supplemental O₂ days yet',
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.air_rounded, size: 48, color: c.textTertiary),
+            const SizedBox(height: 14),
+            Text(
+              'No Supplemental O₂ days yet',
               style: TextStyle(
-                  color: c.textPrimary,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 16)),
-          const SizedBox(height: 8),
-          Text(
-            'FiO₂ logging days come from Helper Form 2 days where Supplemental O₂ = Yes.\n'
-            'Complete those days in Helper Form 2, then tap Refresh.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: c.textSecondary, fontSize: 13, height: 1.4),
-          ),
-          const SizedBox(height: 18),
-          OutlinedButton.icon(
-            onPressed: () =>
-                _syncDaysFromHelper2(preserveLocal: true, showToast: true),
-            icon: const Icon(Icons.refresh_rounded, size: 18),
-            label: const Text('Refresh from Helper 2'),
+                color: c.textPrimary,
+                fontWeight: FontWeight.w800,
+                fontSize: 16,
               ),
-            ]),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'FiO₂ logging days come from Helper Form 2 days where Supplemental O₂ = Yes.\n'
+              'Complete those days in Helper Form 2, then tap Refresh.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: c.textSecondary,
+                fontSize: 13,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 18),
+            OutlinedButton.icon(
+              onPressed: () =>
+                  _syncDaysFromHelper2(preserveLocal: true, showToast: true),
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              label: const Text('Refresh from Helper 2'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -892,35 +1000,43 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       return Container(
         margin: const EdgeInsets.only(right: 8, bottom: 6),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          decoration: BoxDecoration(
-            color: c.surface,
+        decoration: BoxDecoration(
+          color: c.surface,
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: c.borderLight),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(label,
-                style: TextStyle(
-                    color: c.textTertiary,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w600)),
+            Text(
+              label,
+              style: TextStyle(
+                color: c.textTertiary,
+                fontSize: 9,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
             const SizedBox(height: 2),
-            Text(value.isEmpty ? '—' : value,
-                style: TextStyle(
-                    color: c.textPrimary,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 13)),
+            Text(
+              value.isEmpty ? '—' : value,
+              style: TextStyle(
+                color: c.textPrimary,
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+              ),
+            ),
           ],
         ),
       );
     }
 
-    return Wrap(children: [
-      badge('Enrollment ID', widget.enrollmentId),
-      if (widget.gestation.trim().isNotEmpty)
-        badge('Gestation', widget.gestation),
-    ]);
+    return Wrap(
+      children: [
+        badge('Enrollment ID', widget.enrollmentId),
+        if (widget.gestation.trim().isNotEmpty)
+          badge('Gestation', widget.gestation),
+      ],
+    );
   }
 
   Widget _kpiStrip(AppColors c) {
@@ -934,27 +1050,36 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
             borderRadius: BorderRadius.circular(10),
             border: Border.all(color: c.borderLight),
           ),
-          child: Column(children: [
-            Text(value,
+          child: Column(
+            children: [
+              Text(
+                value,
                 style: TextStyle(
-                    color: color,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 14)),
-            const SizedBox(height: 2),
-            Text(label,
+                  color: color,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 14,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                label,
                 textAlign: TextAlign.center,
-                style: TextStyle(color: c.textTertiary, fontSize: 9)),
-          ]),
+                style: TextStyle(color: c.textTertiary, fontSize: 9),
+              ),
+            ],
+          ),
         ),
       );
     }
 
-    return Row(children: [
-      cell('Total AUC', _grandTotal.toStringAsFixed(3), c.primary),
-      cell('Excess O₂', _excessO2.toStringAsFixed(2), c.warning),
-      cell('Mean FiO₂ %', _meanFiO2.toStringAsFixed(1), c.success),
-      cell('Days done', '$_daysComplete / ${_days.length}', c.textPrimary),
-    ]);
+    return Row(
+      children: [
+        cell('Total AUC', _grandTotal.toStringAsFixed(3), c.primary),
+        cell('Excess O₂', _excessO2.toStringAsFixed(2), c.warning),
+        cell('Mean FiO₂ %', _meanFiO2.toStringAsFixed(1), c.success),
+        cell('Days done', '$_daysComplete / ${_days.length}', c.textPrimary),
+      ],
+    );
   }
 
   Widget _formulaInfo(AppColors c) {
@@ -969,19 +1094,25 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Logging Rules & Formulas',
-              style: TextStyle(
-                  color: c.textPrimary,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 12)),
+          Text(
+            'Logging Rules & Formulas',
+            style: TextStyle(
+              color: c.textPrimary,
+              fontWeight: FontWeight.w800,
+              fontSize: 12,
+            ),
+          ),
           const SizedBox(height: 6),
           Text(
             '• Daily Cumulative AUC = Sum of (FiO₂ × Hours) for the full 24h period.\n'
             '• Excess O₂ AUC = Total Cumulative AUC − (21% × 24 hours).\n'
             '• Record actual FiO₂ delivered, even if it differs from the prescribed set point.\n'
             '• If FiO₂ changed within a 12h block, add a new row to record the duration of each FiO₂ level.',
-            style:
-                TextStyle(color: c.textSecondary, fontSize: 11, height: 1.45),
+            style: TextStyle(
+              color: c.textSecondary,
+              fontSize: 11,
+              height: 1.45,
+            ),
           ),
         ],
       ),
@@ -996,139 +1127,178 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       opacity: locked ? 0.55 : 1,
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),
-          decoration: BoxDecoration(
+        decoration: BoxDecoration(
           color: c.surface,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: day.isComplete
-                ? c.success.withOpacity(0.45)
-                : c.borderLight,
+            color: day.isComplete ? c.success.withOpacity(0.45) : c.borderLight,
           ),
         ),
-        child: Column(children: [
-          InkWell(
-            onTap: locked ? null : () => _toggleDay(day.day),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
-          child: Row(children: [
-            Container(
-                  width: 36,
-                  height: 36,
-                  alignment: Alignment.center,
-              decoration: BoxDecoration(
-                    color: day.isComplete ? c.successSoft : c.primarySoft,
-                borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text('${day.day}',
-                      style: TextStyle(
+        child: Column(
+          children: [
+            InkWell(
+              onTap: locked ? null : () => _toggleDay(day.day),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(14),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 36,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: day.isComplete ? c.successSoft : c.primarySoft,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '${day.day}',
+                        style: TextStyle(
                           color: day.isComplete ? c.success : c.primary,
-                          fontWeight: FontWeight.w800)),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Day ${day.day}',
-                style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Day ${day.day}',
+                            style: TextStyle(
                               color: c.textPrimary,
                               fontWeight: FontWeight.w800,
-                              fontSize: 14)),
-                      Text(
-                        locked
-                            ? 'Complete Day ${_days[_days.indexOf(day) - 1].day} first'
-                            : day.isComplete
+                              fontSize: 14,
+                            ),
+                          ),
+                          Text(
+                            locked
+                                ? 'Complete Day ${_days[_days.indexOf(day) - 1].day} first'
+                                : day.isComplete
                                 ? 'VALIDATED · AUC ${day.dayAuc.toStringAsFixed(2)}'
                                 : day.expanded
-                                    ? 'Incomplete'
-                                    : 'AUC ${day.dayAuc.toStringAsFixed(2)} · Mean ${((day.dayAuc / 24) * 100).toStringAsFixed(1)}%',
-                        style: TextStyle(
-                            color: c.textTertiary, fontSize: 11),
+                                ? 'Incomplete'
+                                : 'AUC ${day.dayAuc.toStringAsFixed(2)} · Mean ${((day.dayAuc / 24) * 100).toStringAsFixed(1)}%',
+                            style: TextStyle(
+                              color: c.textTertiary,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
+                    ),
+                    if (!locked)
+                      TextButton(
+                        onPressed: _dmsPrefillingDay == day.day
+                            ? null
+                            : () => _prefillDayFromDms(day.day),
+                        child: _dmsPrefillingDay == day.day
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Text('DMS', style: TextStyle(fontSize: 11)),
+                      ),
+                    if (day.isComplete)
+                      Icon(
+                        Icons.check_circle_rounded,
+                        color: c.success,
+                        size: 20,
+                      )
+                    else if (locked)
+                      Icon(Icons.lock_rounded, color: c.textTertiary, size: 18)
+                    else
+                      Icon(
+                        day.expanded
+                            ? Icons.expand_less_rounded
+                            : Icons.expand_more_rounded,
+                        color: c.textSecondary,
+                      ),
+                  ],
                 ),
-                if (!locked)
-                  TextButton(
-                    onPressed: _dmsPrefillingDay == day.day
-                        ? null
-                        : () => _prefillDayFromDms(day.day),
-                    child: _dmsPrefillingDay == day.day
-                        ? const SizedBox(
-                            width: 14,
-                            height: 14,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('DMS', style: TextStyle(fontSize: 11)),
-                  ),
-                if (day.isComplete)
-                  Icon(Icons.check_circle_rounded,
-                      color: c.success, size: 20)
-                else if (locked)
-                  Icon(Icons.lock_rounded, color: c.textTertiary, size: 18)
-                else
-                  Icon(
-                    day.expanded
-                        ? Icons.expand_less_rounded
-                        : Icons.expand_more_rounded,
-                    color: c.textSecondary,
-            ),
-          ]),
-        ),
-          ),
-          if (day.expanded && !locked) ...[
-            Divider(height: 1, color: c.borderLight),
-        Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(children: [
-                    Expanded(
-                        child: _timeField(
-                            c,
-                            'Start timing hour of life — 1–12hr',
-                            day.start1, () async {
-                      final t = await showTimePicker(
-                        context: context,
-                        initialTime: _parseTod(day.start1) ??
-                            const TimeOfDay(hour: 0, minute: 0),
-                      );
-                      _updateStart(day, true, t);
-                    })),
-                  const SizedBox(width: 10),
-                    Expanded(
-                        child: _timeField(
-                            c,
-                            'Start timing hour of life — 13–24h',
-                            day.start2, () async {
-                      final t = await showTimePicker(
-                        context: context,
-                        initialTime: _parseTod(day.start2) ??
-                            const TimeOfDay(hour: 0, minute: 0),
-                      );
-                      _updateStart(day, false, t);
-                    })),
-                  ]),
-                  const SizedBox(height: 12),
-                  _windowCard(c, day, true),
-                  const SizedBox(height: 10),
-                  _windowCard(c, day, false),
-                  const SizedBox(height: 12),
-                  Row(children: [
-                    _miniMetric(c, 'Daily AUC', day.dayAuc.toStringAsFixed(2)),
-                    _miniMetric(c, 'Mean Daily FiO₂',
-                        '${meanDay.toStringAsFixed(1)}%'),
-                    _miniMetric(
-                        c, 'Excess O₂ AUC', excessDay.toStringAsFixed(2)),
-                  ]),
-                ],
               ),
             ),
+            if (day.expanded && !locked) ...[
+              Divider(height: 1, color: c.borderLight),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _timeField(
+                            c,
+                            'Start timing hour of life — 1–12hr',
+                            day.start1,
+                            () async {
+                              final t = await showTimePicker(
+                                context: context,
+                                initialTime:
+                                    _parseTod(day.start1) ??
+                                    const TimeOfDay(hour: 0, minute: 0),
+                              );
+                              _updateStart(day, true, t);
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _timeField(
+                            c,
+                            'Start timing hour of life — 13–24h',
+                            day.start2,
+                            () async {
+                              final t = await showTimePicker(
+                                context: context,
+                                initialTime:
+                                    _parseTod(day.start2) ??
+                                    const TimeOfDay(hour: 0, minute: 0),
+                              );
+                              _updateStart(day, false, t);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    _windowCard(c, day, true),
+                    const SizedBox(height: 10),
+                    _windowCard(c, day, false),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        _miniMetric(
+                          c,
+                          'Daily AUC',
+                          day.dayAuc.toStringAsFixed(2),
+                        ),
+                        _miniMetric(
+                          c,
+                          'Mean Daily FiO₂',
+                          '${meanDay.toStringAsFixed(1)}%',
+                        ),
+                        _miniMetric(
+                          c,
+                          'Excess O₂ AUC',
+                          excessDay.toStringAsFixed(2),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
-          ]),
         ),
+      ),
     );
   }
 
@@ -1143,171 +1313,211 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
 
     return Container(
       padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
+      decoration: BoxDecoration(
         color: c.surfaceAlt,
         borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: c.borderLight),
-        ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-          Text(title,
-              style: TextStyle(
+        border: Border.all(color: c.borderLight),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                title,
+                style: TextStyle(
                   color: c.textPrimary,
                   fontWeight: FontWeight.w800,
-                  fontSize: 13)),
-          const Spacer(),
-          Text('Window AUC ${auc.toStringAsFixed(3)}',
-              style: TextStyle(
+                  fontSize: 13,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                'Window AUC ${auc.toStringAsFixed(3)}',
+                style: TextStyle(
                   color: c.primary,
                   fontWeight: FontWeight.w700,
-                  fontSize: 11)),
-        ]),
-        const SizedBox(height: 8),
-        Row(children: [
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
               Expanded(
-              child: Text('FiO₂ (%)',
+                child: Text(
+                  'FiO₂ (%)',
                   style: TextStyle(
-                      color: c.textTertiary,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600))),
+                    color: c.textTertiary,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
               Expanded(
-              child: Text('Duration (hr)',
+                child: Text(
+                  'Duration (hr)',
                   style: TextStyle(
-                      color: c.textTertiary,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600))),
-          const SizedBox(
-              width: 52,
-              child: Text('AUC',
+                    color: c.textTertiary,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(
+                width: 52,
+                child: Text(
+                  'AUC',
                   textAlign: TextAlign.center,
-                  style: TextStyle(
-                      fontSize: 10, fontWeight: FontWeight.w600))),
-          const SizedBox(width: 36),
-        ]),
-                    const SizedBox(height: 4),
-        ...rows.map((row) {
-          final fioErr = row.fio2.isNotEmpty &&
-              ((double.tryParse(row.fio2) ?? -1) < 21 ||
-                  (double.tryParse(row.fio2) ?? 999) > 100);
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 6),
-            child: Row(children: [
-              Expanded(
-                child: TextFormField(
-                  key: ValueKey('${row.id}-fio2'),
-                  initialValue: row.fio2,
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
+                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600),
+                ),
+              ),
+              const SizedBox(width: 36),
+            ],
+          ),
+          const SizedBox(height: 4),
+          ...rows.map((row) {
+            final fioErr =
+                row.fio2.isNotEmpty &&
+                ((double.tryParse(row.fio2) ?? -1) < 21 ||
+                    (double.tryParse(row.fio2) ?? 999) > 100);
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      key: ValueKey('${row.id}-fio2'),
+                      initialValue: row.fio2,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
                       inputFormatters: [
                         FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
                       ],
-                  decoration: InputDecoration(
-                    isDense: true,
-                    hintText: '21–100',
-                    errorText: fioErr ? '21–100' : null,
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 10),
-                    border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8)),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: '21–100',
+                        errorText: fioErr ? '21–100' : null,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 10,
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      onChanged: (v) =>
+                          _updateRow(day, isW1, row.id, 'fio2', v),
+                    ),
                   ),
-                  onChanged: (v) =>
-                      _updateRow(day, isW1, row.id, 'fio2', v),
-                ),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: TextFormField(
-                  key: ValueKey('${row.id}-dur'),
-                  initialValue: row.dur,
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
-                  ],
-                  decoration: InputDecoration(
-                    isDense: true,
-                    hintText: '0–12',
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 10),
-                    border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8)),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: TextFormField(
+                      key: ValueKey('${row.id}-dur'),
+                      initialValue: row.dur,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+                      ],
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: '0–12',
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 10,
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      onChanged: (v) => _updateRow(day, isW1, row.id, 'dur', v),
+                    ),
                   ),
-                  onChanged: (v) =>
-                      _updateRow(day, isW1, row.id, 'dur', v),
-                ),
+                  SizedBox(
+                    width: 52,
+                    child: Text(
+                      row.rowAuc > 0 ? row.rowAuc.toStringAsFixed(2) : '—',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: c.textSecondary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 36,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      icon: Icon(
+                        Icons.close_rounded,
+                        size: 18,
+                        color: rows.length <= 1 ? c.textTertiary : c.danger,
+                      ),
+                      onPressed: rows.length <= 1
+                          ? null
+                          : () => _delRow(day, isW1, row.id),
+                    ),
+                  ),
+                ],
               ),
-              SizedBox(
-                width: 52,
-                child: Text(
-                  row.rowAuc > 0 ? row.rowAuc.toStringAsFixed(2) : '—',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: c.textSecondary,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600),
-                ),
-              ),
-              SizedBox(
-                width: 36,
-                child: IconButton(
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                  icon: Icon(Icons.close_rounded,
-                      size: 18,
-                      color: rows.length <= 1
-                          ? c.textTertiary
-                          : c.danger),
-                  onPressed: rows.length <= 1
-                      ? null
-                      : () => _delRow(day, isW1, row.id),
-                ),
-              ),
-                          ]),
-                        );
-        }),
-        TextButton.icon(
-          onPressed: () => _addRow(day, isW1),
-          icon: const Icon(Icons.add_rounded, size: 16),
-          label: const Text('Add FiO₂ Change',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
-        ),
-        const SizedBox(height: 4),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: LinearProgressIndicator(
-            value: (hrs / 12).clamp(0.0, 1.0),
-            minHeight: 6,
-            backgroundColor: c.borderLight,
-            color: over
-                ? c.danger
-                : done
-                    ? c.success
-                    : c.primary,
+            );
+          }),
+          TextButton.icon(
+            onPressed: () => _addRow(day, isW1),
+            icon: const Icon(Icons.add_rounded, size: 16),
+            label: const Text(
+              'Add FiO₂ Change',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+            ),
           ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          over
-              ? '${hrs.toStringAsFixed(1)} / 12 h — exceeds 12h'
-              : done
-                  ? '${hrs.toStringAsFixed(1)} / 12 h'
-                  : '${hrs.toStringAsFixed(1)} / 12 h — ${remaining.toStringAsFixed(1)}h remaining',
-          style: TextStyle(
-            color: over
-                ? c.danger
-                : done
-                    ? c.success
-                    : c.textTertiary,
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
+          const SizedBox(height: 4),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: (hrs / 12).clamp(0.0, 1.0),
+              minHeight: 6,
+              backgroundColor: c.borderLight,
+              color: over
+                  ? c.danger
+                  : done
+                  ? c.success
+                  : c.primary,
+            ),
           ),
-        ),
-      ]),
+          const SizedBox(height: 4),
+          Text(
+            over
+                ? '${hrs.toStringAsFixed(1)} / 12 h — exceeds 12h'
+                : done
+                ? '${hrs.toStringAsFixed(1)} / 12 h'
+                : '${hrs.toStringAsFixed(1)} / 12 h — ${remaining.toStringAsFixed(1)}h remaining',
+            style: TextStyle(
+              color: over
+                  ? c.danger
+                  : done
+                  ? c.success
+                  : c.textTertiary,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _timeField(
-      AppColors c, String label, String value, VoidCallback onTap) {
+    AppColors c,
+    String label,
+    String value,
+    VoidCallback onTap,
+  ) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(10),
@@ -1316,12 +1526,14 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
           labelText: label,
           isDense: true,
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 10,
+            vertical: 10,
+          ),
         ),
         child: Text(
           value.isEmpty ? 'HH:MM' : value,
-                      style: TextStyle(
+          style: TextStyle(
             color: value.isEmpty ? c.textTertiary : c.textPrimary,
             fontWeight: FontWeight.w600,
             fontSize: 13,
@@ -1341,15 +1553,19 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: c.borderLight),
         ),
-        child: Column(children: [
-          Text(value,
-            style: TextStyle(
-                  color: c.textPrimary,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 12)),
-          Text(label,
-              style: TextStyle(color: c.textTertiary, fontSize: 9)),
-        ]),
+        child: Column(
+          children: [
+            Text(
+              value,
+              style: TextStyle(
+                color: c.textPrimary,
+                fontWeight: FontWeight.w800,
+                fontSize: 12,
+              ),
+            ),
+            Text(label, style: TextStyle(color: c.textTertiary, fontSize: 9)),
+          ],
+        ),
       ),
     );
   }
@@ -1369,62 +1585,81 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
       minimum: const EdgeInsets.only(bottom: 8),
       child: Container(
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
-      decoration: BoxDecoration(
-        color: c.surface,
-        border: Border(top: BorderSide(color: c.borderLight)),
+        decoration: BoxDecoration(
+          color: c.surface,
+          border: Border(top: BorderSide(color: c.borderLight)),
         ),
-        child: Row(children: [
-          Expanded(
-            child: OutlinedButton.icon(
-              icon: Icon(Icons.save_outlined, size: 15, color: c.warning),
-              label: Text('Save for Later',
+        child: Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                icon: Icon(Icons.save_outlined, size: 15, color: c.warning),
+                label: Text(
+                  'Save for Later',
                   style: TextStyle(
-                      color: c.warning,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 11)),
-              onPressed: _saving
-                  ? null
-                  : () => _persist(
-                      silent: false, validate: false, popAfter: true),
-              style: OutlinedButton.styleFrom(
-                side: BorderSide(color: c.warning.withOpacity(0.5)),
-                backgroundColor: c.warningSoft,
-                padding: const EdgeInsets.symmetric(vertical: 13),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
+                    color: c.warning,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 11,
+                  ),
+                ),
+                onPressed: _saving
+                    ? null
+                    : () => _persist(
+                        silent: false,
+                        validate: false,
+                        popAfter: true,
+                      ),
+                style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: c.warning.withOpacity(0.5)),
+                  backgroundColor: c.warningSoft,
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            flex: 2,
-            child: ElevatedButton.icon(
-              icon: _saving
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.check_circle_outline_rounded,
-                      size: 16, color: Colors.white),
-              label: const Text('Save',
+            const SizedBox(width: 8),
+            Expanded(
+              flex: 2,
+              child: ElevatedButton.icon(
+                icon: _saving
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.check_circle_outline_rounded,
+                        size: 16,
+                        color: Colors.white,
+                      ),
+                label: const Text(
+                  'Save',
                   style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 13)),
-              onPressed: _saving
-                  ? null
-                  : () => _persist(silent: false, validate: true),
-            style: ElevatedButton.styleFrom(
-                backgroundColor: c.success,
-                padding: const EdgeInsets.symmetric(vertical: 13),
-              shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-              elevation: 0,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+                onPressed: _saving
+                    ? null
+                    : () => _persist(silent: false, validate: true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: c.success,
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  elevation: 0,
+                ),
+              ),
             ),
-          ),
+          ],
         ),
-        ]),
       ),
     );
   }

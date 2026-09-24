@@ -13,6 +13,7 @@ import '../services/forms_api_service.dart';
 import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
+import '../utils/form_b_local_guard.dart';
 import '../utils/helper_day_strip.dart';
 import '../utils/helper_dob_day1.dart';
 import '../utils/helper_session.dart';
@@ -31,6 +32,7 @@ class HelperForm2RespCvNeuro extends StatefulWidget {
   final String motherName;
   final String babyUid;
   final String site;
+  final String screeningId;
 
   const HelperForm2RespCvNeuro({
     super.key,
@@ -39,6 +41,7 @@ class HelperForm2RespCvNeuro extends StatefulWidget {
     required this.motherName,
     required this.babyUid,
     this.site = 'PGIMER',
+    this.screeningId = '',
   });
 
   @override
@@ -229,6 +232,20 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
     try {
       try {
         final birth = await _api.loadBirthResuscitation(eid);
+        if (!helperBirthRowMatchesScreening(
+          birth: birth,
+          screeningId: widget.screeningId,
+        )) {
+          if (mounted) {
+            setState(() {
+              _loading = false;
+              _banner =
+                  'This enrollment belongs to a different screening. Helper data was not loaded.';
+              _bannerError = true;
+            });
+          }
+          return;
+        }
         final raw = birth?['date_of_birth']?.toString();
         _babyName = (birth?['baby_name'] ?? '').toString();
         if (raw != null && raw.isNotEmpty) {
@@ -254,10 +271,13 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         final day = n is int ? n : int.tryParse('$n') ?? 0;
         if (day < 1) continue;
         if (day > maxDay) maxDay = day;
-        final st = (row['submission_status'] ?? 'empty').toString();
         final pct = row['completion_pct'];
-        _dayStatus[day] = st;
-        _dayPct[day] = pct is int ? pct : int.tryParse('$pct') ?? 0;
+        final parsedPct = pct is int ? pct : int.tryParse('$pct') ?? 0;
+        _dayStatus[day] = helperDayDisplayStatus(
+          (row['submission_status'] ?? 'empty').toString(),
+          parsedPct,
+        );
+        _dayPct[day] = parsedPct;
       }
       _recomputeTodayNicuDay();
       _totalDays = maxDay < 14 ? 14 : maxDay;
@@ -418,7 +438,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       final raw = await _api.loadRespCvNeuroDay(eid, day);
       if (!mounted || gen != _loadGen || day != _activeDay) return;
       if (raw == null) {
-        if (!await _applyLocalDraftIfAny(day)) {
+        if (!await _applyLocalDraftIfAny(day, serverConfirmedEmpty: true)) {
           _clearForm();
           _recordExists = false;
           _isEditing = true;
@@ -933,16 +953,30 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       savedAt: DateTime.now().toUtc().toIso8601String(),
       savedBy: 'local-draft',
     );
+    final sid = widget.screeningId.trim();
+    if (sid.isNotEmpty) body['screening_id'] = sid;
     await HelperDayDraftStorage.save(_kRespCvDraftKey, eid, _activeDay, body);
   }
 
-  Future<bool> _applyLocalDraftIfAny(int day) async {
+  Future<bool> _applyLocalDraftIfAny(
+    int day, {
+    bool serverConfirmedEmpty = false,
+  }) async {
+    final eid = widget.enrollmentId.trim();
     final raw = await HelperDayDraftStorage.load(
       _kRespCvDraftKey,
-      widget.enrollmentId.trim(),
+      eid,
       day,
     );
     if (raw == null) return false;
+    if (!helperLocalDraftIsForScreening(
+      draft: raw,
+      screeningId: widget.screeningId,
+      serverConfirmedEmpty: serverConfirmedEmpty,
+    )) {
+      await HelperDayDraftStorage.clear(_kRespCvDraftKey, eid, day);
+      return false;
+    }
     _applyDay(RespCvNeuroDay.fromJson(raw));
     return true;
   }
@@ -1221,7 +1255,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       }
 
       final body = model.toJson(
-        submissionStatus: 'draft',
+        submissionStatus: helperDaySaveStatus(_completion.percent),
         savedAt: now,
         savedBy: name,
       );
@@ -1448,6 +1482,7 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
         motherName: widget.motherName,
         babyUid: widget.babyUid,
         site: widget.site,
+        screeningId: widget.screeningId,
       );
 
   AppBar _appBar(AppColors c) {
@@ -1542,7 +1577,13 @@ class _HelperForm2RespCvNeuroState extends State<HelperForm2RespCvNeuro> {
       activeDay: _activeDay,
       todayNicuDay: _todayNicuDay,
       day1Date: _day1Date,
-      dayStatus: _dayStatus,
+      dayStatus: {
+        ..._dayStatus,
+        _activeDay: helperDayDisplayStatus(
+          _isSubmitted ? 'submitted' : (_dayStatus[_activeDay] ?? 'empty'),
+          _completion.percent,
+        ),
+      },
       dischargeDay: _dischargeDay,
       showAddDay: _dischargeDay == null,
       canShowEarlier: _stripStart > 1,

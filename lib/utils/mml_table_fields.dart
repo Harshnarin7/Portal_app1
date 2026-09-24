@@ -85,6 +85,9 @@ const _blockFields = <String, List<MmlTableField>>{
     MmlTableField('transfusion_count', 'No. of Transfusions'),
     MmlTableField('prbc_volume', 'PRBC Volume', unit: 'ml/kg'),
   ],
+  'growth_a': [
+    MmlTableField('weight_g', 'Weight', unit: 'g'),
+  ],
 };
 
 List<MmlTableField> mmlTableFieldsForBlock(String blockKey) {

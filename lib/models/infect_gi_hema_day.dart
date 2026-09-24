@@ -1,4 +1,6 @@
-// Helper Form 3 — Infection / GI / Hematology Daily Log
+// Helper Form 3 (mobile) / Helper 4 (web) — Infection / GI / Hematology.
+// NAMING TRAP: this model is used by helper_form3_infect_gi_hema.dart, which
+// is web sidebar Helper 4. Do not rename without a navigation pass.
 // Mirrors InfectGIHemaLog.jsx + InfectGIHemaDayCreate (fields 1–30).
 
 import 'dart:convert';
@@ -27,10 +29,12 @@ class SepsisScreenEntry {
   factory SepsisScreenEntry.blank() {
     final now = DateTime.now();
     return SepsisScreenEntry(
-      date: '${now.year.toString().padLeft(4, '0')}-'
+      date:
+          '${now.year.toString().padLeft(4, '0')}-'
           '${now.month.toString().padLeft(2, '0')}-'
           '${now.day.toString().padLeft(2, '0')}',
-      time: '${now.hour.toString().padLeft(2, '0')}:'
+      time:
+          '${now.hour.toString().padLeft(2, '0')}:'
           '${now.minute.toString().padLeft(2, '0')}',
       type: 'CRP',
     );
@@ -49,16 +53,15 @@ class SepsisScreenEntry {
       );
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'date': date,
-        'time': time,
-        'type': type,
-        'value': value,
-        'result': result,
-      };
+    'id': id,
+    'date': date,
+    'time': time,
+    'type': type,
+    'value': value,
+    'result': result,
+  };
 
-  bool get hasData =>
-      value.trim().isNotEmpty || result.trim().isNotEmpty;
+  bool get hasData => value.trim().isNotEmpty || result.trim().isNotEmpty;
 }
 
 class InfectGiHemaDay {
@@ -69,6 +72,7 @@ class InfectGiHemaDay {
   bool? sepsisSuspected;
   bool? bloodCultureSent;
   bool? bloodCulturePositive;
+  String? bloodCultureStatus; // "Result Awaited"
   bool? antibiotics;
   bool? lpDone;
   bool? meningitis;
@@ -86,20 +90,25 @@ class InfectGiHemaDay {
   bool? enteralFeedsReceived;
   List<String> feedType = [];
   double? cumulativeFeedVolume;
+  String? cumulativeFeedVolumeStatus; // "Not Recorded / Not Done"
   double? feedVolume;
+  String? feedVolumeStatus; // "Not Recorded / Not Done"
   bool? ivFluids;
   bool? parenteralNutrition;
   bool? probiotic;
   bool? feedIntolerance;
   bool? necSuspected;
-  String? necConfirmedStage; // modified Bell's staging: IA | IB | IIA | IIB | IIIA | IIIB
+  String?
+  necConfirmedStage; // modified Bell's staging: IA | IB | IIA | IIB | IIIA | IIIB
   bool? cholestasis;
 
   // Hema 23–30
   double? hbValue;
+  String? hbValueStatus; // "Result Awaited" | "Not Recorded / Not Done"
   bool? jaundice;
   bool? phototherapy;
   double? peakTsb;
+  String? peakTsbStatus; // "Result Awaited" | "Not Recorded / Not Done"
   bool? exchangeTransfusion;
   bool? prbcTransfusion;
   bool? plateletTransfusion;
@@ -122,6 +131,8 @@ class InfectGiHemaDay {
   static const necStageOptions = ['IA', 'IB', 'IIA', 'IIB', 'IIIA', 'IIIB'];
   static const sepsisScreenTypeOptions = ['CRP', 'PCT', 'Hematological'];
   static const sepsisScreenResultOptions = ['Positive', 'Negative'];
+  static const statusAwaited = 'Result Awaited';
+  static const statusNotDone = 'Not Recorded / Not Done';
 
   static bool? _asBool(dynamic v) {
     if (v == null) return null;
@@ -130,6 +141,12 @@ class InfectGiHemaDay {
     if (s == 'true' || s == 'yes' || s == '1') return true;
     if (s == 'false' || s == 'no' || s == '0') return false;
     return null;
+  }
+
+  static String? _asStatus(dynamic v) {
+    final s = v?.toString().trim();
+    if (s == null || s.isEmpty) return null;
+    return s;
   }
 
   static double? _asDouble(dynamic v) {
@@ -141,7 +158,10 @@ class InfectGiHemaDay {
   static List<String> _splitCsv(dynamic v) {
     if (v == null) return [];
     if (v is List) {
-      return v.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+      return v
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
     }
     return v
         .toString()
@@ -175,6 +195,7 @@ class InfectGiHemaDay {
     d.sepsisSuspected = _asBool(json['sepsis_suspected']);
     d.bloodCultureSent = _asBool(json['blood_culture_sent']);
     d.bloodCulturePositive = _asBool(json['blood_culture_positive']);
+    d.bloodCultureStatus = _asStatus(json['blood_culture_status']);
     d.antibiotics = _asBool(json['antibiotics']);
     d.lpDone = _asBool(json['lp_done']);
     d.meningitis = _asBool(json['meningitis']);
@@ -188,7 +209,11 @@ class InfectGiHemaDay {
     d.enteralFeedsReceived = _asBool(json['enteral_feeds_received']);
     d.feedType = _splitCsv(json['feed_type']);
     d.cumulativeFeedVolume = _asDouble(json['cumulative_feed_volume']);
+    d.cumulativeFeedVolumeStatus = _asStatus(
+      json['cumulative_feed_volume_status'],
+    );
     d.feedVolume = _asDouble(json['feed_volume']);
+    d.feedVolumeStatus = _asStatus(json['feed_volume_status']);
     d.ivFluids = _asBool(json['iv_fluids']);
     d.parenteralNutrition = _asBool(json['parenteral_nutrition']);
     d.probiotic = _asBool(json['probiotic']);
@@ -197,9 +222,11 @@ class InfectGiHemaDay {
     d.necConfirmedStage = json['nec_confirmed_stage']?.toString();
     d.cholestasis = _asBool(json['cholestasis']);
     d.hbValue = _asDouble(json['hb_value']);
+    d.hbValueStatus = _asStatus(json['hb_value_status']);
     d.jaundice = _asBool(json['jaundice']);
     d.phototherapy = _asBool(json['phototherapy']);
     d.peakTsb = _asDouble(json['peak_tsb']);
+    d.peakTsbStatus = _asStatus(json['peak_tsb_status']);
     d.exchangeTransfusion = _asBool(json['exchange_transfusion']);
     d.prbcTransfusion = _asBool(json['prbc_transfusion']);
     d.plateletTransfusion = _asBool(json['platelet_transfusion']);
@@ -214,6 +241,7 @@ class InfectGiHemaDay {
     sepsisSuspected = src.sepsisSuspected;
     bloodCultureSent = src.bloodCultureSent;
     bloodCulturePositive = src.bloodCulturePositive;
+    bloodCultureStatus = src.bloodCultureStatus;
     antibiotics = src.antibiotics;
     lpDone = src.lpDone;
     meningitis = src.meningitis;
@@ -229,7 +257,9 @@ class InfectGiHemaDay {
     enteralFeedsReceived = src.enteralFeedsReceived;
     feedType = List.of(src.feedType);
     cumulativeFeedVolume = src.cumulativeFeedVolume;
+    cumulativeFeedVolumeStatus = src.cumulativeFeedVolumeStatus;
     feedVolume = src.feedVolume;
+    feedVolumeStatus = src.feedVolumeStatus;
     ivFluids = src.ivFluids;
     parenteralNutrition = src.parenteralNutrition;
     probiotic = src.probiotic;
@@ -238,9 +268,11 @@ class InfectGiHemaDay {
     necConfirmedStage = src.necConfirmedStage;
     cholestasis = src.cholestasis;
     hbValue = src.hbValue;
+    hbValueStatus = src.hbValueStatus;
     jaundice = src.jaundice;
     phototherapy = src.phototherapy;
     peakTsb = src.peakTsb;
+    peakTsbStatus = src.peakTsbStatus;
     exchangeTransfusion = src.exchangeTransfusion;
     prbcTransfusion = src.prbcTransfusion;
     plateletTransfusion = src.plateletTransfusion;
@@ -258,22 +290,34 @@ class InfectGiHemaDay {
       'sepsis_suspected': sepsisSuspected,
       'blood_culture_sent': bloodCultureSent,
       'blood_culture_positive': bloodCulturePositive,
+      'blood_culture_status': (bloodCultureStatus?.trim().isEmpty ?? true)
+          ? null
+          : bloodCultureStatus,
       'antibiotics': antibiotics,
       'lp_done': lpDone,
       'meningitis': meningitis,
-      'meningitis_type':
-          (meningitisType?.trim().isEmpty ?? true) ? null : meningitisType,
+      'meningitis_type': (meningitisType?.trim().isEmpty ?? true)
+          ? null
+          : meningitisType,
       'clabsi': clabsi,
       'vap': vap,
       'sepsis_screen_sent': sepsisScreenSent,
-      'sepsis_screens_json':
-          jsonEncode(sepsisScreens.map((e) => e.toJson()).toList()),
+      'sepsis_screens_json': jsonEncode(
+        sepsisScreens.map((e) => e.toJson()).toList(),
+      ),
       'npo': npo,
       'men': men,
       'enteral_feeds_received': enteralFeedsReceived,
       'feed_type': feedType.isEmpty ? null : feedType.join(','),
       'cumulative_feed_volume': cumulativeFeedVolume,
+      'cumulative_feed_volume_status':
+          (cumulativeFeedVolumeStatus?.trim().isEmpty ?? true)
+          ? null
+          : cumulativeFeedVolumeStatus,
       'feed_volume': feedVolume,
+      'feed_volume_status': (feedVolumeStatus?.trim().isEmpty ?? true)
+          ? null
+          : feedVolumeStatus,
       'iv_fluids': ivFluids,
       'parenteral_nutrition': parenteralNutrition,
       'probiotic': probiotic,
@@ -284,9 +328,15 @@ class InfectGiHemaDay {
           : necConfirmedStage,
       'cholestasis': cholestasis,
       'hb_value': hbValue,
+      'hb_value_status': (hbValueStatus?.trim().isEmpty ?? true)
+          ? null
+          : hbValueStatus,
       'jaundice': jaundice,
       'phototherapy': phototherapy,
       'peak_tsb': peakTsb,
+      'peak_tsb_status': (peakTsbStatus?.trim().isEmpty ?? true)
+          ? null
+          : peakTsbStatus,
       'exchange_transfusion': exchangeTransfusion,
       'prbc_transfusion': prbcTransfusion,
       'platelet_transfusion': plateletTransfusion,
@@ -325,7 +375,9 @@ class InfectGiHemaCompletion {
     ];
     if (d.sepsisSuspected == true) {
       keys.add(d.bloodCultureSent);
-      if (d.bloodCultureSent == true) keys.add(d.bloodCulturePositive);
+      if (d.bloodCultureSent == true) {
+        keys.add(d.bloodCulturePositive ?? d.bloodCultureStatus);
+      }
     }
     keys.add(d.sepsisScreenSent);
     if (d.sepsisScreenSent == true) {
@@ -346,17 +398,17 @@ class InfectGiHemaCompletion {
       keys.addAll([
         d.men,
         d.enteralFeedsReceived,
-        d.cumulativeFeedVolume,
-        d.feedVolume,
+        d.cumulativeFeedVolume ?? d.cumulativeFeedVolumeStatus,
+        d.feedVolume ?? d.feedVolumeStatus,
       ]);
       if (d.enteralFeedsReceived == true) keys.add(d.feedType);
     }
     if (d.necSuspected == true) keys.add(d.necConfirmedStage);
 
     keys.addAll([
-      d.hbValue,
+      d.hbValue ?? d.hbValueStatus,
       d.jaundice,
-      d.peakTsb,
+      d.peakTsb ?? d.peakTsbStatus,
       d.exchangeTransfusion,
       d.prbcTransfusion,
       d.plateletTransfusion,

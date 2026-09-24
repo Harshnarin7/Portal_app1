@@ -1,9 +1,8 @@
 // lib/models/birth_resuscitation.dart
 //
-// Single shared model for the mobile Form B (screens: FormBBirthResuscitation)
-// and Form C (screen: FormCResuscitationDetails) — these are UI-split halves
-// of ONE backend record: the `birth_resuscitation` table / BirthResuscitation
-// SQLAlchemy model in the web backend.
+// Single shared model for the mobile Form B (screens: FormBBirthResuscitation
+// and FormCResuscitationDetails). NAMING TRAP: form_c_resuscitation.dart is
+// Form B2, not web Form C (Maternal Details).
 //
 // Field names below are IDENTICAL to backend/models.py `BirthResuscitation`
 // and backend/schemas.py `BirthResuscitationCreate` — do not rename these,
@@ -16,76 +15,85 @@ import '../data/form_b_indications.dart';
 
 class BirthResuscitationData {
   // ── Keys ──────────────────────────────────────────────────────────────
-  String? screeningId;             // screening_id
-  String? enrollmentId;            // enrollment_id  (B3: 26.)
+  String? screeningId; // screening_id
+  String? enrollmentId; // enrollment_id  (B3: 26.)
+
+  // ── B1 · Identification (PII — same keys as web buildPayloadFrom) ──
+  String? motherNameFirst; // mother_name_first
+  String? motherNameSurname; // mother_name_surname
+  String? maternalUid; // maternal_uid
+  String? contactMother; // contact_mother
+  String? contactHusband; // contact_husband
 
   // ── B1 · Identification ──────────────────────────────────────────────
-  String? babyUid;                 // baby_uid            (B1: 4.)
-  String? babyAdmissionNo;         // baby_admission_no    (B1: 6.)
-  String? babyAnnualNo;            // baby_annual_no       (B1: 7.)
+  String? babyUid; // baby_uid            (B1: 4.)
+  String? babyAdmissionNo; // baby_admission_no    (B1: 6.)
+  String? babyAnnualNo; // baby_annual_no       (B1: 7.)
 
   // ── B2 · Birth Details ───────────────────────────────────────────────
-  DateTime? dateOfBirth;           // date_of_birth        (B2: 8.)
-  String? timeOfBirth;             // time_of_birth  "HH:mm" (B2: 9.)
-  String? gender;                  // gender               (B2: 10.)
-  int? gestationWeeks;             // gestation_weeks       (B2: 11. — from screening)
-  int? gestationDays;              // gestation_days
-  int? gestationRandWeeks;         // gestation_rand_weeks  (B2: 12.)
-  int? gestationRandDays;          // gestation_rand_days
-  double? birthWeight;             // birth_weight          (B2: 13.)
-  String? intrauterineCentile;     // intrauterine_centile  (B2: 14.)
-  String? deliveryMode;            // delivery_mode         (B2: 15.)
-  String? vaginalDeliveryType;     // vaginal_delivery_type (B2: 16.)
-  String? lscsType;                // lscs_type             (B2: 17.)
-  List<String> indicationForDelivery = []; // indication_for_delivery (B2: 18. multi-select, comma-joined on save)
-  String? indicationEdfDetail;     // indication_edf_detail
-  String? fetalIndicationDetail;   // fetal_indication_detail
+  DateTime? dateOfBirth; // date_of_birth        (B2: 8.)
+  String? timeOfBirth; // time_of_birth  "HH:mm" (B2: 9.)
+  String? gender; // gender               (B2: 10.)
+  int? gestationWeeks; // gestation_weeks       (B2: 11. — from screening)
+  int? gestationDays; // gestation_days
+  int? gestationRandWeeks; // gestation_rand_weeks  (B2: 12.)
+  int? gestationRandDays; // gestation_rand_days
+  double? birthWeight; // birth_weight          (B2: 13.)
+  String? intrauterineCentile; // intrauterine_centile  (B2: 14.)
+  String? deliveryMode; // delivery_mode         (B2: 15.)
+  String? vaginalDeliveryType; // vaginal_delivery_type (B2: 16.)
+  String? lscsType; // lscs_type             (B2: 17.)
+  List<String> indicationForDelivery =
+      []; // indication_for_delivery (B2: 18. multi-select, comma-joined on save)
+  String? indicationEdfDetail; // indication_edf_detail
+  String? fetalIndicationDetail; // fetal_indication_detail
   String? obstetricIndicationDetail; // obstetric_indication_detail
   String? indicationForDeliveryOther; // indication_for_delivery_other
 
   // ── B3 · Condition at Birth & Randomization ─────────────────────────
-  bool? poorRespEfforts;           // poor_resp_efforts     (B3: 19.)
-  bool? poorMuscleTone;            // poor_muscle_tone      (B3: 20.)
-  bool? hrAbove100;                // hr_above_100          (B3: 21.)
-  bool? initialSteps;              // initial_steps         (B3: 22.)
-  bool? requiredResuscitation;     // required_resuscitation(B3: 23.)
-  bool? randomised;                // randomised            (B3: 24.)
-  String? randomisationDate;       // randomisation_date    (B3: 25.)
-  String? strata;                  // strata                (B3: 27.)
-  String? blenderLetter;           // blender_letter (device identifier, from Blender Code selector)
-  String? enrollmentReasonNotRandomized;       // (B3: 28.)
+  bool? poorRespEfforts; // poor_resp_efforts     (B3: 19.)
+  bool? poorMuscleTone; // poor_muscle_tone      (B3: 20.)
+  bool? hrAbove100; // hr_above_100          (B3: 21.)
+  bool? initialSteps; // initial_steps         (B3: 22.)
+  bool? requiredResuscitation; // required_resuscitation(B3: 23.)
+  bool? randomised; // randomised            (B3: 24.)
+  String? randomisationDate; // randomisation_date    (B3: 25.)
+  String? strata; // strata                (B3: 27.)
+  String?
+  blenderLetter; // blender_letter (device identifier, from Blender Code selector)
+  String? enrollmentReasonNotRandomized; // (B3: 28.)
   String? enrollmentReasonNotRandomizedOther;
 
   // ── B4 · Resuscitation Interventions ─────────────────────────────────
-  bool? ppvRequired;               // ppv_required          (29.)
-  String? devicePpv;               // device_ppv    "T-piece" | "Self-inflating bag" | "Both"
-  String? sibPeepWith;             // sib_peep_with (29a.)
-  double? sibPeepCmh2o;            // sib_peep_cmh2o
-  double? tpiecePip;               // tpiece_pip    (29b.)
-  double? tpiecePeep;              // tpiece_peep
-  double? tpieceFlow;              // tpiece_flow
-  String? interfaceUsed;           // interface_used        (30.)
-  int? ppvDuration;                // ppv_duration  seconds (31.)
-  bool? intubation;                // intubation             (32.)
-  bool? chestCompression;          // chest_compression      (33.)
-  int? ccDuration;                 // cc_duration   seconds (34.)
-  bool? adrenaline;                // adrenaline              (35.)
-  String? adrenalineDilution;      // adrenaline_dilution    (36.)
-  List<String> adrenalineRoute = [];   // adrenaline_route  (37., multi-select)
-  int? medDoses;                   // med_doses              (39.)
-  double? adrenalineCumulative;    // adrenaline_cumulative  (40.)
-  bool? fluidBolus;                // fluid_bolus             (41.)
-  int? fluidBolusDoses;            // fluid_bolus_doses      (42.)
-  double? fluidBolusCumulative;    // fluid_bolus_cumulative (43.)
-  bool? placentalTransfusion;      // placental_transfusion   (44.)
-  String? transfusionMethod;       // transfusion_method      (45.)
-  String? cordClampTimestamp;      // cord_clamp_timestamp "HH:mm:ss" (46.)
-  int? cordClampTime;              // cord_clamp_time seconds (47.)
-  int? timeToRespiration;          // time_to_respiration seconds (48.)
-  int? respirationDays;            // respiration_days
-  int? respirationHours;           // respiration_hours
-  int? spo25min;                   // spo2_5min               (49.)
-  int? timeToSpo280;               // time_to_spo2_80          (50.)
+  bool? ppvRequired; // ppv_required          (29.)
+  String? devicePpv; // device_ppv    "T-piece" | "Self-inflating bag" | "Both"
+  String? sibPeepWith; // sib_peep_with (29a.)
+  double? sibPeepCmh2o; // sib_peep_cmh2o
+  double? tpiecePip; // tpiece_pip    (29b.)
+  double? tpiecePeep; // tpiece_peep
+  double? tpieceFlow; // tpiece_flow
+  String? interfaceUsed; // interface_used        (30.)
+  int? ppvDuration; // ppv_duration  seconds (31.)
+  bool? intubation; // intubation             (32.)
+  bool? chestCompression; // chest_compression      (33.)
+  int? ccDuration; // cc_duration   seconds (34.)
+  bool? adrenaline; // adrenaline              (35.)
+  String? adrenalineDilution; // adrenaline_dilution    (36.)
+  List<String> adrenalineRoute = []; // adrenaline_route  (37., multi-select)
+  int? medDoses; // med_doses              (39.)
+  double? adrenalineCumulative; // adrenaline_cumulative  (40.)
+  bool? fluidBolus; // fluid_bolus             (41.)
+  int? fluidBolusDoses; // fluid_bolus_doses      (42.)
+  double? fluidBolusCumulative; // fluid_bolus_cumulative (43.)
+  bool? placentalTransfusion; // placental_transfusion   (44.)
+  String? transfusionMethod; // transfusion_method      (45.)
+  String? cordClampTimestamp; // cord_clamp_timestamp "HH:mm:ss" (46.)
+  int? cordClampTime; // cord_clamp_time seconds (47.)
+  int? timeToRespiration; // time_to_respiration seconds (48.)
+  int? respirationDays; // respiration_days
+  int? respirationHours; // respiration_hours
+  int? spo25min; // spo2_5min               (49.)
+  int? timeToSpo280; // time_to_spo2_80          (50.)
 
   // ── B5 · Minute-wise Intervention Summary ────────────────────────────
   // Keys match web exactly: oxygen(51.) ventilation(52.) chest_compression(53.)
@@ -100,18 +108,18 @@ class BirthResuscitationData {
   };
 
   // ── B6 · Cord Blood & Resuscitation Exit ─────────────────────────────
-  bool? resusFailure;              // resus_failure           (60. — toggle text)
-  bool? cordBloodDone;             // cord_blood_done         (56.)
-  bool? cordBloodWithin1hr;        // cord_blood_within_1hr   (57.)
-  String? cordBloodSource;         // cord_blood_source       (58.)
-  double? cordPh;                  // cord_ph                 (59.)
-  double? cordSbe;                 // cord_sbe                (59.)
-  double? cordPco2;                // cord_pco2                (59.)
-  double? spo2ExitTrialGas;     // spo2_exit_trial_gas
-  String? totalResusTime;       // total_resus_time — MM:SS from APGAR timer
-  String? reasonExitTrialGas;   // reason_exit_trial_gas
+  bool? resusFailure; // resus_failure           (60. — toggle text)
+  bool? cordBloodDone; // cord_blood_done         (56.)
+  bool? cordBloodWithin1hr; // cord_blood_within_1hr   (57.)
+  String? cordBloodSource; // cord_blood_source       (58.)
+  double? cordPh; // cord_ph                 (59.)
+  double? cordSbe; // cord_sbe                (59.)
+  double? cordPco2; // cord_pco2                (59.)
+  double? spo2ExitTrialGas; // spo2_exit_trial_gas
+  String? totalResusTime; // total_resus_time — MM:SS from APGAR timer
+  String? reasonExitTrialGas; // reason_exit_trial_gas
   String? reasonExitTrialGasOther; // reason_exit_trial_gas_other
-  bool? blenderStopped;            // blender_stopped          (59.)
+  bool? blenderStopped; // blender_stopped          (59.)
   List<String> blenderInterruptReasons = []; // blender_interrupt_reasons (60.)
   String? blenderStoppedDescription; // blender_stopped_description
 
@@ -120,6 +128,33 @@ class BirthResuscitationData {
   bool? explicitlySaved;
 
   BirthResuscitationData();
+
+  /// Copy Form A PII onto this row. Empty inputs are ignored so a later
+  /// B2 save cannot wipe values the web (or B1) already stored.
+  void applyPii({
+    String? motherFirst,
+    String? motherSurname,
+    String? maternalUid,
+    String? contactMother,
+    String? contactHusband,
+    String? concatenatedMotherName,
+  }) {
+    var first = motherFirst?.trim() ?? '';
+    var surname = motherSurname?.trim() ?? '';
+    if (first.isEmpty && (concatenatedMotherName ?? '').trim().isNotEmpty) {
+      final parts = splitPersonName(concatenatedMotherName!);
+      first = parts.$1;
+      if (surname.isEmpty) surname = parts.$2;
+    }
+    if (first.isNotEmpty) motherNameFirst = first;
+    if (surname.isNotEmpty) motherNameSurname = surname;
+    final uid = maternalUid?.trim();
+    if (uid != null && uid.isNotEmpty) this.maternalUid = uid;
+    final cm = contactMother?.trim();
+    if (cm != null && cm.isNotEmpty) this.contactMother = cm;
+    final ch = contactHusband?.trim();
+    if (ch != null && ch.isNotEmpty) this.contactHusband = ch;
+  }
 
   /// True when this row already has B4–B6 answers. Used so a B1-only Save
   /// that sets [explicitlySaved] does not freeze an unfilled Form B2.
@@ -184,10 +219,10 @@ class BirthResuscitationData {
       'ppv_required': ppvRequired,
       'device_ppv': devicePpv,
       'sib_peep_with': sibPeepWith,
-      'sib_peep_cmh2o': sibPeepCmh2o,
-      'tpiece_pip': tpiecePip,
-      'tpiece_peep': tpiecePeep,
-      'tpiece_flow': tpieceFlow,
+      'sib_peep_cmh2o': jsonIntIfWhole(sibPeepCmh2o),
+      'tpiece_pip': jsonIntIfWhole(tpiecePip),
+      'tpiece_peep': jsonIntIfWhole(tpiecePeep),
+      'tpiece_flow': jsonIntIfWhole(tpieceFlow),
       'interface_used': interfaceUsed,
       'ppv_duration': ppvDuration,
       'intubation': intubation,
@@ -195,7 +230,9 @@ class BirthResuscitationData {
       'cc_duration': ccDuration,
       'adrenaline': adrenaline,
       'adrenaline_dilution': adrenalineDilution,
-      'adrenaline_route': adrenalineRoute.isEmpty ? null : adrenalineRoute.join(", "),
+      'adrenaline_route': adrenalineRoute.isEmpty
+          ? null
+          : adrenalineRoute.join(", "),
       'med_doses': medDoses,
       'adrenaline_cumulative': adrenalineCumulative,
       'fluid_bolus': fluidBolus,
@@ -223,19 +260,28 @@ class BirthResuscitationData {
       // Web folds "Other" free-text into reason_exit_trial_gas itself.
       'reason_exit_trial_gas': reasonExitTrialGas == 'Other'
           ? (reasonExitTrialGasOther?.trim().isNotEmpty == true
-              ? reasonExitTrialGasOther
-              : 'Other')
+                ? reasonExitTrialGasOther
+                : 'Other')
           : reasonExitTrialGas,
       'blender_stopped': blenderStopped,
-      // Only send when this screen answered Q59 (Form C). Form B leaves
-      // blenderStopped null so omitNulls won't wipe Form C's reasons.
-      'blender_interrupt_reasons': blenderStopped == null
-          ? null
-          : blenderInterruptReasons.join(', '),
-      'blender_stopped_description': blenderStopped == false
-          ? ''
-          : blenderStoppedDescription,
+      // Match web: only send reasons when Q59 = Yes. Empty/null omitted so a
+      // B1 save (blenderStopped null) cannot wipe B2 / web values.
+      'blender_interrupt_reasons': blenderStopped == true
+          ? blenderInterruptReasons.join(', ')
+          : null,
+      'blender_stopped_description':
+          blenderStopped == true &&
+              blenderInterruptReasons.contains(kBlenderAbruptReason)
+          ? blenderStoppedDescription
+          : null,
     };
+    // PII: send only non-empty strings. Never send "" / null — backend POST
+    // skip-None would keep web values, but empty string would wipe them.
+    _putNonEmpty(map, 'mother_name_first', motherNameFirst);
+    _putNonEmpty(map, 'mother_name_surname', motherNameSurname);
+    _putNonEmpty(map, 'maternal_uid', maternalUid);
+    _putNonEmpty(map, 'contact_mother', contactMother);
+    _putNonEmpty(map, 'contact_husband', contactHusband);
     // Match web: only send the key on a real Save. Omitting it on drafts
     // leaves a previously saved true value untouched (exclude_unset).
     if (explicitlySaved == true) {
@@ -254,11 +300,7 @@ class BirthResuscitationData {
     final apgar = Map<String, String>.from(interventions['apgar'] ?? {})
       ..removeWhere((_, v) => v.trim().isEmpty);
     if (oxygen.isEmpty && cpap.isEmpty && apgar.isEmpty) return null;
-    return {
-      'oxygen': oxygen,
-      'cpap': cpap,
-      'apgar': apgar,
-    };
+    return {'oxygen': oxygen, 'cpap': cpap, 'apgar': apgar};
   }
 
   /// Web IntvCell stores "Yes"/"No"/"NR" (labels show Y/N). Map mobile Y/N.
@@ -278,6 +320,11 @@ class BirthResuscitationData {
     final d = BirthResuscitationData();
     d.screeningId = json['screening_id'];
     d.enrollmentId = json['enrollment_id'];
+    d.motherNameFirst = _nonEmptyString(json['mother_name_first']);
+    d.motherNameSurname = _nonEmptyString(json['mother_name_surname']);
+    d.maternalUid = _nonEmptyString(json['maternal_uid']);
+    d.contactMother = _nonEmptyString(json['contact_mother']);
+    d.contactHusband = _nonEmptyString(json['contact_husband']);
     d.babyUid = json['baby_uid'];
     d.babyAdmissionNo = json['baby_admission_no'];
     d.babyAnnualNo = json['baby_annual_no'];
@@ -330,18 +377,20 @@ class BirthResuscitationData {
     d.adrenalineDilution = json['adrenaline_dilution'];
     d.adrenalineRoute = json['adrenaline_route'] is String
         ? (json['adrenaline_route'] as String)
-            .split(',')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty)
-            .toList()
+              .split(',')
+              .map((s) => s.trim())
+              .where((s) => s.isNotEmpty)
+              .toList()
         : (json['adrenaline_route'] is List
-            ? List<String>.from(json['adrenaline_route'])
-            : <String>[]);
+              ? List<String>.from(json['adrenaline_route'])
+              : <String>[]);
     d.medDoses = json['med_doses'];
-    d.adrenalineCumulative = (json['adrenaline_cumulative'] as num?)?.toDouble();
+    d.adrenalineCumulative = (json['adrenaline_cumulative'] as num?)
+        ?.toDouble();
     d.fluidBolus = json['fluid_bolus'];
     d.fluidBolusDoses = json['fluid_bolus_doses'];
-    d.fluidBolusCumulative = (json['fluid_bolus_cumulative'] as num?)?.toDouble();
+    d.fluidBolusCumulative = (json['fluid_bolus_cumulative'] as num?)
+        ?.toDouble();
     d.placentalTransfusion = json['placental_transfusion'];
     d.transfusionMethod = json['transfusion_method'];
     d.cordClampTimestamp = json['cord_clamp_timestamp'];
@@ -356,15 +405,18 @@ class BirthResuscitationData {
       d.interventions = {
         'oxygen': Map<String, String>.from(
           ((raw['oxygen'] as Map?) ?? {}).map(
-              (mk, mv) => MapEntry(mk.toString(), mv.toString())),
+            (mk, mv) => MapEntry(mk.toString(), mv.toString()),
+          ),
         ),
         'cpap': Map<String, String>.from(
           ((raw['cpap'] as Map?) ?? {}).map(
-              (mk, mv) => MapEntry(mk.toString(), mv.toString())),
+            (mk, mv) => MapEntry(mk.toString(), mv.toString()),
+          ),
         ),
         'apgar': Map<String, String>.from(
           ((raw['apgar'] as Map?) ?? {}).map(
-              (mk, mv) => MapEntry(mk.toString(), mv.toString())),
+            (mk, mv) => MapEntry(mk.toString(), mv.toString()),
+          ),
         ),
       };
     }
@@ -385,7 +437,10 @@ class BirthResuscitationData {
     );
     if (d.blenderInterruptReasons.isEmpty &&
         d.blenderStopped == true &&
-        (json['blender_stopped_description'] ?? '').toString().trim().isNotEmpty) {
+        (json['blender_stopped_description'] ?? '')
+            .toString()
+            .trim()
+            .isNotEmpty) {
       d.blenderInterruptReasons = [kBlenderAbruptReason];
     }
     d.blenderStoppedDescription = json['blender_stopped_description'];
@@ -411,24 +466,90 @@ String? normalizeTotalResusTimeMmSs(dynamic value) {
   return '${mm.toString().padLeft(2, '0')}:${ss.toString().padLeft(2, '0')}';
 }
 
+/// Field 47 / web `secondsToDuration` — integer seconds → "MM:SS".
+String secondsToMmSs(int total) {
+  final t = total < 0 ? 0 : total;
+  return '${(t ~/ 60).toString().padLeft(2, '0')}:${(t % 60).toString().padLeft(2, '0')}';
+}
+
+/// Field 47 save — web `durationToSeconds` on an MM:SS string.
+int? mmSsToSeconds(String raw) {
+  final s = normalizeTotalResusTimeMmSs(raw);
+  if (s == null) return null;
+  final m = RegExp(r'^(\d{1,3}):([0-5]\d)$').firstMatch(s);
+  if (m == null) return null;
+  return (int.tryParse(m.group(1)!) ?? 0) * 60 +
+      (int.tryParse(m.group(2)!) ?? 0);
+}
+
+/// CRF Q60 — current option text (web BirthResuscitationForm.jsx 2026-09).
 const kBlenderInterruptReasons = [
-  "Blender stopped abruptly",
-  "Surfactant decision",
-  "Intubation",
-  "FiO₂ – 21 or 100%",
-  "Early transfer",
+  "Blender stopped working abruptly",
+  "To decide need for Surfactant",
+  "To decide need for Intubation",
+  "For transfer to NICU (have to switch to routine blender)",
+  "Reached 21% or 100% FiO2",
 ];
-const kBlenderAbruptReason = "Blender stopped abruptly";
+const kBlenderAbruptReason = "Blender stopped working abruptly";
+
+/// Old option text rewritten on load so stored rows still check the right box.
+const kBlenderInterruptReasonLegacyAliases = {
+  "Blender stopped abruptly": "Blender stopped working abruptly",
+  "Surfactant decision": "To decide need for Surfactant",
+  "Intubation": "To decide need for Intubation",
+  "Early transfer": "For transfer to NICU (have to switch to routine blender)",
+  "FiO₂ – 21 or 100%": "Reached 21% or 100% FiO2",
+  "FiO2 – 21 or 100%": "Reached 21% or 100% FiO2",
+};
+
+String canonicalizeBlenderInterruptReason(String raw) {
+  final t = raw.trim();
+  if (t.isEmpty) return t;
+  return kBlenderInterruptReasonLegacyAliases[t] ?? t;
+}
 
 List<String> parseBlenderInterruptReasons(dynamic raw) {
-  if (raw == null) return [];
-  if (raw is List) {
-    return raw
+  List<String> parts;
+  if (raw == null) {
+    parts = [];
+  } else if (raw is List) {
+    parts = raw
         .map((e) => e.toString().trim())
         .where((s) => s.isNotEmpty)
         .toList();
+  } else {
+    final s = raw.toString().trim();
+    parts = s.isEmpty
+        ? <String>[]
+        : s.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
   }
-  final s = raw.toString().trim();
-  if (s.isEmpty) return [];
-  return s.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+  return parts.map(canonicalizeBlenderInterruptReason).toList();
+}
+
+/// Web SIB/T-piece inputs are 0–3 digit integers. Send JSON ints when whole
+/// so a round-trip does not become `20.0`.
+dynamic jsonIntIfWhole(double? v) {
+  if (v == null) return null;
+  if (v == v.roundToDouble()) return v.round();
+  return v;
+}
+
+void _putNonEmpty(Map<String, dynamic> map, String key, String? value) {
+  final t = value?.trim();
+  if (t != null && t.isNotEmpty) map[key] = t;
+}
+
+String? _nonEmptyString(dynamic v) {
+  if (v == null) return null;
+  final t = v.toString().trim();
+  return t.isEmpty ? null : t;
+}
+
+/// Split a concatenated mother name into first + surname (web has two keys).
+(String first, String surname) splitPersonName(String full) {
+  final t = full.trim();
+  if (t.isEmpty) return ('', '');
+  final i = t.indexOf(RegExp(r'\s+'));
+  if (i < 0) return (t, '');
+  return (t.substring(0, i), t.substring(i + 1).trim());
 }

@@ -1,7 +1,11 @@
 // Daily Monitoring Sheet (DMS) — Minimal Monitoring Log
+// NAMING TRAP: this file is Helper Form 5 on mobile, but it is web sidebar
+// Helper 1 (Daily Monitoring Sheet). Do not rename without a navigation pass.
 // Parity with web MinimalMonitoringLog.jsx:
 //   multi-entry blocks + entries_json dual-write
 //   Sheet date dropdown (8:00 cutoff) + GET/PUT .../on/{date}
+//   5.7.A Weight (`growth_a[].weight_g` grams + `weight_frequency_hours`)
+//   feeds web Helper 4 / mobile Helper 3 ml/kg/d via latest-weight-kg.
 
 import 'dart:async';
 
@@ -19,6 +23,7 @@ import '../services/helper_day_draft_storage.dart';
 import '../services/token_storage.dart';
 import '../theme/app_theme.dart';
 import '../navigation/helper_forms_navigation.dart';
+import '../utils/form_b_local_guard.dart';
 import '../widgets/helper_patient_header.dart';
 import '../widgets/theme_toggle_widget.dart';
 
@@ -27,6 +32,7 @@ class HelperForm5MinimalMonitoring extends StatefulWidget {
   final String gestation;
   final String motherName;
   final String babyUid;
+  final String screeningId;
 
   const HelperForm5MinimalMonitoring({
     super.key,
@@ -34,6 +40,7 @@ class HelperForm5MinimalMonitoring extends StatefulWidget {
     required this.gestation,
     required this.motherName,
     required this.babyUid,
+    this.screeningId = '',
   });
 
   @override
@@ -41,7 +48,8 @@ class HelperForm5MinimalMonitoring extends StatefulWidget {
       _HelperForm5MinimalMonitoringState();
 }
 
-class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitoring> {
+class _HelperForm5MinimalMonitoringState
+    extends State<HelperForm5MinimalMonitoring> {
   static const _kMmDraftKey = 'mm5';
 
   final _api = FormsApiService.instance;
@@ -63,6 +71,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
     '5.4': true,
     '5.5': true,
     '5.6': true,
+    '5.7': true,
   };
 
   static const _vasoactive = [
@@ -256,7 +265,9 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
     for (final block in kMmlBlockKeys) {
       var list = _sheet.entries[block];
       if (list == null || list.isEmpty) {
-        _sheet.entries[block] = List<MmlEntry>.from(templates[block] ?? const []);
+        _sheet.entries[block] = List<MmlEntry>.from(
+          templates[block] ?? const [],
+        );
         list = _sheet.entries[block];
       }
       if (_sheetDate != null) {
@@ -281,8 +292,10 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
         .where((p) => p.isNotEmpty)
         .toList();
     String toHm(String t) {
-      final m = RegExp(r'^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?$', caseSensitive: false)
-          .firstMatch(t);
+      final m = RegExp(
+        r'^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?$',
+        caseSensitive: false,
+      ).firstMatch(t);
       if (m == null) return '';
       var h = int.tryParse(m.group(1)!) ?? 0;
       final min = (int.tryParse(m.group(2)!) ?? 0).clamp(0, 59);
@@ -316,7 +329,9 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
     final seed = isFrom ? parts[0] : parts[1];
     final sp = seed.split(':');
     final initial = TimeOfDay(
-      hour: sp.isNotEmpty ? int.tryParse(sp[0]) ?? TimeOfDay.now().hour : TimeOfDay.now().hour,
+      hour: sp.isNotEmpty
+          ? int.tryParse(sp[0]) ?? TimeOfDay.now().hour
+          : TimeOfDay.now().hour,
       minute: sp.length > 1 ? int.tryParse(sp[1]) ?? 0 : 0,
     );
     final picked = await showTimePicker(context: context, initialTime: initial);
@@ -354,8 +369,13 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
               isDense: true,
               filled: true,
               fillColor: c.surface,
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 10,
+                vertical: 12,
+              ),
               prefixIcon: const Icon(Icons.access_time_rounded, size: 18),
             ),
             child: Text(
@@ -377,7 +397,13 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
         chip('From', parts[0], () => _pickRangeTime(block, i, true)),
         Padding(
           padding: const EdgeInsets.fromLTRB(8, 0, 8, 14),
-          child: Text('to', style: TextStyle(color: c.textSecondary, fontWeight: FontWeight.w700)),
+          child: Text(
+            'to',
+            style: TextStyle(
+              color: c.textSecondary,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
         ),
         chip('To', parts[1], () => _pickRangeTime(block, i, false)),
       ],
@@ -390,15 +416,11 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
     final eid = widget.enrollmentId.trim();
     if (eid.isEmpty) return;
     final date = _sheetDate ?? mmlDefaultSheetDate();
-    await HelperDayDraftStorage.saveBySheetDate(
-      _kMmDraftKey,
-      eid,
-      date,
-      {
-        'record_date': date,
-        'sheet': _sheet.toJson(savedBy: 'local-draft'),
-      },
-    );
+    await HelperDayDraftStorage.saveBySheetDate(_kMmDraftKey, eid, date, {
+      'record_date': date,
+      'screening_id': widget.screeningId.trim(),
+      'sheet': _sheet.toJson(savedBy: 'local-draft'),
+    });
   }
 
   Future<bool> _tryRestoreMmDraft(String sheetDate) async {
@@ -410,6 +432,14 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
       sheetDate,
     );
     if (raw == null) return false;
+    if (!helperLocalDraftIsForScreening(
+      draft: raw,
+      screeningId: widget.screeningId,
+      serverConfirmedEmpty: false,
+    )) {
+      await HelperDayDraftStorage.clearBySheetDate(_kMmDraftKey, eid, sheetDate);
+      return false;
+    }
     final sheetMap = raw['sheet'];
     if (sheetMap is! Map) return false;
     for (final c in _ctrls.values) {
@@ -519,7 +549,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
 
   Future<void> _save() async {
     if (_loadFailed) {
-    setState(() {
+      setState(() {
         _banner = 'Reload the sheet before saving.';
         _bannerError = true;
       });
@@ -556,8 +586,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
         _sheet.toJson(savedBy: by, sheetRecordDate: sheetYmd),
       );
       if (!mounted) return;
-      final savedDate =
-          result['record_date']?.toString() ?? sheetYmd;
+      final savedDate = result['record_date']?.toString() ?? sheetYmd;
       if (result.isNotEmpty) {
         for (final c in _ctrls.values) {
           c.dispose();
@@ -582,7 +611,8 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
       );
       setState(() {
         _sheetDate = savedDate;
-        _banner = 'Sheet saved (${mmlFormatDisplayDateYmd(savedDate)}). This reading stays on the form — use Log another reading to start a new one.';
+        _banner =
+            'Sheet saved (${mmlFormatDisplayDateYmd(savedDate)}). This reading stays on the form — use Log another reading to start a new one.';
         _bannerError = false;
         _dirty = false;
       });
@@ -658,11 +688,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
     );
   }
 
-  Widget _readingsTable(
-    String block,
-    List<MmlEntry> list,
-    int draftIdx,
-  ) {
+  Widget _readingsTable(String block, List<MmlEntry> list, int draftIdx) {
     final c = AppTheme.of(context);
     final cols = mmlTableFieldsForBlock(block);
     final showStampTime = block != 'resp_a';
@@ -707,22 +733,18 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                 rows: tableRows.reversed.map((row) {
                   return DataRow(
                     color: row.isDraft
-                        ? MaterialStateProperty.all(
-                            c.primary.withOpacity(0.06),
-                          )
+                        ? MaterialStateProperty.all(c.primary.withOpacity(0.06))
                         : null,
                     cells: [
-                      DataCell(Text(
-                        row.entry.date.isEmpty ? '—' : row.entry.date,
-                      )),
+                      DataCell(
+                        Text(row.entry.date.isEmpty ? '—' : row.entry.date),
+                      ),
                       if (showStampTime)
-                        DataCell(Text(
-                          row.entry.time.isEmpty ? '—' : row.entry.time,
-                        )),
-                      ...cols.map(
-                        (f) => DataCell(
-                          Text(mmlFormatTableCell(f, row.entry)),
+                        DataCell(
+                          Text(row.entry.time.isEmpty ? '—' : row.entry.time),
                         ),
+                      ...cols.map(
+                        (f) => DataCell(Text(mmlFormatTableCell(f, row.entry))),
                       ),
                       DataCell(
                         row.isDraft
@@ -734,8 +756,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                   color: c.danger,
                                 ),
                                 tooltip: 'Remove reading',
-                                onPressed: () =>
-                                    _removeEntry(block, row.idx),
+                                onPressed: () => _removeEntry(block, row.idx),
                               ),
                       ),
                     ],
@@ -812,7 +833,9 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
-                        draft.hasClinicalData() ? 'Current reading' : 'New reading',
+                        draft.hasClinicalData()
+                            ? 'Current reading'
+                            : 'New reading',
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w700,
@@ -882,8 +905,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                   Align(
                     alignment: Alignment.centerRight,
                     child: TextButton.icon(
-                      onPressed: () =>
-                          _logAnotherReading(block, blankFactory),
+                      onPressed: () => _logAnotherReading(block, blankFactory),
                       icon: const Icon(Icons.add, size: 16),
                       label: const Text('Log another reading'),
                       style: TextButton.styleFrom(
@@ -1003,14 +1025,10 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
     final label = mode == 'CPAP'
         ? 'Max CPAP of the hour'
         : mode == 'MAP'
-            ? 'Max MAP of the hour'
-            : 'Max MAP/CPAP of the hour';
+        ? 'Max MAP of the hour'
+        : 'Max MAP/CPAP of the hour';
     return [
-      _item(
-        3,
-        label,
-        _numField('resp_a', i, 'max_map_cpap', unit: 'cm H₂O'),
-      ),
+      _item(3, label, _numField('resp_a', i, 'max_map_cpap', unit: 'cm H₂O')),
     ];
   }
 
@@ -1037,19 +1055,14 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
         hintText: hint ?? '0',
         isDense: true,
         suffixText: unit,
-      filled: true,
+        filled: true,
         fillColor: c.surface,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
       ),
     );
   }
 
-  Widget _textField(
-    String block,
-    int i,
-    String field, {
-    String? hint,
-  }) {
+  Widget _textField(String block, int i, String field, {String? hint}) {
     final c = AppTheme.of(context);
     return TextField(
       controller: _c(block, i, field),
@@ -1060,6 +1073,41 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
         filled: true,
         fillColor: c.surface,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+    );
+  }
+
+  Widget _weightCadencePills() {
+    final c = AppTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Weigh cadence',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: c.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 6,
+            children: [12, 24].map((h) {
+              final sel = _sheet.weightFrequencyHours == h;
+              return ChoiceChip(
+                label: Text('Every ${h}h'),
+                selected: sel,
+                onSelected: (_) => setState(() {
+                  _sheet.weightFrequencyHours = h;
+                  _markDirty();
+                }),
+              );
+            }).toList(),
+          ),
+        ],
       ),
     );
   }
@@ -1078,8 +1126,8 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
           label: Text(o),
           selected: sel,
           onSelected: (_) => onChanged(sel ? '' : o),
-            );
-          }).toList(),
+        );
+      }).toList(),
     );
   }
 
@@ -1093,20 +1141,20 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
       runSpacing: 6,
       children: options.map((o) {
         final sel = selected.contains(o);
-            return FilterChip(
+        return FilterChip(
           label: Text(o),
-              selected: sel,
-              onSelected: (v) {
+          selected: sel,
+          onSelected: (v) {
             final next = List<String>.from(selected);
-                if (v) {
+            if (v) {
               next.add(o);
-                } else {
+            } else {
               next.remove(o);
-                }
-                onChanged(next);
-              },
-            );
-          }).toList(),
+            }
+            onChanged(next);
+          },
+        );
+      }).toList(),
     );
   }
 
@@ -1153,6 +1201,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
               gestation: widget.gestation,
               motherName: widget.motherName,
               babyUid: widget.babyUid,
+              screeningId: widget.screeningId,
             ),
           ),
           const ThemeToggle(),
@@ -1185,7 +1234,8 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                     builder: (context) {
                       final opts = mmlDropdownDateOptions();
                       if (opts.length > 1) {
-                        final selected = _sheetDate != null &&
+                        final selected =
+                            _sheetDate != null &&
                                 opts.any((o) => o.value == _sheetDate)
                             ? _sheetDate!
                             : opts.last.value;
@@ -1276,8 +1326,12 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                               _item(
                                 1,
                                 'Axillary Temp',
-                                _numField('cv_a', i, 'axillary_temp',
-                                    unit: '°C'),
+                                _numField(
+                                  'cv_a',
+                                  i,
+                                  'axillary_temp',
+                                  unit: '°C',
+                                ),
                               ),
                               _item(
                                 2,
@@ -1292,8 +1346,12 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                               _item(
                                 4,
                                 'MAP',
-                                _numField('cv_a', i, 'map_value',
-                                    unit: 'mm Hg'),
+                                _numField(
+                                  'cv_a',
+                                  i,
+                                  'map_value',
+                                  unit: 'mm Hg',
+                                ),
                               ),
                             ],
                           ),
@@ -1331,7 +1389,11 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                   _vasoactive,
                                   _listOf(e, 'vasoactive_drugs'),
                                   (v) => _setField(
-                                      'cv_c', i, 'vasoactive_drugs', v),
+                                    'cv_c',
+                                    i,
+                                    'vasoactive_drugs',
+                                    v,
+                                  ),
                                 ),
                               ),
                               _item(
@@ -1346,7 +1408,11 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                   _vasoUnits,
                                   e['vasoactive_unit']?.toString(),
                                   (v) => _setField(
-                                      'cv_c', i, 'vasoactive_unit', v ?? ''),
+                                    'cv_c',
+                                    i,
+                                    'vasoactive_unit',
+                                    v ?? '',
+                                  ),
                                 ),
                               ),
                             ],
@@ -1365,15 +1431,13 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                 _pillMulti(
                                   _pda,
                                   _listOf(e, 'pda_agent'),
-                                  (v) =>
-                                      _setField('cv_d', i, 'pda_agent', v),
+                                  (v) => _setField('cv_d', i, 'pda_agent', v),
                                 ),
                               ),
                               _item(
                                 2,
                                 'Dose administered',
-                                _numField('cv_d', i, 'pda_dose',
-                                    unit: 'mg/kg'),
+                                _numField('cv_d', i, 'pda_dose', unit: 'mg/kg'),
                               ),
                             ],
                           ),
@@ -1408,38 +1472,66 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                   _respModes,
                                   _listOf(e, 'respiratory_modes'),
                                   (v) {
-                                    final prevMode = RespCvNeuroValidators
-                                        .mapCpapMode(
-                                            _listOf(e, 'respiratory_modes'));
+                                    final prevMode =
+                                        RespCvNeuroValidators.mapCpapMode(
+                                          _listOf(e, 'respiratory_modes'),
+                                        );
                                     final nextMode =
                                         RespCvNeuroValidators.mapCpapMode(v);
                                     _setField(
-                                        'resp_a', i, 'respiratory_modes', v);
+                                      'resp_a',
+                                      i,
+                                      'respiratory_modes',
+                                      v,
+                                    );
                                     if (prevMode == 'CPAP' &&
                                         nextMode == 'BOTH') {
                                       _setField(
-                                          'resp_a',
-                                          i,
-                                          'max_map_cpap_secondary',
-                                          e['max_map_cpap'] ?? '');
+                                        'resp_a',
+                                        i,
+                                        'max_map_cpap_secondary',
+                                        e['max_map_cpap'] ?? '',
+                                      );
                                       _setField(
-                                          'resp_a', i, 'max_map_cpap', '');
+                                        'resp_a',
+                                        i,
+                                        'max_map_cpap',
+                                        '',
+                                      );
                                     } else if (prevMode == 'BOTH' &&
                                         nextMode == 'CPAP') {
                                       _setField(
-                                          'resp_a',
-                                          i,
-                                          'max_map_cpap',
-                                          e['max_map_cpap_secondary'] ?? '');
-                                      _setField('resp_a', i,
-                                          'max_map_cpap_secondary', '');
-                                    } else if (nextMode == 'NA') {
-                                      _setField('resp_a', i, 'max_map_cpap', '');
+                                        'resp_a',
+                                        i,
+                                        'max_map_cpap',
+                                        e['max_map_cpap_secondary'] ?? '',
+                                      );
                                       _setField(
-                                          'resp_a', i, 'max_map_cpap_secondary', '');
+                                        'resp_a',
+                                        i,
+                                        'max_map_cpap_secondary',
+                                        '',
+                                      );
+                                    } else if (nextMode == 'NA') {
+                                      _setField(
+                                        'resp_a',
+                                        i,
+                                        'max_map_cpap',
+                                        '',
+                                      );
+                                      _setField(
+                                        'resp_a',
+                                        i,
+                                        'max_map_cpap_secondary',
+                                        '',
+                                      );
                                     } else if (nextMode != 'BOTH') {
                                       _setField(
-                                          'resp_a', i, 'max_map_cpap_secondary', '');
+                                        'resp_a',
+                                        i,
+                                        'max_map_cpap_secondary',
+                                        '',
+                                      );
                                     }
                                   },
                                 ),
@@ -1456,8 +1548,11 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                           _entryBlock(
                             code: '5.2.B',
                             block: 'resp_b',
-                            blankFactory: () =>
-                                {'ph': '', 'pao2': '', 'paco2': ''},
+                            blankFactory: () => {
+                              'ph': '',
+                              'pao2': '',
+                              'paco2': '',
+                            },
                             fields: (e, i) => [
                               _item(
                                 1,
@@ -1491,24 +1586,34 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                               _item(
                                 1,
                                 'Apnea Episodes',
-                                _numField('resp_c', i, 'apnea_episodes',
-                                    integer: true),
+                                _numField(
+                                  'resp_c',
+                                  i,
+                                  'apnea_episodes',
+                                  integer: true,
+                                ),
                                 validationHint: kMmlHintEpisodeCount,
                               ),
                               _item(
                                 2,
                                 'Desaturation episodes',
                                 _numField(
-                                    'resp_c', i, 'desaturation_episodes',
-                                    integer: true),
+                                  'resp_c',
+                                  i,
+                                  'desaturation_episodes',
+                                  integer: true,
+                                ),
                                 validationHint: kMmlHintEpisodeCount,
                               ),
                               _item(
                                 3,
                                 'Sev. desaturation episodes',
-                                _numField('resp_c', i,
-                                    'severe_desaturation_episodes',
-                                    integer: true),
+                                _numField(
+                                  'resp_c',
+                                  i,
+                                  'severe_desaturation_episodes',
+                                  integer: true,
+                                ),
                                 validationHint: kMmlHintSevereDesat,
                               ),
                             ],
@@ -1522,8 +1627,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                               'steroid_other': '',
                             },
                             fields: (e, i) {
-                              final steroids =
-                                  _listOf(e, 'postnatal_steroids');
+                              final steroids = _listOf(e, 'postnatal_steroids');
                               return [
                                 _item(
                                   1,
@@ -1532,14 +1636,22 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                     _steroids,
                                     steroids,
                                     (v) => _setField(
-                                        'resp_d', i, 'postnatal_steroids', v),
+                                      'resp_d',
+                                      i,
+                                      'postnatal_steroids',
+                                      v,
+                                    ),
                                   ),
                                 ),
                                 _item(
                                   2,
                                   'Dose administered',
-                                  _numField('resp_d', i, 'steroid_dose',
-                                      unit: 'mg/kg'),
+                                  _numField(
+                                    'resp_d',
+                                    i,
+                                    'steroid_dose',
+                                    unit: 'mg/kg',
+                                  ),
                                 ),
                                 if (steroids.contains('Other'))
                                   _item(
@@ -1571,8 +1683,7 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                               _item(
                                 1,
                                 'Glucose',
-                                _numField('met_a', i, 'glucose',
-                                    unit: 'mg/dL'),
+                                _numField('met_a', i, 'glucose', unit: 'mg/dL'),
                               ),
                             ],
                           ),
@@ -1593,14 +1704,22 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                               _item(
                                 2,
                                 'Total Ca',
-                                _numField('met_b', i, 'total_calcium',
-                                    unit: 'mg/dL'),
+                                _numField(
+                                  'met_b',
+                                  i,
+                                  'total_calcium',
+                                  unit: 'mg/dL',
+                                ),
                               ),
                               _item(
                                 3,
                                 'Phosphorus P',
-                                _numField('met_b', i, 'phosphorus',
-                                    unit: 'mg/dL'),
+                                _numField(
+                                  'met_b',
+                                  i,
+                                  'phosphorus',
+                                  unit: 'mg/dL',
+                                ),
                               ),
                             ],
                           ),
@@ -1616,8 +1735,8 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                             },
                             fields: (e, i) {
                               final abn = e['electrolyte_abnormality'];
-                              final status =
-                                  e['symptomatic_status']?.toString();
+                              final status = e['symptomatic_status']
+                                  ?.toString();
                               return [
                                 _item(
                                   1,
@@ -1628,8 +1747,12 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                     children: [
                                       _yn(
                                         abn is bool ? abn : null,
-                                        (v) => _setField('met_c', i,
-                                            'electrolyte_abnormality', v),
+                                        (v) => _setField(
+                                          'met_c',
+                                          i,
+                                          'electrolyte_abnormality',
+                                          v,
+                                        ),
                                       ),
                                       if (abn == true) ...[
                                         const SizedBox(height: 8),
@@ -1637,7 +1760,11 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                           _electrolytes,
                                           _listOf(e, 'electrolytes'),
                                           (v) => _setField(
-                                              'met_c', i, 'electrolytes', v),
+                                            'met_c',
+                                            i,
+                                            'electrolytes',
+                                            v,
+                                          ),
                                         ),
                                       ],
                                     ],
@@ -1650,7 +1777,11 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                     const ['Hypo', 'Hyper'],
                                     e['hypo_hyper']?.toString(),
                                     (v) => _setField(
-                                        'met_c', i, 'hypo_hyper', v ?? ''),
+                                      'met_c',
+                                      i,
+                                      'hypo_hyper',
+                                      v ?? '',
+                                    ),
                                   ),
                                 ),
                                 _item(
@@ -1659,8 +1790,12 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                   _pillSingle(
                                     const ['symptomatic', 'asymptomatic'],
                                     status,
-                                    (v) => _setField('met_c', i,
-                                        'symptomatic_status', v ?? ''),
+                                    (v) => _setField(
+                                      'met_c',
+                                      i,
+                                      'symptomatic_status',
+                                      v ?? '',
+                                    ),
                                   ),
                                 ),
                                 if (status == 'symptomatic')
@@ -1668,7 +1803,10 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                     4,
                                     'If symptomatic',
                                     _textField(
-                                        'met_c', i, 'symptomatic_detail'),
+                                      'met_c',
+                                      i,
+                                      'symptomatic_detail',
+                                    ),
                                     validationHint: kMmlHintSymptomaticDetail,
                                   ),
                               ];
@@ -1684,16 +1822,17 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                           _entryBlock(
                             code: '5.4.A',
                             block: 'gi_a',
-                            blankFactory: () => {
-                              'cumulative_feed_volume': '',
-                            },
+                            blankFactory: () => {'cumulative_feed_volume': ''},
                             fields: (e, i) => [
                               _item(
                                 1,
                                 'Cumulative feed volume',
                                 _numField(
-                                    'gi_a', i, 'cumulative_feed_volume',
-                                    unit: 'ml'),
+                                  'gi_a',
+                                  i,
+                                  'cumulative_feed_volume',
+                                  unit: 'ml',
+                                ),
                               ),
                             ],
                           ),
@@ -1705,8 +1844,12 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                               _item(
                                 1,
                                 'Direct Bilirubin',
-                                _numField('gi_b', i, 'direct_bilirubin',
-                                    unit: 'mg/dL'),
+                                _numField(
+                                  'gi_b',
+                                  i,
+                                  'direct_bilirubin',
+                                  unit: 'mg/dL',
+                                ),
                               ),
                             ],
                           ),
@@ -1732,8 +1875,12 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                 _pillSingle(
                                   _ventSev,
                                   e['ventriculomegaly_severity']?.toString(),
-                                  (v) => _setField('neuro_a', i,
-                                      'ventriculomegaly_severity', v ?? ''),
+                                  (v) => _setField(
+                                    'neuro_a',
+                                    i,
+                                    'ventriculomegaly_severity',
+                                    v ?? '',
+                                  ),
                                 ),
                               ),
                               _item(
@@ -1751,8 +1898,11 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                           _entryBlock(
                             subsectionTitle: 'Doppler',
                             block: 'neuro_b',
-                            blankFactory: () =>
-                                {'tod': '', 'aca_ri': '', 'mca_ri': ''},
+                            blankFactory: () => {
+                              'tod': '',
+                              'aca_ri': '',
+                              'mca_ri': '',
+                            },
                             fields: (e, i) => [
                               _item(
                                 1,
@@ -1787,8 +1937,10 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                               'prbc_volume': '',
                             },
                             fields: (e, i) {
-                              final products =
-                                  _listOf(e, 'transfusion_products');
+                              final products = _listOf(
+                                e,
+                                'transfusion_products',
+                              );
                               return [
                                 _item(
                                   1,
@@ -1797,26 +1949,63 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
                                     _transfuse,
                                     products,
                                     (v) => _setField(
-                                        'heme_a', i, 'transfusion_products', v),
+                                      'heme_a',
+                                      i,
+                                      'transfusion_products',
+                                      v,
+                                    ),
                                   ),
                                 ),
                                 _item(
                                   2,
                                   'No. of transfusions',
                                   _numField(
-                                      'heme_a', i, 'transfusion_count',
-                                      integer: true),
+                                    'heme_a',
+                                    i,
+                                    'transfusion_count',
+                                    integer: true,
+                                  ),
                                   validationHint: kMmlHintTransfusionCount,
                                 ),
                                 if (products.contains('PRBC'))
                                   _item(
                                     3,
                                     'If PRBC, volume',
-                                    _numField('heme_a', i, 'prbc_volume',
-                                        unit: 'ml/kg'),
+                                    _numField(
+                                      'heme_a',
+                                      i,
+                                      'prbc_volume',
+                                      unit: 'ml/kg',
+                                    ),
                                   ),
                               ];
                             },
+                          ),
+                        ],
+                      ),
+                      _section(
+                        code: '5.7',
+                        title: 'Growth',
+                        icon: Icons.monitor_weight_outlined,
+                        children: [
+                          _weightCadencePills(),
+                          _entryBlock(
+                            code: '5.7.A',
+                            block: 'growth_a',
+                            blankFactory: () => {'weight_g': ''},
+                            fields: (e, i) => [
+                              _item(
+                                1,
+                                'Weight',
+                                _numField(
+                                  'growth_a',
+                                  i,
+                                  'weight_g',
+                                  unit: 'g',
+                                  integer: true,
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -1839,7 +2028,9 @@ class _HelperForm5MinimalMonitoringState extends State<HelperForm5MinimalMonitor
               const SizedBox(width: 10),
               Expanded(
                 child: FilledButton.icon(
-                  onPressed: (_saving || _loading || _loadFailed) ? null : _save,
+                  onPressed: (_saving || _loading || _loadFailed)
+                      ? null
+                      : _save,
                   icon: _saving
                       ? const SizedBox(
                           width: 16,

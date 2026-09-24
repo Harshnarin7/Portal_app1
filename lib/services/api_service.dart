@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/crf.dart';
 import '../models/form_b.dart';
 import '../models/form_c.dart';
+import '../utils/form_b_local_guard.dart';
 
 
 class ApiService {
@@ -110,13 +111,36 @@ Future<void> saveFormB(FormB formB) async {
 // ===============================
 // LOAD FORM B
 // ===============================
-Future<FormB?> loadFormB(String screeningId) async {
+Future<FormB?> loadFormB(
+  String screeningId, {
+  String maternalUid = '',
+  String motherFirstName = '',
+  DateTime? screeningCreatedAt,
+  bool serverHasBirthLink = false,
+}) async {
   final prefs = await SharedPreferences.getInstance();
   final data = prefs.getString("formB_$screeningId");
 
   if (data == null) return null;
 
-  return FormB.fromJson(jsonDecode(data));
+  final formB = FormB.fromJson(jsonDecode(data));
+  if (!localFormBIsForPatient(
+    local: formB,
+    screeningId: screeningId,
+    maternalUid: maternalUid,
+    motherFirstName: motherFirstName,
+    screeningCreatedAt: screeningCreatedAt,
+    serverHasBirthLink: serverHasBirthLink,
+  )) {
+    await prefs.remove("formB_$screeningId");
+    return null;
+  }
+  return formB;
+}
+
+Future<void> clearFormB(String screeningId) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.remove("formB_$screeningId");
 }
 
 // ===============================
@@ -138,6 +162,11 @@ Future<FormC?> loadFormC(String screeningId) async {
   if (data == null) return null;
 
   return FormC.fromJson(jsonDecode(data));
+}
+
+Future<void> clearFormC(String screeningId) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.remove("formC_$screeningId");
 }
 
   // ===============================
