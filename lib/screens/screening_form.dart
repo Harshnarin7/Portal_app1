@@ -2430,7 +2430,16 @@ class _ScreeningFormState extends State<ScreeningForm>
     });
   }
 
-  bool get _formBLocked => _gaEndedParticipation;
+  /// Form B stays locked until the screening is actually Eligible — GA in
+  /// window, no A4 exclusion, and consent Yes / Trial run. Mirrors the web
+  /// sidebar's own lock and the server's require_eligible_screening_for_form_b
+  /// guard (added 2026-09-30) — without this, a nurse could fill in the
+  /// whole of Form B only to have the save rejected at the end (found live:
+  /// a screening with consent "No" still had two Form B rows created).
+  bool get _formBLocked =>
+      _gaEndedParticipation ||
+      _exclusionPresent ||
+      !(_consentStatus == "Yes" || _consentStatus == "Trial run");
 
   Future<void> _openFormB() async {
     if (!_formAExportEnabled || _formBLocked) return;
