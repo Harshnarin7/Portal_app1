@@ -142,15 +142,25 @@ void main() {
   });
 
   group('5.6.A transfusion Y/N mirror', () {
-    test('clears Yes on Helper when product removed from MML', () {
+    test('clears autofilled Yes when the product is removed from MML', () {
+      final r = mmlSyncTransfusionYnFromMml(
+        current: true,
+        mmlHas: false,
+        wasAutofilled: true,
+      );
+      expect(r.changed, isTrue);
+      expect(r.nextValue, isNull);
+      expect(r.nextAutofilled, isFalse);
+    });
+
+    test('keeps a Yes the nurse chose when MML has no product', () {
       final r = mmlSyncTransfusionYnFromMml(
         current: true,
         mmlHas: false,
         wasAutofilled: false,
       );
-      expect(r.changed, isTrue);
-      expect(r.nextValue, isNull);
-      expect(r.nextAutofilled, isFalse);
+      expect(r.changed, isFalse);
+      expect(r.nextValue, isTrue);
     });
 
     test('does not clear nurse explicit No when MML still has product', () {
@@ -375,6 +385,32 @@ void main() {
       );
       expect(r.changed, isTrue);
       expect(r.nextValue, 'Not Tested');
+    });
+  });
+
+  group('DMS 5.2.A → FiO₂ AUC windows', () {
+    test('splits a reading that crosses 12:00 and keeps morning and afternoon apart', () {
+      final built = buildFio2AucRowsFromRespA([
+        {'time_range': '08:00–10:00', 'max_fio2': '30'},
+        {'time_range': '10:00–14:00', 'max_fio2': '40'},
+        {'time': '18:00-20:00', 'max_fio2': '25'},
+      ]);
+      expect(built.w1, [
+        {'fio2': '30', 'dur': '2.0'},
+        {'fio2': '40', 'dur': '2.0'},
+      ]);
+      expect(built.w2, [
+        {'fio2': '40', 'dur': '2.0'},
+        {'fio2': '25', 'dur': '2.0'},
+      ]);
+    });
+
+    test('skips a row with FiO₂ but no usable time range', () {
+      final built = buildFio2AucRowsFromRespA([
+        {'max_fio2': '50'},
+      ]);
+      expect(built.w1, isEmpty);
+      expect(built.w2, isEmpty);
     });
   });
 }

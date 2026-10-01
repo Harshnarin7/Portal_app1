@@ -21,6 +21,7 @@ import '../../utils/participant_name.dart';
 import '../../services/api_client.dart';
 import '../admin/user_management_screen.dart';
 import '../screening_form.dart';
+import '../logs/log_hub_screen.dart';
 import '../form_b_birth_resuscitation.dart';
 import '../form_c_resuscitation.dart';
 import '../../navigation/helper_forms_navigation.dart';
@@ -310,12 +311,15 @@ class _NurseDashboardState extends State<NurseDashboard> {
       pages: [
         _NurseHome(user: user, onOpenPatients: _openPatients),
         _NursePatientsPage(user: user, filterNotifier: _patientFilter),
+        const LogHubScreen(),
       ],
       navItems: const [
         BottomNavigationBarItem(icon: Icon(Icons.home_outlined),
             activeIcon: Icon(Icons.home_rounded), label: 'Home'),
         BottomNavigationBarItem(icon: Icon(Icons.people_outline_rounded),
             activeIcon: Icon(Icons.people_rounded), label: 'Patients'),
+        BottomNavigationBarItem(icon: Icon(Icons.menu_book_outlined),
+            activeIcon: Icon(Icons.menu_book_rounded), label: 'Log'),
       ],
       fab: Builder(builder: (ctx) => FloatingActionButton.extended(
         backgroundColor: _kPrimary, foregroundColor: Colors.white,
@@ -1020,11 +1024,13 @@ Future<void> exportPatientPdf(BuildContext context, CRF c) async {
     }
 
     // Include only filled forms: A always; B if saved; C if saved.
+    final formAExtras = await FormAPrintExtras.loadFor(c);
     final File file = await PdfService.generateFullTrialPdf(
       crf: c,
       formB: formB,
       formC: formC,
       birth: birth,
+      formAExtras: formAExtras,
     );
     if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
     await OpenFilex.open(file.path);

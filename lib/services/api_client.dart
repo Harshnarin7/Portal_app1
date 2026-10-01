@@ -22,16 +22,19 @@ class ApiClient {
   ApiClient._();
   static final ApiClient instance = ApiClient._();
 
-  // ── Base URL: switch between dev and prod ────────────────────────────────
-  // For local development:
-  //   - Android emulator talking to a backend on the SAME machine: 10.0.2.2
-  //     (Android's special loopback alias for the host machine's localhost)
-  //   - Physical phone on the same Wi-Fi as your dev machine: use your
-  //     machine's LAN IP instead, e.g. http://192.168.1.42:8000
-  // NOTE: no "/api/v1" — the FastAPI backend mounts all routers at the root
-  // (e.g. /auth/login, /screenings/...), not under a versioned prefix.
-  static const String _base =
-      String.fromEnvironment('API_BASE', defaultValue: 'http://10.0.2.2:8000');
+  // ── Base URL ─────────────────────────────────────────────────────────────
+  // Live trial API, same host the production web app uses. A phone cannot
+  // reach 10.0.2.2 (that alias exists only inside the Android emulator),
+  // so the old default sat on the spinner and then showed "check your
+  // connection" even when Wi-Fi was fine.
+  // Local backend override:
+  //   flutter run --dart-define=API_BASE=http://10.0.2.2:8000
+  //   (emulator) or http://<your-PC-LAN-IP>:8000 (physical phone).
+  // NOTE: no "/api/v1" — routes are mounted at the root (/auth/login, ...).
+  static const String _base = String.fromEnvironment(
+    'API_BASE',
+    defaultValue: 'https://api.portaltrial.in',
+  );
 
   bool _refreshing = false;
 

@@ -34,6 +34,8 @@ import '../widgets/theme_toggle_widget.dart';
 import '../widgets/required_asterisk.dart';
 import '../utils/clock_time_24.dart';
 import '../utils/gestation_age.dart';
+import '../utils/ga_check_seed.dart';
+import '../services/logs_api_service.dart';
 
 /// Form A eligibility window (matches web ScreeningForm.jsx).
 const int _kEligibleGestMinTotalDays = 25 * 7;
@@ -193,11 +195,7 @@ class _ScreeningFormState extends State<ScreeningForm>
 
     if (_consentStatus != "Select" && _videoPisShown == "Select") return false;
 
-    if (_gestationKnownInWeeks == true || _eddKnown == true) {
-      if (_gestationKnownInWeeks == false &&
-          _eddKnown == true &&
-          _expectedDeliveryCtrl.text.trim().isEmpty)
-        return false;
+    if (_gestWeeksCtrl.text.trim().isNotEmpty && !_isGestationOutOfRange()) {
       if (!_validateExclusionCompleted()) return false;
       if (!_validateExclusionSubOptions()) return false;
       if (!_exclusionPresent) {
@@ -537,6 +535,48 @@ class _ScreeningFormState extends State<ScreeningForm>
     if (_screeningDateTimeCtrl.text.trim().isEmpty) {
       _screeningDateTimeCtrl.text = formatDdMmYyyyPipeHHmm(DateTime.now());
     }
+    if (!widget.loadDraft) _applyGaCheckSeed();
+  }
+
+  /// Web `ga_check_seed`: name, UID, weeks, days, and method from the
+  /// Gestation Log. Applied only on a new Form A. The log id stays until
+  /// an explicit save so the row can be marked continued.
+  void _applyGaCheckSeed() {
+    if (GaCheckSeedStore.pendingId == null &&
+        GaCheckSeedStore.motherName.trim().isEmpty &&
+        GaCheckSeedStore.motherUid.trim().isEmpty) {
+      return;
+    }
+    final name = GaCheckSeedStore.motherName.trim();
+    if (name.isNotEmpty && _motherFirstCtrl.text.trim().isEmpty) {
+      final parts = name.split(RegExp(r'\s+'));
+      _motherFirstCtrl.text = parts.first;
+      if (parts.length > 1) {
+        _motherSurnameCtrl.text = parts.sublist(1).join(' ');
+      }
+    }
+    if (GaCheckSeedStore.motherUid.trim().isNotEmpty &&
+        _maternalUidCtrl.text.trim().isEmpty) {
+      _maternalUidCtrl.text = GaCheckSeedStore.motherUid.trim();
+    }
+    final weeks = GaCheckSeedStore.gestationWeeks;
+    if (weeks != null && _gestWeeksCtrl.text.trim().isEmpty) {
+      _gestWeeksCtrl.text = '$weeks';
+    }
+    final days = GaCheckSeedStore.gestationDays;
+    if (days != null && '${days}'.isNotEmpty) {
+      _gestDaysCtrl.text = '$days';
+    }
+    final method = GaCheckSeedStore.gestationMethod.trim();
+    if (method.isNotEmpty) {
+      _gaAssessmentMethod = _unmapGestationMethod(method);
+    }
+    GaCheckSeedStore.motherName = '';
+    GaCheckSeedStore.motherUid = '';
+    GaCheckSeedStore.gestationWeeks = null;
+    GaCheckSeedStore.gestationDays = null;
+    GaCheckSeedStore.gestationMethod = '';
+    if (mounted) setState(() {});
   }
 
   String _stripDraftPii(dynamic raw) {
@@ -1147,18 +1187,36 @@ class _ScreeningFormState extends State<ScreeningForm>
     return false;
   }
 
+  /// Web `gestationPathComplete && !endParticipation`: A2–A5 appear once
+  /// weeks are entered and the GA is inside 25w0d–31w6d.
   bool get _isEligibleGestation {
-    // Web shows A2–A5 as soon as Q1 = Yes, even before weeks are entered.
-    // Hide them only when a completed GA is outside 25w0d–31w6d.
-    if (_gestWeeksCtrl.text.trim().isEmpty) {
-      return _gestationKnownInWeeks == true;
-    }
-    final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
-    final days = int.tryParse(_gestDaysCtrl.text) ?? 0;
+    if (_gestWeeksCtrl.text.trim().isEmpty) return false;
+    return !_isGestationOutOfRange();
+  }
+
+  /// Web `getEligibilityStatus`: null until weeks exist, else low / high / eligible.
+  String? get _a1Eligibility {
+    final weeks = int.tryParse(_gestWeeksCtrl.text.trim());
+    if (weeks == null) return null;
+    final days = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
     final t = weeks * 7 + days;
-    if (t < _kEligibleGestMinTotalDays) return false;
-    if (t > _kEligibleGestMaxTotalDays) return false;
-    return true;
+    if (t < _kEligibleGestMinTotalDays) return "low";
+    if (t > _kEligibleGestMaxTotalDays) return "high";
+    return "eligible";
+  }
+
+  /// Advisory only, same 3-day tolerance as web `lmpMismatch`. Never blocks save.
+  GestAge? get _lmpMismatch {
+    if (_gaAssessmentMethod != "LMP") return null;
+    final lmp = _parseDdMmYyyy(_lmpCtrl.text);
+    final weeks = int.tryParse(_gestWeeksCtrl.text.trim());
+    if (lmp == null || weeks == null) return null;
+    final implied = gestAgeFromLmp(lmp, _gaAsOfDate());
+    if (implied == null) return null;
+    final days = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
+    final delta = (implied.weeks * 7 + implied.days) - (weeks * 7 + days);
+    if (delta.abs() <= 3) return null;
+    return implied;
   }
 
   void _resetGestationSection() {
@@ -1779,9 +1837,7 @@ class _ScreeningFormState extends State<ScreeningForm>
   }
 
   /// True when A2–A5 are hidden (out of 25+0–31+6, or GA undeterminable).
-  bool get _gaEndedParticipation =>
-      _isGestationOutOfRange() ||
-      (_gestationKnownInWeeks == false && _eddKnown == false);
+  bool get _gaEndedParticipation => _isGestationOutOfRange();
 
   bool _gaInInclusionWindowNow() {
     if (_gestWeeksCtrl.text.trim().isEmpty) return false;
@@ -1873,6 +1929,15 @@ class _ScreeningFormState extends State<ScreeningForm>
       _assignedScreeningId = sid;
       _serverConfirmedId = true;
       if (_screeningIdCtrl.text != sid) _screeningIdCtrl.text = sid;
+      if (!isDraft) {
+        final gaId = GaCheckSeedStore.pendingId;
+        if (gaId != null) {
+          try {
+            await LogsApiService.instance.linkGaCheck(gaId, sid);
+            GaCheckSeedStore.clear();
+          } catch (_) {}
+        }
+      }
     }
     final eid = resp['enrollment_id']?.toString();
     if (eid != null && eid.isNotEmpty) _enrollmentId = eid;
@@ -4137,479 +4202,194 @@ class _ScreeningFormState extends State<ScreeningForm>
   // ── GESTATION SECTION ─────────────────────────────────────────────────────
 
   Widget _buildGestationSection(AppColors c) {
+    final status = _a1Eligibility;
+    final weeksText = _gestWeeksCtrl.text.trim();
+    final daysText = _gestDaysCtrl.text.trim().isEmpty ? "0" : _gestDaysCtrl.text.trim();
+    final mismatch = _lmpMismatch;
+    Widget? badge;
+    if (status == "eligible") {
+      badge = _a1Badge("✓ Eligible", c.success, c.successSoft);
+    } else if (status == "high" || status == "low") {
+      badge = _a1Badge("✗ Not Eligible", c.danger, c.dangerSoft);
+    }
+
     return _sectionCard(
       title: "A1 · Inclusion Criteria",
       icon: Icons.pregnant_woman_rounded,
       accentColor: c.primary,
+      trailing: badge,
       children: [
-        Text(
-          "1. Gestation in weeks clearly mentioned",
-          style: TextStyle(
-            color: c.textSecondary,
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 10),
+        _reqText("1. Best estimate gestational age — Weeks", c),
+        const SizedBox(height: 8),
         Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(child: _gestRadio("Yes", true, c)),
-            const SizedBox(width: 8),
-            Expanded(child: _gestRadio("No", false, c)),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text("Weeks", style: TextStyle(color: c.textTertiary, fontSize: 12)),
+                  const SizedBox(height: 6),
+                  _numberStepper(
+                    controller: _gestWeeksCtrl,
+                    min: _kEligibleGestMinWeeks,
+                    max: _kEligibleGestMaxWeeks,
+                    validator: (v) {
+                      if (!_submitted) return null;
+                      if (v == null || v.trim().isEmpty) return "Required";
+                      final n = int.tryParse(v);
+                      if (n == null || n < _kEligibleGestMinWeeks || n > _kEligibleGestMaxWeeks) {
+                        return "Must be 25–31";
+                      }
+                      return null;
+                    },
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _reqText("Days", c, fontSize: 12),
+                  const SizedBox(height: 6),
+                  _numberStepper(
+                    controller: _gestDaysCtrl,
+                    min: 0,
+                    max: 6,
+                    validator: (v) {
+                      if (!_submitted) return null;
+                      if (v == null || v.trim().isEmpty) return "Required";
+                      final n = int.tryParse(v);
+                      if (n == null || n < 0 || n > 6) return "Must be 0–6";
+                      return null;
+                    },
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
-
-        if (_gestationKnownInWeeks == true) ...[
-          const SizedBox(height: 18),
-          Text(
-            "2. Best estimate gestational age — Weeks",
-            style: TextStyle(
-              color: c.textSecondary,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
+        const SizedBox(height: 14),
+        DropdownButtonFormField<String>(
+          value: _gaAssessmentMethod,
+          dropdownColor: c.surface,
+          decoration: _requiredDecoration("2. Method of gestation assessment"),
+          items: [
+            _ddItem("Select", c, hint: true),
+            _ddItem("LMP", c),
+            _ddItem("Early USG (<24w)", c),
+            _ddItem("Fundal Height", c),
+            _ddItem("Method not known", c),
+          ],
+          onChanged: (v) => setState(() {
+            _gaAssessmentMethod = v ?? "Select";
+            if (_gaAssessmentMethod != "LMP") {
+              _lmpCtrl.clear();
+              _expectedDeliveryCtrl.clear();
+            }
+          }),
+          style: TextStyle(color: c.textPrimary),
+        ),
+        if (_gaAssessmentMethod == "LMP") ...[
+          const SizedBox(height: 12),
+          TextFormField(
+            controller: _lmpCtrl,
+            readOnly: true,
+            decoration: _requiredDecoration("2. LMP date").copyWith(
+              hintText: "DD/MM/YY",
+              suffixIcon: Icon(Icons.calendar_today, color: c.textTertiary, size: 18),
             ),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      "Weeks",
-                      style: TextStyle(color: c.textTertiary, fontSize: 12),
-                    ),
-                    const SizedBox(height: 6),
-                    // Direct GA entry: 25 weeks 0 days – 31 weeks 6 days (same as web).
-                    _numberStepper(
-                      controller: _gestWeeksCtrl,
-                      min: _kEligibleGestMinWeeks,
-                      max: _kEligibleGestMaxWeeks,
-                      emptySnapTo: _kEligibleGestMinWeeks,
-                      afterChange: _normalizeDirectGestationEntry,
-                      validator: (v) {
-                        if (!_submitted) return null;
-                        if (v == null || v.trim().isEmpty) return "Required";
-                        final n = int.tryParse(v);
-                        if (n == null ||
-                            n < _kEligibleGestMinWeeks ||
-                            n > _kEligibleGestMaxWeeks) {
-                          return "Must be 25 weeks 0 days to 31 weeks 6 days";
-                        }
-                        return null;
-                      },
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      "Days",
-                      style: TextStyle(color: c.textTertiary, fontSize: 12),
-                    ),
-                    const SizedBox(height: 6),
-                    _numberStepper(
-                      controller: _gestDaysCtrl,
-                      min: 0,
-                      max: 6,
-                      afterChange: _normalizeDirectGestationEntry,
-                      validator: (v) {
-                        if (!_submitted) return null;
-                        if (v == null || v.trim().isEmpty) return "Required";
-                        final n = int.tryParse(v);
-                        if (n == null || n < 0 || n > 6)
-                          return "Must be 0–6 days";
-                        return null;
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          DropdownButtonFormField<String>(
-            value: _gaAssessmentMethod,
-            dropdownColor: c.surface,
-            decoration: _requiredDecoration(
-              "3. Method of gestation assessment",
-            ),
-            items: [
-              _ddItem("Select", c, hint: true),
-              _ddItem("LMP", c),
-              _ddItem("Early USG (<24w)", c),
-              _ddItem("Fundal Height", c),
-              _ddItem("Method not known", c),
-            ],
-            onChanged: (v) => setState(() {
-              _gaAssessmentMethod = v!;
-              if (v != "LMP") {
-                _lmpCtrl.clear();
-                _expectedDeliveryCtrl.clear();
+            style: TextStyle(color: c.textPrimary),
+            onTap: () async {
+              final picked = await showModernDatePicker(
+                context: context,
+                initialDate: DateTime.now(),
+                firstDate: DateTime(2020),
+                lastDate: DateTime.now(),
+              );
+              if (picked != null) {
+                _lmpCtrl.text = formatDdMmYyyy(picked);
+                _expectedDeliveryCtrl.text = formatDdMmYyyy(_eddFromLmp(picked));
+                setState(() {});
               }
-            }),
-            style: TextStyle(color: c.textPrimary),
-          ),
-
-          // Web uses the same number "3." for LMP date when method = LMP.
-          if (_gaAssessmentMethod == "LMP") ...[
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: _lmpCtrl,
-              readOnly: true,
-              decoration: _requiredDecoration("3. LMP date").copyWith(
-                suffixIcon: Icon(
-                  Icons.calendar_today,
-                  color: c.textTertiary,
-                  size: 18,
-                ),
-              ),
-              style: TextStyle(color: c.textPrimary),
-              onTap: () async {
-                final picked = await showModernDatePicker(
-                  context: context,
-                  initialDate: DateTime.now(),
-                  firstDate: DateTime(2020),
-                  lastDate: DateTime.now(),
-                );
-                if (picked != null) {
-                  _lmpCtrl.text = formatDdMmYyyy(picked);
-                  final edd = _eddFromLmp(picked);
-                  _expectedDeliveryCtrl.text = formatDdMmYyyy(edd);
-                  setState(() {});
-                }
-              },
-            ),
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: _expectedDeliveryCtrl,
-              readOnly: true,
-              decoration: _inputDecoration("EDD (auto-calculated from LMP)"),
-              style: TextStyle(color: c.textPrimary),
-            ),
-          ],
-
-          // Eligibility banner only (web: no "calculated" label on direct GA entry).
-          if (_gestWeeksCtrl.text.trim().isNotEmpty) ...[
-            const SizedBox(height: 14),
-            _gestationResultBanner(c, directEntry: true),
-          ],
-        ],
-
-        if (_gestationKnownInWeeks == false) ...[
-          const SizedBox(height: 18),
-          DropdownButtonFormField<String>(
-            value: _gaSource ?? "Select",
-            dropdownColor: c.surface,
-            decoration: _requiredDecoration(
-              "4. If No, is any of the following known?",
-            ),
-            items: [
-              _ddItem("Select", c, hint: true),
-              _ddItem("LMP", c),
-              _ddItem("EDD", c),
-              DropdownMenuItem(
-                value: "Neither",
-                child: Text(
-                  "Neither known",
-                  style: TextStyle(color: c.textPrimary, fontSize: 13),
-                ),
-              ),
-            ],
-            onChanged: (v) {
-              setState(() {
-                _gaSource = (v == null || v == "Select") ? null : v;
-                _eddKnown = (_gaSource == "LMP" || _gaSource == "EDD");
-                _lmpCtrl.clear();
-                _expectedDeliveryCtrl.clear();
-                _gestWeeksCtrl.clear();
-                _gestDaysCtrl.clear();
-              });
             },
+          ),
+          const SizedBox(height: 12),
+          TextFormField(
+            controller: _expectedDeliveryCtrl,
+            readOnly: true,
+            decoration: _inputDecoration("EDD (auto-calculated from LMP)"),
             style: TextStyle(color: c.textPrimary),
           ),
-
-          if (_gaSource == "LMP") ...[
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _lmpCtrl,
-              readOnly: true,
-              decoration: _requiredDecoration("5. If LMP known, LMP").copyWith(
-                suffixIcon: Icon(
-                  Icons.calendar_today,
-                  color: c.textTertiary,
-                  size: 18,
-                ),
-              ),
-              style: TextStyle(color: c.textPrimary),
-              onTap: () async {
-                final picked = await showModernDatePicker(
-                  context: context,
-                  initialDate: DateTime.now(),
-                  firstDate: DateTime(2020),
-                  lastDate: DateTime.now(),
-                );
-                if (picked != null) {
-                  _lmpCtrl.text = formatDdMmYyyy(picked);
-                  final edd = _eddFromLmp(picked);
-                  _expectedDeliveryCtrl.text = formatDdMmYyyy(edd);
-                  // Prefer LMP→GA directly (avoids wrong GA from a stale EDD).
-                  _setGestationFromLmp(picked);
-                  setState(() {});
-                }
-              },
-            ),
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: _expectedDeliveryCtrl,
-              readOnly: true,
-              decoration: _inputDecoration("EDD (auto-calculated in app)"),
-              style: TextStyle(color: c.textPrimary),
-            ),
-            const SizedBox(height: 12),
-            InputDecorator(
-              decoration: _inputDecoration(
-                "7. Calculated gestational age (auto calculated in app)",
-              ),
-              child: Text(
-                _gestWeeksCtrl.text.trim().isEmpty
-                    ? "____ weeks ; ____ days"
-                    : "${_gestWeeksCtrl.text} weeks ; ${_gestDaysCtrl.text.isEmpty ? "0" : _gestDaysCtrl.text} days",
-                style: TextStyle(
-                  color: _gestWeeksCtrl.text.trim().isEmpty
-                      ? c.textTertiary
-                      : c.textPrimary,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                ),
-              ),
-            ),
-          ],
-
-          if (_gaSource == "EDD") ...[
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _expectedDeliveryCtrl,
-              readOnly: true,
-              decoration: _requiredDecoration("6. If LMP not known, EDD")
-                  .copyWith(
-                    suffixIcon: Icon(
-                      Icons.calendar_today,
-                      color: c.textTertiary,
-                      size: 18,
-                    ),
-                  ),
-              style: TextStyle(color: c.textPrimary),
-              onTap: () async {
-                final picked = await showModernDatePicker(
-                  context: context,
-                  initialDate: DateTime.now(),
-                  firstDate: DateTime(1900),
-                  lastDate: DateTime(2100),
-                );
-                if (picked != null) {
-                  _expectedDeliveryCtrl.text = formatDdMmYyyy(picked);
-                  _setGestationFromEdd(picked);
-                  setState(() {});
-                }
-              },
-            ),
-            const SizedBox(height: 12),
-            InputDecorator(
-              decoration: _inputDecoration(
-                "7. Calculated gestational age (auto calculated in app)",
-              ),
-              child: Text(
-                _gestWeeksCtrl.text.trim().isEmpty
-                    ? "____ weeks ; ____ days"
-                    : "${_gestWeeksCtrl.text} weeks ; ${_gestDaysCtrl.text.isEmpty ? "0" : _gestDaysCtrl.text} days",
-                style: TextStyle(
-                  color: _gestWeeksCtrl.text.trim().isEmpty
-                      ? c.textTertiary
-                      : c.textPrimary,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                ),
-              ),
-            ),
-          ],
-
-          if ((_gaSource == "LMP" || _gaSource == "EDD") &&
-              _gestWeeksCtrl.text.trim().isNotEmpty) ...[
-            const SizedBox(height: 16),
-            _gestationResultBanner(c, directEntry: false),
-          ],
-
-          if (_gaSource == "Neither") ...[
-            const SizedBox(height: 16),
-            _infoBanner(
-              icon: Icons.warning_amber_rounded,
-              text: "Gestational age cannot be determined.\nEnd participation.",
-              color: c.danger,
-              softColor: c.dangerSoft,
-              c: c,
-            ),
-          ],
+        ],
+        if (mismatch != null) ...[
+          const SizedBox(height: 12),
+          _infoBanner(
+            icon: Icons.warning_amber_rounded,
+            text:
+                "This LMP date implies ${mismatch.weeks}w ${mismatch.days}d gestation, "
+                "which doesn't match the Best Estimate above "
+                "(${_gestWeeksCtrl.text.trim()}w ${daysText}d) — "
+                "please verify the LMP date is correct before saving.",
+            color: c.warning,
+            softColor: c.warningSoft,
+            c: c,
+          ),
+        ],
+        if (weeksText.isNotEmpty && status != null) ...[
+          const SizedBox(height: 14),
+          _infoBanner(
+            icon: Icons.info_outline_rounded,
+            text:
+                "Gestational age: $weeksText weeks ; $daysText days — "
+                "participant is ${status == "eligible" ? "eligible" : "not eligible"} for the study.",
+            color: status == "eligible" ? c.success : c.danger,
+            softColor: status == "eligible" ? c.successSoft : c.dangerSoft,
+            c: c,
+          ),
+        ],
+        if (status == "high") ...[
+          const SizedBox(height: 10),
+          _infoBanner(
+            icon: Icons.cancel_rounded,
+            text:
+                "If ≥32 weeks – cannot proceed. Gestational age is outside 25w0d–31w6d. No screening ID is assigned and the record is not saved.",
+            color: c.danger,
+            softColor: c.dangerSoft,
+            c: c,
+          ),
+        ],
+        if (status == "low") ...[
+          const SizedBox(height: 10),
+          _infoBanner(
+            icon: Icons.cancel_rounded,
+            text:
+                "Gestational age <25 weeks — outside 25w0d–31w6d. No screening ID is assigned and the record is not saved.",
+            color: c.danger,
+            softColor: c.dangerSoft,
+            c: c,
+          ),
         ],
       ],
     );
   }
 
-  Widget _gestRadio(String label, bool value, AppColors c) {
-    final selected = _gestationKnownInWeeks == value;
-    final color = value ? c.success : c.danger;
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          _gestationKnownInWeeks = value;
-          _gaSource = null;
-          _eddKnown = null;
-          // Match web: do not pre-fill 25+0 — weeks/days stay empty until entered.
-          _gestWeeksCtrl.text = "";
-          _gestDaysCtrl.text = "";
-          _gaAssessmentMethod = "Select";
-          _lmpCtrl.clear();
-          _expectedDeliveryCtrl.clear();
-        });
-      },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(vertical: 11),
-        decoration: BoxDecoration(
-          color: selected ? color.withOpacity(0.1) : c.surfaceAlt,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: selected ? color : c.border, width: 1.5),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 16,
-              height: 16,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: selected ? color : c.border,
-                  width: 2,
-                ),
-                color: selected ? color : Colors.transparent,
-              ),
-              child: selected
-                  ? const Icon(Icons.circle, color: Colors.white, size: 8)
-                  : null,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: TextStyle(
-                color: selected ? color : c.textSecondary,
-                fontWeight: FontWeight.w700,
-                fontSize: 13,
-              ),
-            ),
-          ],
-        ),
+  Widget _a1Badge(String label, Color color, Color soft) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: soft,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w800),
       ),
     );
   }
 
-  /// [directEntry] true when Q1=Yes and weeks/days were entered manually (web
-  /// `isDirectGaEntry`). false when GA was derived from LMP/EDD (Q1=No).
-  Widget _gestationResultBanner(AppColors c, {required bool directEntry}) {
-    final weeks = int.tryParse(_gestWeeksCtrl.text) ?? 0;
-    final days = int.tryParse(_gestDaysCtrl.text) ?? 0;
-    final inRange = (() {
-      final t = weeks * 7 + days;
-      return t >= _kEligibleGestMinTotalDays && t <= _kEligibleGestMaxTotalDays;
-    })();
-    final tooHigh = weeks * 7 + days > _kEligibleGestMaxTotalDays;
-    final color = inRange ? c.success : c.danger;
-    final soft = inRange ? c.successSoft : c.dangerSoft;
-    final weeksText = _gestWeeksCtrl.text.trim().isEmpty
-        ? "____"
-        : _gestWeeksCtrl.text;
-    final daysText = _gestDaysCtrl.text.trim().isEmpty
-        ? "____"
-        : _gestDaysCtrl.text;
-    final headline = directEntry
-        ? "Gestational age"
-        : "Calculated gestational age (auto calculated in app)";
-    final eligibilityLine = inRange
-        ? "Participant is eligible for the study."
-        : "Participant is not eligible for the study.";
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: soft,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: color.withOpacity(0.3)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                headline,
-                style: TextStyle(
-                  color: color,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                "$weeksText weeks ; $daysText days",
-                style: TextStyle(
-                  color: color,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                eligibilityLine,
-                style: TextStyle(
-                  color: color,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-        if (tooHigh) ...[
-          const SizedBox(height: 10),
-          _infoBanner(
-            icon: Icons.cancel_rounded,
-            text:
-                "If ≥32 weeks – cannot proceed. Gestational age is outside the eligibility window (25 weeks 0 days to 31 weeks 6 days).",
-            color: c.danger,
-            softColor: c.dangerSoft,
-            c: c,
-          ),
-        ],
-        if (!inRange && !tooHigh && _gestWeeksCtrl.text.trim().isNotEmpty) ...[
-          const SizedBox(height: 10),
-          _infoBanner(
-            icon: Icons.cancel_rounded,
-            text:
-                "Gestational age <25 weeks — outside eligibility window (25w0d–31w6d). Cannot proceed.",
-            color: c.danger,
-            softColor: c.dangerSoft,
-            c: c,
-          ),
-        ],
-      ],
-    );
-  }
 
   Widget _infoBanner({
     required IconData icon,

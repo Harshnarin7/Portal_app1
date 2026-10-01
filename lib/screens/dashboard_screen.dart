@@ -1322,11 +1322,13 @@ class _DashboardScreenState extends State<DashboardScreen> with RouteAware {
         } catch (_) {}
       }
 
+      final formAExtras = await FormAPrintExtras.loadFor(crf);
       final file = await PdfService.generateFullTrialPdf(
         crf: crf,
         formB: formB,
         formC: formC,
         birth: birth,
+        formAExtras: formAExtras,
       );
       await OpenFilex.open(file.path);
     } catch (e) {

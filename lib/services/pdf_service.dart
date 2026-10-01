@@ -13,6 +13,8 @@ import '../models/crf.dart';
 import '../models/form_b.dart';
 import '../models/form_c.dart';
 import '../utils/screening_status.dart';
+import 'api_client.dart';
+import 'screening_api_service.dart';
 
 /// Extra Form A print fields that are not stored on [CRF] (ICF image, PI name,
 /// GA source, exclusion Yes-details, etc.). Dashboard full-trial export may
@@ -31,6 +33,83 @@ class FormAPrintExtras {
   final String? insufficientTimeReason;
   final String? notApproachedReason;
   final Map<String, String?>? exclusionAnswers;
+
+  /// Same Form A print fields the web PrintSummary uses, loaded from the
+  /// saved screening plus the site PI name.
+  static Future<FormAPrintExtras> loadFor(CRF crf) async {
+    Map<String, dynamic> clinical = {};
+    final sid = crf.screeningId.trim();
+    if (sid.isNotEmpty) {
+      try {
+        clinical = await ScreeningApiService.instance.getScreening(sid) ?? {};
+      } catch (_) {}
+    }
+    final site = (clinical['site_name'] ?? crf.site).toString().trim();
+    var piName = '';
+    if (site.isNotEmpty) {
+      try {
+        final res = await ApiClient.instance.get(
+          '/sites/${Uri.encodeComponent(site)}/pi-name',
+        );
+        piName = (res['pi_name'] ?? '').toString();
+      } catch (_) {}
+    }
+
+    String? keyFor(String label) {
+      final t = label.trim().toLowerCase();
+      if (t.contains('structural') || t.contains('anomal')) return 'ANOMALY';
+      if (t.contains('hydrops')) return 'HYDROPS';
+      if (t.contains('resuscitation') || t.contains('forego')) {
+        return 'RESUSCITATION';
+      }
+      if (t.contains('insufficient')) return 'INSUFFICIENT';
+      if (t.contains('iufd')) return 'IUFD';
+      return null;
+    }
+
+    final reasons = (clinical['exclusion_reasons'] ?? crf.exclusionReason)
+        .toString();
+    final yes = <String>{};
+    for (final part in reasons.split(RegExp(r'[,;]'))) {
+      final key = keyFor(part);
+      if (key != null) yes.add(key);
+    }
+    const keys = ['ANOMALY', 'HYDROPS', 'RESUSCITATION', 'INSUFFICIENT', 'IUFD'];
+    final answered = yes.isNotEmpty ||
+        clinical['exclusion_present'] == true ||
+        reasons.trim().isNotEmpty;
+    final answers = <String, String?>{
+      for (final k in keys) k: answered ? (yes.contains(k) ? 'Yes' : 'No') : null,
+    };
+
+    final resusOther =
+        (clinical['decision_forego_resuscitation_reason_other'] ?? '')
+            .toString()
+            .trim();
+    final resus =
+        (clinical['decision_forego_resuscitation_reason'] ?? '').toString().trim();
+
+    return FormAPrintExtras(
+      piName: piName,
+      consentDateTime: clinical['consent_datetime']?.toString(),
+      videoPisShown: clinical['video_pis_shown']?.toString(),
+      consentSignatureImage: clinical['consent_signature_image']?.toString(),
+      consentSignatureCapturedAt:
+          clinical['consent_signature_captured_at']?.toString(),
+      gaSource: clinical['ga_source']?.toString(),
+      lmpDate: clinical['lmp_date']?.toString(),
+      hydropsType: () {
+        final raw = (clinical['fetal_hydrops'] ?? '').toString().trim();
+        if (raw == 'Yes' || raw == 'No') return '';
+        return raw;
+      }(),
+      resusReason: [resus, resusOther].where((s) => s.isNotEmpty).join(' — '),
+      insufficientTimeReason:
+          clinical['reason_for_insufficient_time']?.toString(),
+      notApproachedReason: clinical['reason_not_approached']?.toString(),
+      exclusionAnswers: answers,
+    );
+  }
 
   const FormAPrintExtras({
     this.piName,
@@ -268,12 +347,6 @@ class PdfService {
     final gaStr = hasGa
         ? '${crf.gestationWeeks} weeks ${crf.gestationDays} days'
         : '';
-    final gaDays = crf.gestationWeeks * 7 + crf.gestationDays;
-    final gaElig = !hasGa
-        ? 'Not calculated'
-        : (gaDays >= 25 * 7 && gaDays <= 31 * 7 + 6
-            ? 'Within range (25w 0d – 31w 6d)'
-            : 'Outside range (25w 0d – 31w 6d)');
 
     final methodLabels = {
       'LMP': 'LMP (Last Menstrual Period)',
@@ -323,22 +396,26 @@ class PdfService {
     final resusReason = (extras?.resusReason ?? '').trim();
     final insuffReason = (extras?.insufficientTimeReason ?? '').trim();
 
+    final method =
+        methodLabels[crf.gestationMethod] ?? crf.gestationMethod;
+    final sig = _decodePngBytes(extras?.consentSignatureImage);
+
     return [
       _studyHeader(
-        docLabel: 'Screening Summary — Form A',
+        docLabel: 'Screening — Form A',
+        metaLine: 'ICMR Funded · Triple-Arm, Multi-Site RCT',
         meta: [
           [
             'Screening ID',
-            crf.screeningId.isEmpty ? 'Not assigned' : crf.screeningId
+            crf.screeningId.isEmpty ? 'Not assigned' : crf.screeningId,
           ],
           ['Site', crf.site],
           ['Print Date', todayLong],
         ],
       ),
       _rule(),
-      _outcomeBanner('Screening Outcome', outcome),
-      pw.SizedBox(height: 10),
-
+      _outcomeBanner('Form A Status', outcome),
+      pw.SizedBox(height: 8),
       pw.Row(
         crossAxisAlignment: pw.CrossAxisAlignment.start,
         children: [
@@ -346,40 +423,34 @@ class PdfService {
             child: pw.Column(
               crossAxisAlignment: pw.CrossAxisAlignment.start,
               children: [
-                _sectionHd('Maternal Information'),
+                _sectionHd('A1 · Inclusion'),
                 _kvTable([
-                  [
-                    'Mother\'s Name',
-                    '${crf.motherFirstName} ${crf.motherSurname}'.trim()
-                  ],
-                  [
-                    'Husband\'s Name',
-                    '${crf.husbandFirstName} ${crf.husbandSurname}'.trim()
-                  ],
-                  ['Maternal UID (CR No.)', crf.maternalUid],
-                  ['Hospital Admission No.', crf.hospitalNo],
-                  ['Mother Contact', crf.motherPhone],
-                  ['Husband Contact', crf.husbandPhone],
+                  ['Best estimate of gestational age', gaStr],
+                  ['Method of gestation assessment', method],
+                  if (lmp.isNotEmpty) ['LMP date', lmp],
+                  ['EDD', edd],
                 ]),
-                _sectionHd('Screening Information'),
+                _sectionHd('A2 · Identification'),
                 _kvTable([
                   ['Site', crf.site],
                   ['Site ID', crf.siteId],
-                  ['Screened By', crf.screenedBy],
                   [
-                    'Screening Date & Time',
-                    screeningDt.isEmpty ? crf.screeningDateTime : screeningDt
+                    'Screening date and time',
+                    screeningDt.isEmpty ? crf.screeningDateTime : screeningDt,
                   ],
+                  ['Screened by', crf.screenedBy],
                 ]),
-                _sectionHd('Consent Information'),
-                ..._formAConsentSection(
-                  crf: crf,
-                  extras: extras,
-                  relationshipDisplay: relationshipDisplay,
-                  videoPis: videoPis,
-                  consentDt: consentDt,
-                  notApproached: notApproached,
-                ),
+                _sectionHd('A3 · Maternal'),
+                _kvTable([
+                  ['Mother first name', crf.motherFirstName],
+                  ['Mother surname', crf.motherSurname],
+                  ['Husband first name', crf.husbandFirstName],
+                  ['Husband surname', crf.husbandSurname],
+                  ['Maternal UID', crf.maternalUid],
+                  ['Hospital admission number', crf.hospitalNo],
+                  ['Mother mobile number', crf.motherPhone],
+                  ['Husband mobile number', crf.husbandPhone],
+                ]),
               ],
             ),
           ),
@@ -388,56 +459,66 @@ class PdfService {
             child: pw.Column(
               crossAxisAlignment: pw.CrossAxisAlignment.start,
               children: [
-                _sectionHd('Gestation Assessment'),
-                _kvTable([
-                  [
-                    'Gestation Known',
-                    crf.gestationKnownInWeeks ? 'Yes' : 'No'
-                  ],
-                  if (!crf.gestationKnownInWeeks)
-                    ['GA Source', extras?.gaSource ?? ''],
-                  if (lmp.isNotEmpty) ['LMP Date', lmp],
-                  ['Best Estimate GA', gaStr],
-                  ['EDD', edd],
-                  if (crf.gestationKnownInWeeks)
-                    [
-                      'Assessment Method',
-                      methodLabels[crf.gestationMethod] ?? crf.gestationMethod
-                    ],
-                  ['GA Eligibility', gaElig],
-                ]),
-                _sectionHd('Exclusion Criteria'),
+                _sectionHd('A4 · Exclusion'),
                 _ynTable(
                   [
-                    ['Major Structural Anomaly / Genetic', excYn('ANOMALY')],
-                    if (anomalyYes && crf.anomalyDetails.trim().isNotEmpty)
-                      ['↳ ${crf.anomalyDetails.trim()}', ''],
-                    ['Fetal Hydrops', excYn('HYDROPS')],
-                    if (hydropsYes && hydropsType.isNotEmpty)
-                      ['↳ Type: $hydropsType', ''],
                     [
-                      'Decision to Forego Resuscitation',
-                      excYn('RESUSCITATION')
+                      'Major structural anomaly / genetic abnormality',
+                      excYn('ANOMALY'),
+                    ],
+                    if (anomalyYes && crf.anomalyDetails.trim().isNotEmpty)
+                      ['If yes, specify', crf.anomalyDetails.trim()],
+                    ['Fetal hydrops', excYn('HYDROPS')],
+                    if (hydropsYes && hydropsType.isNotEmpty)
+                      ['If yes', hydropsType],
+                    [
+                      'Decision to forego resuscitation',
+                      excYn('RESUSCITATION'),
                     ],
                     if (resusYes && resusReason.isNotEmpty)
-                      ['↳ Reason: $resusReason', ''],
-                    [
-                      'Insufficient Time for Consent',
-                      excYn('INSUFFICIENT')
-                    ],
+                      ['If yes', resusReason],
+                    ['Insufficient time for consent', excYn('INSUFFICIENT')],
                     if (insuffYes && insuffReason.isNotEmpty)
-                      ['↳ $insuffReason', ''],
-                    ['Intrauterine Fetal Death (IUFD)', excYn('IUFD')],
+                      ['If yes, specify', insuffReason],
+                    ['IUFD', excYn('IUFD')],
                   ],
-                  leftHeader: 'Criterion',
-                  rightHeader: 'Present',
+                  leftHeader: 'Finding',
+                  rightHeader: 'Yes / No',
                 ),
+                _sectionHd('A5 · Consent'),
+                _kvTable([
+                  [
+                    'Consent',
+                    crf.consentStatus == 'Select' ? '' : crf.consentStatus,
+                  ],
+                  ['Consent taken by', crf.consentTakenBy],
+                  ['Relationship', relationshipDisplay],
+                  if (crf.consentStatus == 'No')
+                    ['Refusal reason', crf.consentRefusalReason],
+                  if (crf.consentStatus == 'Not approached')
+                    ['Not approached reason', notApproached],
+                  if (consentDt.isNotEmpty)
+                    ['Consent date and time', consentDt],
+                  ['Video PIS shown', videoPis],
+                ]),
+                if (sig != null)
+                  pw.Padding(
+                    padding: const pw.EdgeInsets.only(top: 4),
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        pw.Text('Consent signature',
+                            style: const pw.TextStyle(fontSize: 8)),
+                        pw.SizedBox(height: 2),
+                        pw.Image(pw.MemoryImage(sig), height: 36),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
         ],
       ),
-
       _formAAttestation(
         preparedBy: _preparedByDisplayName(crf, extras),
         dateText: consentDt.isNotEmpty
@@ -485,70 +566,6 @@ class PdfService {
     final takenBy = crf.consentTakenBy.trim();
     if (takenBy.isNotEmpty && takenBy != 'Select') return takenBy;
     return (extras?.userFullName ?? '').trim();
-  }
-
-  static List<pw.Widget> _formAConsentSection({
-    required CRF crf,
-    required FormAPrintExtras? extras,
-    required String relationshipDisplay,
-    required String videoPis,
-    required String consentDt,
-    required String notApproached,
-  }) {
-    final rows = <List<String>>[
-      ['Consent Status', crf.consentStatus == 'Select' ? '' : crf.consentStatus],
-      ['Consent Taken By', crf.consentTakenBy],
-      ['Relationship', relationshipDisplay],
-      if (crf.consentStatus == 'No')
-        ['Refusal Reason', crf.consentRefusalReason],
-      if (crf.consentStatus == 'Not approached')
-        ['Not Approached Reason', notApproached],
-      if (crf.consentStatus == 'Yes' && consentDt.isNotEmpty)
-        ['Consent Date & Time', consentDt],
-      ['Video PIS Shown', videoPis],
-    ];
-    final sig = _decodePngBytes(extras?.consentSignatureImage);
-    final signedAt = _fmtAnyDateTime(extras?.consentSignatureCapturedAt ?? '');
-    return [
-      _kvTable(rows),
-      if (sig != null) ...[
-        pw.SizedBox(height: 2),
-        pw.Table(
-          border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.4),
-          columnWidths: const {
-            0: pw.FlexColumnWidth(1.35),
-            1: pw.FlexColumnWidth(2),
-          },
-          children: [
-            pw.TableRow(children: [
-              pw.Container(
-                color: PdfColors.grey100,
-                padding: const pw.EdgeInsets.symmetric(
-                    horizontal: 6, vertical: 4),
-                child: pw.Text('ICF Signature',
-                    style: const pw.TextStyle(fontSize: 8.5)),
-              ),
-              pw.Padding(
-                padding: const pw.EdgeInsets.symmetric(
-                    horizontal: 6, vertical: 6),
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    pw.Image(pw.MemoryImage(sig), height: 52),
-                    if (signedAt.isNotEmpty) ...[
-                      pw.SizedBox(height: 3),
-                      pw.Text('Signed $signedAt',
-                          style: const pw.TextStyle(
-                              fontSize: 7.5, color: PdfColors.grey700)),
-                    ],
-                  ],
-                ),
-              ),
-            ]),
-          ],
-        ),
-      ],
-    ];
   }
 
   static pw.Widget _formAAttestation({
@@ -600,8 +617,8 @@ class PdfService {
     required String todayLong,
     required String todayShort,
     bool includeClosing = true,
-    String docLabel = 'Birth & Resuscitation — Form B1',
-    String statusLabel = 'Form B1 Status',
+    String docLabel = 'Birth & Resuscitation — Form B',
+    String statusLabel = 'Form B Status',
   }) {
     final eid = _firstNonEmpty([
       formB?.enrollmentId,
@@ -717,6 +734,7 @@ class PdfService {
         meta: [
           ['Enrollment ID', eid.isEmpty ? 'Not assigned' : eid],
           ['Screening ID', crf.screeningId],
+          ['Site', crf.site],
           ['Print Date', todayLong],
         ],
       ),
@@ -923,6 +941,7 @@ class PdfService {
           meta: [
             ['Enrollment ID', eid.isEmpty ? 'Not assigned' : eid],
             ['Screening ID', crf.screeningId],
+            ['Site', crf.site],
             ['Print Date', todayLong],
           ],
         ),
@@ -1008,6 +1027,7 @@ class PdfService {
   static pw.Widget _studyHeader({
     required String docLabel,
     required List<List<String>> meta,
+    String metaLine = 'ICMR Funded · Multi-site RCT',
   }) {
     return pw.Row(
       crossAxisAlignment: pw.CrossAxisAlignment.start,
@@ -1022,13 +1042,13 @@ class PdfService {
                       fontSize: 16, fontWeight: pw.FontWeight.bold)),
               pw.SizedBox(height: 3),
               pw.Text(
-                'Providing initial Oxygen for delivery Room resuscitATion of\n'
-                'preteRm infants using targeted Low oxygen versus air',
+                'Initial Oxygen for Delivery room Resuscitation of preterm neonates:\n'
+                'a triple-arm, multi-site, randomized, controlled trial',
                 style: const pw.TextStyle(
                     fontSize: 8, color: PdfColors.grey700, lineSpacing: 1.2),
               ),
               pw.SizedBox(height: 3),
-              pw.Text('ICMR Funded · Multi-site RCT · PGIMER Chandigarh',
+              pw.Text(metaLine,
                   style: const pw.TextStyle(
                       fontSize: 8, color: PdfColors.grey600)),
             ],

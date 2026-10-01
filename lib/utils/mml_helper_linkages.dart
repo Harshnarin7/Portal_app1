@@ -415,7 +415,8 @@ class MmlTransfusionYnSync {
   });
 }
 
-/// Mirror 5.6.A products onto Helper #28–#30; respect nurse explicit No (false).
+/// Mirror 5.6.A / 5.1.B onto helper Y/N fields.
+/// DMS may set Yes, and may clear only a Yes it wrote. A nurse Yes or No stays.
 MmlTransfusionYnSync mmlSyncTransfusionYnFromMml({
   required bool? current,
   required bool mmlHas,
@@ -429,7 +430,7 @@ MmlTransfusionYnSync mmlSyncTransfusionYnFromMml({
     );
   }
   if (mmlHas) {
-    if (mmlYnLooksMmlSourced(current, true) || wasAutofilled) {
+    if (current == null || wasAutofilled) {
       final changed = current != true;
       return MmlTransfusionYnSync(
         nextValue: true,
@@ -437,13 +438,13 @@ MmlTransfusionYnSync mmlSyncTransfusionYnFromMml({
         changed: changed,
       );
     }
-    return MmlTransfusionYnSync(
-      nextValue: current,
-      nextAutofilled: wasAutofilled,
+    return const MmlTransfusionYnSync(
+      nextValue: true,
+      nextAutofilled: false,
       changed: false,
     );
   }
-  if (current == true) {
+  if (current == true && wasAutofilled) {
     return const MmlTransfusionYnSync(
       nextValue: null,
       nextAutofilled: false,
@@ -1180,7 +1181,11 @@ int? _hhmmToMinutes(String hhmm) {
     buildFio2AucRowsFromRespA(List<Map<String, dynamic>> respARows) {
   final spans = <({int from, int to, double fio2})>[];
   for (final row in respARows) {
-    final tr = parseMmlTimeRangeStr(row['time_range']);
+    final tr = parseMmlTimeRangeStr(
+      (row['time_range']?.toString().trim().isNotEmpty == true)
+          ? row['time_range']
+          : row['time'],
+    );
     final fromMin = _hhmmToMinutes(tr.from);
     final toMin = _hhmmToMinutes(tr.to);
     if (fromMin == null || toMin == null || toMin <= fromMin) continue;

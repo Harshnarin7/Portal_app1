@@ -7,7 +7,6 @@ import '../services/forms_api_service.dart';
 import '../theme/app_theme.dart';
 import '../navigation/helper_forms_navigation.dart';
 import '../utils/form_b_local_guard.dart';
-import '../utils/helper_day_strip.dart';
 import '../utils/helper_dob_day1.dart';
 import '../utils/mml_helper_linkages.dart';
 import '../widgets/theme_toggle_widget.dart';
@@ -131,7 +130,6 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
   List<Map<String, dynamic>> _lastServerLogs = [];
   Timer? _autoSaveTimer;
   DateTime? _day1Date;
-  bool _showAllFio2Days = false;
   int? _dmsPrefillingDay;
 
   @override
@@ -458,17 +456,11 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
     });
   }
 
-  bool _isDayLocked(int index) {
-    if (index <= 0) return false;
-    return !_days[index - 1].isComplete;
-  }
+  /// Web FiO₂ AUC leaves every Supplemental O₂ day editable. Locking Day N
+  /// until Day N−1 is complete blocked DMS prefill and typing on later days.
+  bool _isDayLocked(int _) => false;
 
-  List<_FiO2Day> get _visibleDays {
-    if (_showAllFio2Days || _days.length <= kMobileDayStripWindow) {
-      return _days;
-    }
-    return _days.sublist(_days.length - kMobileDayStripWindow);
-  }
+  List<_FiO2Day> get _visibleDays => _days;
 
   Future<void> _prefillDayFromDms(int dayNum) async {
     final eid = widget.enrollmentId.trim();
@@ -931,16 +923,6 @@ class _HelperFiO2AUCState extends State<HelperFiO2AUC> {
                 const SizedBox(height: 12),
                 _kpiStrip(c),
                 const SizedBox(height: 14),
-                if (!_showAllFio2Days && _days.length > kMobileDayStripWindow)
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton(
-                      onPressed: () => setState(() => _showAllFio2Days = true),
-                      child: Text(
-                        'Show earlier O₂ days (${_days.length - kMobileDayStripWindow} hidden)',
-                      ),
-                    ),
-                  ),
                 ...List.generate(_visibleDays.length, (i) {
                   final day = _visibleDays[i];
                   final fullIdx = _days.indexWhere((d) => d.day == day.day);
