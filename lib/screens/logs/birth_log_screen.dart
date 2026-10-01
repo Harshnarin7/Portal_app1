@@ -71,6 +71,7 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
   int? _editingId;
   bool _saving = false;
   bool _showReasonSection = false;
+  bool _allowDuplicateCr = false;
   String _saveError = '';
 
   List<Map<String, dynamic>> _entries = [];
@@ -142,6 +143,7 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
       _reasons.clear();
       _saveError = '';
       _showReasonSection = false;
+      _allowDuplicateCr = false;
     });
   }
 
@@ -190,6 +192,7 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
           : '';
       _saveError = '';
       _showReasonSection = reasonList.isNotEmpty;
+      _allowDuplicateCr = false;
     });
   }
 
@@ -252,6 +255,19 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
       setState(() => _saveError = 'Date of birth is required.');
       return;
     }
+    final dup = findDuplicateCr(
+      _entries,
+      site: site,
+      uid: uid,
+      excludeId: _editingId,
+      dateOfBirth: _dateOfBirth,
+    );
+    if (dup != null && !_allowDuplicateCr) {
+      setState(() => _saveError =
+          "This CR number is already logged for this date of birth — "
+          "edit that entry, or tick 'Twin / multiple birth'.");
+      return;
+    }
 
     setState(() {
       _saving = true;
@@ -263,6 +279,7 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
     final weight = num.tryParse(_weightCtrl.text.trim());
     final payload = <String, dynamic>{
       'mother_uid': uid.isEmpty ? null : uid,
+      'allow_duplicate_cr': dup != null && _allowDuplicateCr,
       'mother_name': name.isEmpty ? null : name,
       'husband_name':
           _husbandCtrl.text.trim().isEmpty ? null : _husbandCtrl.text.trim(),
@@ -308,14 +325,91 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
     }
   }
 
+  Widget _duplicateCrWarning(Map<String, dynamic> duplicateCr) {
+    final name = (duplicateCr['mother_name'] ?? '').toString().trim();
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+      decoration: BoxDecoration(
+        color: _kWarning.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _kWarning.withValues(alpha: 0.55)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            name.isEmpty
+                ? 'Already logged for this date of birth'
+                : 'Already logged for this date of birth ($name)',
+            style: const TextStyle(
+              color: Color(0xFF92400E),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              height: 1.35,
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: () => _startEdit(duplicateCr),
+              style: TextButton.styleFrom(
+                foregroundColor: _kPrimary,
+                padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 4),
+                visualDensity: VisualDensity.compact,
+              ),
+              child: const Text('Edit that entry'),
+            ),
+          ),
+          InkWell(
+            onTap: () => setState(() => _allowDuplicateCr = !_allowDuplicateCr),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: Checkbox(
+                    value: _allowDuplicateCr,
+                    activeColor: _kWarning,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (v) =>
+                        setState(() => _allowDuplicateCr = v ?? false),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'Twin / multiple birth — log as a separate baby',
+                    style: TextStyle(fontSize: 12, color: _kText1, height: 1.3),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   int get _alertCount => _entries
       .where((e) =>
           e['match_status'] == 'in_range_no_match' || e['ga_log_missing'] == true)
       .length;
 
+  Map<String, dynamic>? _duplicateCr(String? site) {
+    return findDuplicateCr(
+      _entries,
+      site: site,
+      uid: _uidCtrl.text,
+      excludeId: _editingId,
+      dateOfBirth: _dateOfBirth,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final user = context.watch<AuthProvider>().user;
+    final duplicateCr = _duplicateCr(user?.siteName);
 
     return Scaffold(
       backgroundColor: _kBg,
@@ -386,7 +480,7 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
                     decoration: _inputDeco(
                       hint: MaternalUid.placeholder(user?.siteName),
                     ),
-                    onChanged: (_) => setState(() {}),
+                    onChanged: (_) => setState(() => _allowDuplicateCr = false),
                   ),
                   if (MaternalUid.liveError(user?.siteName, _uidCtrl.text).isNotEmpty)
                     Padding(
@@ -396,6 +490,7 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
                         style: const TextStyle(color: _kDanger, fontSize: 12),
                       ),
                     ),
+                  if (duplicateCr != null) _duplicateCrWarning(duplicateCr),
                   const SizedBox(height: 12),
                   _label("Mother's Name"),
                   TextField(controller: _nameCtrl, decoration: _inputDeco()),

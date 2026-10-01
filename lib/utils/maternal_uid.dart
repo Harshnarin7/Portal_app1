@@ -63,3 +63,28 @@ class MaternalUid {
     return const [];
   }
 }
+
+/// Trim, uppercase, and strip spaces and hyphens — same as web `normalizeCr`.
+String normalizeCr(String? value) =>
+    (value ?? '').trim().toUpperCase().replaceAll(RegExp(r'[\s-]+'), '');
+
+/// Same site, same CR number, and same date of birth. Not a duplicate across
+/// sites or different dates. [excludeId] skips the row being edited.
+Map<String, dynamic>? findDuplicateCr(
+  List<Map<String, dynamic>> entries, {
+  required String? site,
+  required String uid,
+  int? excludeId,
+  String? dateOfBirth,
+}) {
+  final cr = normalizeCr(uid);
+  if (cr.isEmpty || site == null || site.isEmpty) return null;
+  for (final e in entries) {
+    if (e['id'] == excludeId) continue;
+    if (e['site_name'] != site) continue;
+    if (normalizeCr(e['mother_uid']?.toString()) != cr) continue;
+    if ((e['date_of_birth'] ?? '').toString() != (dateOfBirth ?? '')) continue;
+    return e;
+  }
+  return null;
+}
