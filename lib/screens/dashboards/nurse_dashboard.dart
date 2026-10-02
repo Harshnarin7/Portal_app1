@@ -635,7 +635,11 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
 
   // Until Form B2 is the required next step, Form B1 stays available.
   // While Form B2 is pending, only Form B2 is open.
-  final formBOpen = !(needsFormC && !formCDone);
+  // Form B also requires the screening to actually be Eligible (mirrors the
+  // web sidebar's lock and the server's require_eligible_screening_for_form_b
+  // guard, added 2026-09-30) — without this a nurse could open and fill in
+  // Form B for a non-Eligible screening only to have the save rejected.
+  final formBOpen = _isEligible(c) && !(needsFormC && !formCDone);
   final formCOpen = needsFormC;
   final helpersEnabled = formCDone && hasEnrollment;
   final helperPatient = HelperFormPatientContext(
