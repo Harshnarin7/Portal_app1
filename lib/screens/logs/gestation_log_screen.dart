@@ -64,6 +64,7 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
 
   bool _saving = false;
   int? _editingId;
+  bool _allowDuplicateCr = false;
   String _saveError = '';
   final _scrollCtrl = ScrollController();
   bool _foundIufd = false;
@@ -170,6 +171,17 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
       setState(() => _saveError = 'Select a gestation source.');
       return;
     }
+    final dup = findDuplicateCr(
+      _entries,
+      site: _siteName,
+      uid: uid,
+      excludeId: _editingId,
+    );
+    if (dup != null && !_allowDuplicateCr) {
+      setState(() => _saveError =
+          "This CR number is already logged — edit that entry, or tick 'New contact of the same woman'.");
+      return;
+    }
 
     setState(() {
       _saving = true;
@@ -182,6 +194,7 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
       'site_name': _siteName.isEmpty ? null : _siteName,
       'identification_type':
           _identificationType.isEmpty ? _kDefaultIdType : _identificationType,
+      'allow_duplicate_cr': dup != null && _allowDuplicateCr,
       'mother_name': name.isEmpty ? null : name,
       'mother_uid': uid.isEmpty ? null : uid,
       'ga_source': _foundIufd ? null : _gaSource,
@@ -212,6 +225,7 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
         _gaSource = '';
         _gestationMethod = '';
         _foundIufd = false;
+        _allowDuplicateCr = false;
         if (!_isSiteLocked) _siteName = '';
         _saving = false;
       });
@@ -243,6 +257,7 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
       _gaSource = '';
       _gestationMethod = '';
       _foundIufd = false;
+      _allowDuplicateCr = false;
       if (!_isSiteLocked) _siteName = '';
     });
   }
@@ -269,6 +284,7 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
       _daysCtrl.text =
           reliable ? (entry['gestation_days']?.toString() ?? '') : '';
       _foundIufd = foundIufd;
+      _allowDuplicateCr = false;
     });
     if (_scrollCtrl.hasClients) {
       _scrollCtrl.animateTo(
@@ -296,6 +312,82 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
       if (m.$1 == value) return m.$2;
     }
     return value;
+  }
+
+  int get _crPendingCount =>
+      _entries.where((e) => e['cr_pending'] == true).length;
+
+  Map<String, dynamic>? get _duplicateCr => findDuplicateCr(
+        _entries,
+        site: _siteName,
+        uid: _uidCtrl.text,
+        excludeId: _editingId,
+      );
+
+  Widget _duplicateCrWarning(Map<String, dynamic> entry) {
+    final name = (entry['mother_name'] ?? '').toString().trim();
+    final when = _ddmmyyyy(entry['check_date']);
+    final whenText = when == '—' ? '' : ' on $when';
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+      decoration: BoxDecoration(
+        color: _kWarning.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _kWarning.withValues(alpha: 0.55)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Already logged$whenText${name.isEmpty ? '' : ' ($name)'}',
+            style: const TextStyle(
+              color: Color(0xFF92400E),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              height: 1.35,
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: () => _startEdit(entry),
+              style: TextButton.styleFrom(
+                foregroundColor: _kPrimary,
+                padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 4),
+                visualDensity: VisualDensity.compact,
+              ),
+              child: const Text('Edit that entry'),
+            ),
+          ),
+          InkWell(
+            onTap: () => setState(() => _allowDuplicateCr = !_allowDuplicateCr),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: Checkbox(
+                    value: _allowDuplicateCr,
+                    activeColor: _kWarning,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (v) =>
+                        setState(() => _allowDuplicateCr = v ?? false),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'New contact of the same woman — log again',
+                    style: TextStyle(fontSize: 12, color: _kText1, height: 1.3),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -340,6 +432,16 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
               'Log every woman checked for gestational age at antenatal clinic or delivery-room triage — not just the ones who turn out preterm.',
               style: TextStyle(fontSize: 12, color: _kText2, height: 1.4),
             ),
+            if (_crPendingCount > 0) ...[
+              const SizedBox(height: 12),
+              _banner(
+                color: _kWarning,
+                child: Text(
+                  '$_crPendingCount entr${_crPendingCount == 1 ? 'y is' : 'ies are'} pending a CR number — use Edit to add it.',
+                  style: const TextStyle(fontSize: 12, color: _kText1),
+                ),
+              ),
+            ],
             if (gap > 0) ...[
               const SizedBox(height: 12),
               _banner(
@@ -427,8 +529,17 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
                     decoration: _inputDeco(
                       hint: MaternalUid.placeholder(_siteName),
                     ),
-                    onChanged: (_) => setState(() {}),
+                    onChanged: (_) => setState(() => _allowDuplicateCr = false),
                   ),
+                  if (_uidCtrl.text.trim().isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text(
+                        'Optional — can be added later (entry shows as "CR pending").',
+                        style: TextStyle(fontSize: 12, color: _kText3),
+                      ),
+                    ),
+                  if (_duplicateCr != null) _duplicateCrWarning(_duplicateCr!),
                   if (MaternalUid.liveError(_siteName, _uidCtrl.text).isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 4),
@@ -666,10 +777,24 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '${e['mother_name'] ?? '—'}  ·  ${e['mother_uid'] ?? '—'}',
-            style: const TextStyle(
-                fontWeight: FontWeight.w700, color: _kText1),
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 6,
+            children: [
+              Text(
+                '${e['mother_name'] ?? '—'}  ·',
+                style: const TextStyle(
+                    fontWeight: FontWeight.w700, color: _kText1),
+              ),
+              if (e['cr_pending'] == true)
+                _chip('CR pending', color: _kWarning)
+              else
+                Text(
+                  '${e['mother_uid'] ?? '—'}',
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w700, color: _kText1),
+                ),
+            ],
           ),
           const SizedBox(height: 4),
           Text(

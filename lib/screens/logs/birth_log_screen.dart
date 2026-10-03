@@ -31,6 +31,8 @@ const _kModesOfDelivery = [
   'Other',
 ];
 
+const kSiteOrder = ['PGIMER', 'GMCH', 'IOG', 'AFMC', 'GMCH-A', 'AMC'];
+
 const _kNotApproachedReasons = [
   'No time to approach to screen',
   'Nurse on leave',
@@ -61,6 +63,8 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
   final _weightCtrl = TextEditingController();
   final _otherReasonCtrl = TextEditingController();
 
+  String _logSite = '';
+  bool _logSiteSeeded = false;
   String _dateOfBirth = '';
   String _timeOfBirth = '';
   String _modeOfDelivery = '';
@@ -82,6 +86,18 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_logSiteSeeded) return;
+    final user = context.read<AuthProvider>().user;
+    if (user == null) return;
+    if (!user.role.isGlobal && _logSite.isEmpty) {
+      _logSite = user.siteName ?? '';
+    }
+    _logSiteSeeded = true;
   }
 
   @override
@@ -144,6 +160,9 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
       _saveError = '';
       _showReasonSection = false;
       _allowDuplicateCr = false;
+      final user = context.read<AuthProvider>().user;
+      final locked = user != null && !user.role.isGlobal;
+      _logSite = locked ? (user.siteName ?? '') : '';
     });
   }
 
@@ -168,8 +187,14 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
             .map(_canonicalReason)
             .where((s) => s.isNotEmpty)
             .toList();
+    final user = context.read<AuthProvider>().user;
+    final locked = user != null && !user.role.isGlobal;
+    final fromEntry = (entry['site_name'] ?? '').toString();
     setState(() {
       _editingId = entry['id'] as int?;
+      _logSite = fromEntry.isNotEmpty
+          ? fromEntry
+          : (locked ? (user.siteName ?? '') : '');
       _uidCtrl.text = (entry['mother_uid'] ?? '').toString();
       _nameCtrl.text = (entry['mother_name'] ?? '').toString();
       _husbandCtrl.text = (entry['husband_name'] ?? '').toString();
@@ -240,8 +265,11 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
   Future<void> _save() async {
     final uid = _uidCtrl.text.trim();
     final name = _nameCtrl.text.trim();
-    final site = context.read<AuthProvider>().user?.siteName;
-    final uidError = MaternalUid.saveError(site, uid);
+    if (_logSite.isEmpty) {
+      setState(() => _saveError = 'Select a site.');
+      return;
+    }
+    final uidError = MaternalUid.saveError(_logSite, uid);
     if (uidError.isNotEmpty) {
       setState(() => _saveError = uidError);
       return;
@@ -257,10 +285,11 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
     }
     final dup = findDuplicateCr(
       _entries,
-      site: site,
+      site: _logSite,
       uid: uid,
       excludeId: _editingId,
       dateOfBirth: _dateOfBirth,
+      matchDob: true,
     );
     if (dup != null && !_allowDuplicateCr) {
       setState(() => _saveError =
@@ -278,6 +307,7 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
     final days = int.tryParse(_daysCtrl.text.trim());
     final weight = num.tryParse(_weightCtrl.text.trim());
     final payload = <String, dynamic>{
+      'site_name': _logSite,
       'mother_uid': uid.isEmpty ? null : uid,
       'allow_duplicate_cr': dup != null && _allowDuplicateCr,
       'mother_name': name.isEmpty ? null : name,
@@ -391,6 +421,24 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
     );
   }
 
+  int get _crPendingCount =>
+      _entries.where((e) => e['cr_pending'] == true).length;
+
+  Widget _warningBanner(String text) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _kWarning.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _kWarning.withValues(alpha: 0.4)),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(fontSize: 12, color: _kText1),
+      ),
+    );
+  }
+
   int get _alertCount => _entries
       .where((e) =>
           e['match_status'] == 'in_range_no_match' || e['ga_log_missing'] == true)
@@ -403,13 +451,15 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
       uid: _uidCtrl.text,
       excludeId: _editingId,
       dateOfBirth: _dateOfBirth,
+      matchDob: true,
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final user = context.watch<AuthProvider>().user;
-    final duplicateCr = _duplicateCr(user?.siteName);
+    final duplicateCr = _duplicateCr(_logSite);
+    final siteLocked = user != null && !user.role.isGlobal;
 
     return Scaffold(
       backgroundColor: _kBg,
@@ -443,20 +493,16 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
               'Completed for every birth at this hospital, not just trial-enrolled ones — catches a GA-eligible (25w0d–31w6d) delivery with no matching Form A on file.',
               style: TextStyle(fontSize: 12, color: _kText2, height: 1.4),
             ),
+            if (_crPendingCount > 0) ...[
+              const SizedBox(height: 12),
+              _warningBanner(
+                '$_crPendingCount entr${_crPendingCount == 1 ? 'y is' : 'ies are'} pending a CR number — use Edit to add it.',
+              ),
+            ],
             if (_alertCount > 0) ...[
               const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: _kWarning.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(12),
-                  border:
-                      Border.all(color: _kWarning.withValues(alpha: 0.4)),
-                ),
-                child: Text(
-                  '$_alertCount entr${_alertCount == 1 ? 'y needs' : 'ies need'} review — "Not filled Form A" and/or "Never Checked GA log" below.',
-                  style: const TextStyle(fontSize: 12, color: _kText1),
-                ),
+              _warningBanner(
+                '$_alertCount entr${_alertCount == 1 ? 'y needs' : 'ies need'} review — "Not filled Form A" and/or "Never Checked GA log" below.',
               ),
             ],
             const SizedBox(height: 16),
@@ -470,24 +516,56 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  _label('Site'),
+                  if (siteLocked)
+                    TextFormField(
+                      key: ValueKey('locked-site-${user.siteName ?? ''}'),
+                      initialValue: user.siteName ?? '',
+                      enabled: false,
+                      decoration: _inputDeco(),
+                    )
+                  else
+                    DropdownButtonFormField<String>(
+                      value: kSiteOrder.contains(_logSite) ? _logSite : null,
+                      decoration: _inputDeco(),
+                      hint: const Text('–– Select ––'),
+                      items: kSiteOrder
+                          .map((s) =>
+                              DropdownMenuItem(value: s, child: Text(s)))
+                          .toList(),
+                      onChanged: (v) => setState(() {
+                        _logSite = v ?? '';
+                        _uidCtrl.text =
+                            MaternalUid.sanitize(_logSite, _uidCtrl.text);
+                      }),
+                    ),
+                  const SizedBox(height: 12),
                   _label("Mother's UHID / CR Number"),
                   TextField(
                     controller: _uidCtrl,
-                    keyboardType: user?.siteName == 'PGIMER'
+                    keyboardType: _logSite == 'PGIMER'
                         ? TextInputType.number
                         : TextInputType.text,
-                    inputFormatters: MaternalUid.formatters(user?.siteName),
+                    inputFormatters: MaternalUid.formatters(_logSite),
                     decoration: _inputDeco(
-                      hint: MaternalUid.placeholder(user?.siteName),
+                      hint: MaternalUid.placeholder(_logSite),
                     ),
                     onChanged: (_) => setState(() => _allowDuplicateCr = false),
                   ),
-                  if (MaternalUid.liveError(user?.siteName, _uidCtrl.text).isNotEmpty)
+                  if (MaternalUid.liveError(_logSite, _uidCtrl.text).isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 4),
                       child: Text(
-                        MaternalUid.liveError(user?.siteName, _uidCtrl.text),
+                        MaternalUid.liveError(_logSite, _uidCtrl.text),
                         style: const TextStyle(color: _kDanger, fontSize: 12),
+                      ),
+                    ),
+                  if (_uidCtrl.text.trim().isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text(
+                        'Optional — can be added later (entry shows as "CR pending").',
+                        style: TextStyle(fontSize: 12, color: _kText3),
                       ),
                     ),
                   if (duplicateCr != null) _duplicateCrWarning(duplicateCr),
@@ -590,10 +668,30 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
                     onChanged: (v) => setState(() => _ppv = v ?? ''),
                   ),
                   const SizedBox(height: 14),
+                  if (!_showReasonSection)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton(
+                        onPressed: () =>
+                            setState(() => _showReasonSection = true),
+                        child: const Text('+ Add reason'),
+                      ),
+                    ),
                   if (_showReasonSection) ...[
-                    const Text(
-                      'If no matching Form A is found, reason not approached',
-                      style: TextStyle(fontSize: 12, color: _kText2),
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'If no matching Form A is found, reason not approached',
+                            style: TextStyle(fontSize: 12, color: _kText2),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () =>
+                              setState(() => _showReasonSection = false),
+                          child: const Text('Hide'),
+                        ),
+                      ],
                     ),
                   const SizedBox(height: 8),
                   Wrap(
@@ -723,9 +821,22 @@ class _BirthLogScreenState extends State<BirthLogScreen> {
               child: const Text('Edit'),
             ),
           ]),
-          Text(
-            '${e['mother_name'] ?? '—'}  ·  ${e['mother_uid'] ?? '—'}',
-            style: const TextStyle(fontSize: 13, color: _kText2),
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 6,
+            children: [
+              Text(
+                '${e['mother_name'] ?? '—'}  ·',
+                style: const TextStyle(fontSize: 13, color: _kText2),
+              ),
+              if (e['cr_pending'] == true)
+                _chip('CR pending', color: _kWarning)
+              else
+                Text(
+                  '${e['mother_uid'] ?? '—'}',
+                  style: const TextStyle(fontSize: 13, color: _kText2),
+                ),
+            ],
           ),
           const SizedBox(height: 6),
           Wrap(

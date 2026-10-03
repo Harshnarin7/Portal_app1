@@ -2495,16 +2495,29 @@ class _ScreeningFormState extends State<ScreeningForm>
     });
   }
 
-  /// Form B stays locked until the screening is actually Eligible — GA in
-  /// window, no A4 exclusion, and consent Yes / Trial run. Mirrors the web
-  /// sidebar's own lock and the server's require_eligible_screening_for_form_b
-  /// guard (added 2026-09-30) — without this, a nurse could fill in the
-  /// whole of Form B only to have the save rejected at the end (found live:
-  /// a screening with consent "No" still had two Form B rows created).
+  /// Form B stays locked until the screening is Eligible. Uses
+  /// computeScreeningStatus (GA window, A4 exclusion, consent Yes / Trial run),
+  /// the same helper Form A saves with and the server guard expects.
+  /// Any exclusion marked Yes locks Form B even before the rest of A4 is done.
+  String get _liveScreeningStatus {
+    final weeks = int.tryParse(_gestWeeksCtrl.text.trim());
+    final days = int.tryParse(_gestDaysCtrl.text.trim()) ?? 0;
+    return computeScreeningStatus(
+      gestationWeeks: weeks,
+      gestationDays: days,
+      exclusionPresent: _exclusionPresent
+          ? true
+          : (_allExclusionsAnswered ? false : null),
+      consentGiven: _consentStatus != "Select" ? _consentStatus : null,
+      gestationKnown: _gestationKnownInWeeks == true
+          ? "Yes"
+          : (_gestationKnownInWeeks == false ? "No" : null),
+      gaSource: _gestationKnownInWeeks == false ? _gaSource : null,
+    );
+  }
+
   bool get _formBLocked =>
-      _gaEndedParticipation ||
-      _exclusionPresent ||
-      !(_consentStatus == "Yes" || _consentStatus == "Trial run");
+      normalizeScreeningStatus(_liveScreeningStatus) != 'Eligible';
 
   Future<void> _openFormB() async {
     if (!_formAExportEnabled || _formBLocked) return;
@@ -4202,6 +4215,18 @@ class _ScreeningFormState extends State<ScreeningForm>
                 ),
               ),
             ),
+            if (_formBLocked && !_gaEndedParticipation)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'Form B is locked — this screening is not Eligible (consent not given, or clinically excluded).',
+                  style: TextStyle(
+                    color: Color(0xFFB91C1C),
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ),
           ],
         ),
       ),

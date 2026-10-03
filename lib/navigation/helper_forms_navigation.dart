@@ -133,7 +133,7 @@ void switchHelperForm(
   required HelperFormPatientContext patient,
 }) {
   if (target == current) return;
-  Navigator.pushReplacement(
+  Navigator.push(
     context,
     MaterialPageRoute<void>(
       builder: (_) => buildHelperFormScreen(target, patient),

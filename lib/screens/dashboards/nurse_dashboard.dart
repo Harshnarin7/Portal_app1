@@ -607,6 +607,17 @@ Future<_FormNavDone> loadFormNavDone(CRF c) async {
   }
 }
 
+/// Opens [page], then brings this patient's form list back when it closes.
+/// Back no longer drops the nurse on the patient list with the menu gone.
+Future<void> pushPatientForm(BuildContext context, CRF patient, Widget page) async {
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(builder: (_) => page),
+  );
+  if (context.mounted) {
+    await showPatientActionsSheet(context, patient);
+  }
+}
+
 Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
   final api = ApiService();
   final nav = await loadFormNavDone(c);
@@ -635,13 +646,13 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
 
   // Until Form B2 is the required next step, Form B1 stays available.
   // While Form B2 is pending, only Form B2 is open.
-  // Form B also requires the screening to actually be Eligible (mirrors the
-  // web sidebar's lock and the server's require_eligible_screening_for_form_b
-  // guard, added 2026-09-30) — without this a nurse could open and fill in
-  // Form B for a non-Eligible screening only to have the save rejected.
+  // A screening that is not Eligible (consent refused, exclusion, or GA
+  // outside the window) stays locked out of Form B and everything after it.
+  const ineligibleNote =
+      'Form B is locked — this screening is not Eligible (consent not given, or clinically excluded).';
   final formBOpen = _isEligible(c) && !(needsFormC && !formCDone);
-  final formCOpen = needsFormC;
-  final helpersEnabled = formCDone && hasEnrollment;
+  final formCOpen = _isEligible(c) && needsFormC;
+  final helpersEnabled = _isEligible(c) && formCDone && hasEnrollment;
   final helperPatient = HelperFormPatientContext(
     enrollmentId: helperEid,
     gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
@@ -677,6 +688,14 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                 ]),
               ),
               const Divider(height: 20),
+              if (!_isEligible(c))
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Text(
+                    ineligibleNote,
+                    style: TextStyle(color: _kDanger, fontSize: 12, height: 1.35),
+                  ),
+                ),
               if (noPpvPath) buildNoPpvResuscitationBanner(),
               _buildActionTile(ctx, 'Export PDF', Icons.picture_as_pdf_rounded, true,
                 () => exportPatientPdf(context, c)),
@@ -700,7 +719,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                 'Form B1 — Birth & Resuscitation',
                 Icons.child_care_rounded,
                 formBOpen,
-                () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => FormBBirthResuscitation(
+                () => pushPatientForm(context, c, FormBBirthResuscitation(
                       key: ValueKey('form-b-${c.screeningId}'),
                       screeningId: c.screeningId,
                       maternalUid: c.maternalUid,
@@ -714,8 +733,9 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                       // Prefer site name (PGIMER) — Form B1 rules key on name, not "01".
                       siteId: c.site.isNotEmpty ? c.site : c.siteId,
                       screeningDateTime: c.screeningDateTime,
-                    ))),
+                    )),
                 completed: formBDone,
+                subtitle: _isEligible(c) ? null : ineligibleNote,
               ),
               _buildActionTile(
                 ctx,
@@ -737,7 +757,7 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                     } catch (_) {}
                   }
                   if (!context.mounted) return;
-                  Navigator.push(context, MaterialPageRoute(builder: (_) => FormCResuscitationDetails(
+                  await pushPatientForm(context, c, FormCResuscitationDetails(
                         key: ValueKey('form-c-${c.screeningId}'),
                         screeningId: c.screeningId,
                         gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
@@ -752,44 +772,84 @@ Future<void> showPatientActionsSheet(BuildContext context, CRF c) async {
                             : (remote?.babyUid ?? c.maternalUid),
                         formB: formB,
                         shared: shared,
-                      )));
+                      ));
                 },
                 completed: formCDone,
+                subtitle: _isEligible(c) ? null : ineligibleNote,
               ),
               _buildActionTile(ctx, 'Daily Monitoring Sheet (DMS)', Icons.monitor_heart_outlined, helpersEnabled,
-                () {
+                () async {
                   if (helperEid.isEmpty) return;
-                  Navigator.push(ctx, MaterialPageRoute(builder: (_) =>
-                      buildHelperFormScreen(HelperFormKind.minimalMonitoring, helperPatient)));
-                }),
+                  await pushPatientForm(
+                    context,
+                    c,
+                    buildHelperFormScreen(
+                      HelperFormKind.minimalMonitoring,
+                      helperPatient,
+                    ),
+                  );
+                },
+                subtitle: _isEligible(c) ? null : ineligibleNote,
+              ),
               _buildActionTile(ctx, 'Helper 2 — Resp/CV/Neuro', Icons.favorite_rounded, helpersEnabled,
-                () {
+                () async {
                   if (helperEid.isEmpty) return;
-                  Navigator.push(ctx, MaterialPageRoute(builder: (_) =>
-                      buildHelperFormScreen(HelperFormKind.respCvNeuro, helperPatient)));
-                }),
+                  await pushPatientForm(
+                    context,
+                    c,
+                    buildHelperFormScreen(
+                      HelperFormKind.respCvNeuro,
+                      helperPatient,
+                    ),
+                  );
+                },
+                subtitle: _isEligible(c) ? null : ineligibleNote,
+              ),
               _buildActionTile(ctx, 'Helper 3 — FiO₂ Logging', Icons.air_rounded, helpersEnabled,
-                () {
+                () async {
                   if (helperEid.isEmpty) return;
-                  Navigator.push(ctx, MaterialPageRoute(builder: (_) =>
-                      buildHelperFormScreen(HelperFormKind.fio2Auc, helperPatient)));
-                }),
+                  await pushPatientForm(
+                    context,
+                    c,
+                    buildHelperFormScreen(HelperFormKind.fio2Auc, helperPatient),
+                  );
+                },
+                subtitle: _isEligible(c) ? null : ineligibleNote,
+              ),
               _buildActionTile(ctx, 'Helper 4 — Infection/GI/Hema', Icons.bloodtype_rounded, helpersEnabled,
-                () {
+                () async {
                   if (helperEid.isEmpty) return;
-                  Navigator.push(ctx, MaterialPageRoute(builder: (_) =>
-                      buildHelperFormScreen(HelperFormKind.infectGiHema, helperPatient)));
-                }),
+                  await pushPatientForm(
+                    context,
+                    c,
+                    buildHelperFormScreen(
+                      HelperFormKind.infectGiHema,
+                      helperPatient,
+                    ),
+                  );
+                },
+                subtitle: _isEligible(c) ? null : ineligibleNote,
+              ),
               _buildActionTile(ctx, 'Helper 5 — Metab/Renal/Eye', Icons.visibility_rounded, helpersEnabled,
-                () {
+                () async {
                   if (helperEid.isEmpty) return;
-                  Navigator.push(ctx, MaterialPageRoute(builder: (_) =>
-                      buildHelperFormScreen(HelperFormKind.metabRenalVascEye, helperPatient)));
-                }),
+                  await pushPatientForm(
+                    context,
+                    c,
+                    buildHelperFormScreen(
+                      HelperFormKind.metabRenalVascEye,
+                      helperPatient,
+                    ),
+                  );
+                },
+                subtitle: _isEligible(c) ? null : ineligibleNote,
+              ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
                 child: Text(
-                  noPpvPath
+                  !_isEligible(c)
+                      ? ineligibleNote
+                      : noPpvPath
                       ? (formBDone
                           ? 'PPV not required — complete Maternal Form C on web. Form B2 and later forms stay locked.'
                           : 'PPV not required for this baby. Complete Form B1 if needed, then Maternal Form C on web.')
@@ -819,10 +879,17 @@ Widget _buildActionTile(
   bool enabled,
   VoidCallback onTap, {
   bool completed = false,
+  String? subtitle,
 }) {
   return ListTile(
     enabled: enabled,
     leading: Icon(icon, color: enabled ? _kPrimary : _kText3),
+    subtitle: subtitle == null
+        ? null
+        : Text(
+            subtitle,
+            style: const TextStyle(color: _kDanger, fontSize: 11, height: 1.3),
+          ),
     title: Row(
       children: [
         Expanded(
@@ -933,10 +1000,10 @@ Future<void> showFilledFormsSheet(
                 label: const Text('View'),
                 onPressed: () {
                   Navigator.pop(ctx);
-                  Navigator.push(
+                  pushPatientForm(
                     context,
-                    MaterialPageRoute(
-                      builder: (_) => FormBBirthResuscitation(
+                    c,
+                    FormBBirthResuscitation(
                         key: ValueKey('form-b-view-${c.screeningId}'),
                         screeningId: c.screeningId,
                         maternalUid: c.maternalUid,
@@ -951,7 +1018,6 @@ Future<void> showFilledFormsSheet(
                         siteId: c.site.isNotEmpty ? c.site : c.siteId,
                         screeningDateTime: c.screeningDateTime,
                       ),
-                    ),
                   );
                 },
               ),
@@ -967,10 +1033,10 @@ Future<void> showFilledFormsSheet(
                 label: const Text('View'),
                 onPressed: () {
                   Navigator.pop(ctx);
-                  Navigator.push(
+                  pushPatientForm(
                     context,
-                    MaterialPageRoute(
-                      builder: (_) => FormCResuscitationDetails(
+                    c,
+                    FormCResuscitationDetails(
                         key: ValueKey('form-c-view-${c.screeningId}'),
                         screeningId: c.screeningId,
                         gestation: '${c.gestationWeeks}w ${c.gestationDays}d',
@@ -986,7 +1052,6 @@ Future<void> showFilledFormsSheet(
                             : c.maternalUid,
                         formB: formB,
                       ),
-                    ),
                   );
                 },
               ),

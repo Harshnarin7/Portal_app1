@@ -20,6 +20,9 @@ class MaternalUid {
   static String liveError(String? site, String value) {
     final v = value.trim();
     if (v.isEmpty) return '';
+    if (site == null || site.isEmpty) {
+      return 'Select a site — the CR number format depends on the site.';
+    }
     if (site == 'PGIMER' && !RegExp(r'^\d{12}$').hasMatch(v)) {
       return v.length > 12
           ? 'Cannot be more than 12 digits'
@@ -31,23 +34,12 @@ class MaternalUid {
     return '';
   }
 
+  /// Format only. An empty CR number is allowed on both logs and is
+  /// shown later as "CR pending".
   static String saveError(String? site, String value) {
     final v = value.trim();
-    if (site == 'PGIMER') {
-      if (v.isEmpty) return 'CR number is required — exactly 12 digits.';
-      if (!RegExp(r'^\d{12}$').hasMatch(v)) {
-        return v.length > 12
-            ? 'Cannot be more than 12 digits'
-            : 'Must be exactly 12 digits';
-      }
-    }
-    if (site == 'AMC') {
-      if (v.isEmpty) return 'CR number is required — e.g. 123/2026.';
-      if (!RegExp(r'^\d+/\d{4}$').hasMatch(v)) {
-        return 'Must be in serial/year format, e.g. 123/2026';
-      }
-    }
-    return '';
+    if (v.isEmpty) return '';
+    return liveError(site, v);
   }
 
   static List<TextInputFormatter> formatters(String? site) {
@@ -76,6 +68,7 @@ Map<String, dynamic>? findDuplicateCr(
   required String uid,
   int? excludeId,
   String? dateOfBirth,
+  bool matchDob = false,
 }) {
   final cr = normalizeCr(uid);
   if (cr.isEmpty || site == null || site.isEmpty) return null;
@@ -83,7 +76,10 @@ Map<String, dynamic>? findDuplicateCr(
     if (e['id'] == excludeId) continue;
     if (e['site_name'] != site) continue;
     if (normalizeCr(e['mother_uid']?.toString()) != cr) continue;
-    if ((e['date_of_birth'] ?? '').toString() != (dateOfBirth ?? '')) continue;
+    if (matchDob &&
+        (e['date_of_birth'] ?? '').toString() != (dateOfBirth ?? '')) {
+      continue;
+    }
     return e;
   }
   return null;

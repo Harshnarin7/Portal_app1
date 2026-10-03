@@ -1237,7 +1237,7 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
       );
     } catch (e) {
       if (!mounted) return;
-      _showMsg("Save failed — check connection and try again. ($e)");
+      _showMsg(_formBSaveFailureMessage(e));
       return;
     }
 
@@ -1711,6 +1711,20 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         ],
       ),
     );
+  }
+
+  /// Server 422 from require_eligible_screening_for_form_b is shown as-is.
+  String _formBSaveFailureMessage(Object e) {
+    if (e is ApiException) {
+      final msg = e.message.trim();
+      if (e.statusCode == 422 ||
+          msg.toLowerCase().contains('not eligible')) {
+        return msg.isEmpty
+            ? 'This screening is not Eligible. Form B cannot be saved.'
+            : msg;
+      }
+    }
+    return 'Save failed — check connection and try again. ($e)';
   }
 
   void _showMsg(String msg) {
