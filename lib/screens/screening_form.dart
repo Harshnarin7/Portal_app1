@@ -26,6 +26,7 @@ import '../services/screening_api_service.dart';
 import '../services/forms_api_service.dart';
 import '../services/api_client.dart';
 import '../utils/screening_status.dart';
+import '../utils/mobile_numbers.dart';
 import 'dashboard_screen.dart';
 import '../theme/app_theme.dart';
 import '../widgets/modern_date_picker.dart';
@@ -4825,7 +4826,7 @@ class _ScreeningFormState extends State<ScreeningForm>
                     controller: _motherPhoneCtrl,
                     focusNode: _motherPhoneFocus,
                     decoration: _requiredDecoration(
-                      "17. Mobile Number — Mother",
+                      primaryMobileLabel,
                     ),
                     keyboardType: TextInputType.number,
                     style: TextStyle(color: c.textPrimary),
@@ -4833,10 +4834,11 @@ class _ScreeningFormState extends State<ScreeningForm>
                       FilteringTextInputFormatter.digitsOnly,
                       LengthLimitingTextInputFormatter(10),
                     ],
-                    validator: (v) => _submitted ? _phoneValidator(v) : null,
+                    validator: (v) => _submitted ? _primaryPhoneError(v) : null,
                     onChanged: (value) => setState(() {
                       _motherPhoneCount = value.length;
                       _motherMobileLimitReached = value.length >= 10;
+                      if (_submitted) _formKey.currentState?.validate();
                     }),
                   ),
                   if (_motherPhoneFocus.hasFocus)
@@ -4873,14 +4875,15 @@ class _ScreeningFormState extends State<ScreeningForm>
                       FilteringTextInputFormatter.digitsOnly,
                       LengthLimitingTextInputFormatter(10),
                     ],
-                    decoration: _requiredDecoration(
-                      "Husband",
+                    decoration: _inputDecoration(
+                      secondaryMobileLabel,
                     ).copyWith(counterText: ""),
-                    validator: (v) => _submitted ? _phoneValidator(v) : null,
+                    validator: (v) => _submitted ? _secondaryPhoneError(v) : null,
                     style: TextStyle(color: c.textPrimary),
                     onChanged: (value) => setState(() {
                       _husbandPhoneCount = value.length;
                       _husbandPhoneLimitReached = value.length == 10;
+                      if (_submitted) _formKey.currentState?.validate();
                     }),
                   ),
                   if (_husbandPhoneFocus.hasFocus)
@@ -5482,17 +5485,11 @@ class _ScreeningFormState extends State<ScreeningForm>
     return null;
   }
 
-  String? _phoneValidator(String? v) {
-    if (v == null || v.trim().isEmpty) return "Required";
-    // Match web save: exactly 10 digits and must start with 6–9.
-    if (!RegExp(r'^\d{10}$').hasMatch(v.trim())) {
-      return "Must be exactly 10 digits";
-    }
-    if (!RegExp(r'^[6-9]').hasMatch(v.trim())) {
-      return "Indian mobile must start with 6, 7, 8, or 9";
-    }
-    return null;
-  }
+  String? _primaryPhoneError(String? v) =>
+      mobilePairErrors(v, _husbandPhoneCtrl.text).primary;
+
+  String? _secondaryPhoneError(String? v) =>
+      mobilePairErrors(_motherPhoneCtrl.text, v).secondary;
 }
 
 class _IcfSignaturePainter extends CustomPainter {

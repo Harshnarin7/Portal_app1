@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/api_client.dart';
 import '../../services/logs_api_service.dart';
+import '../../utils/ga_check_search.dart';
 import '../../utils/ga_check_seed.dart';
 import '../../utils/maternal_uid.dart';
 import '../screening_form.dart';
@@ -67,6 +70,9 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
   bool _allowDuplicateCr = false;
   String _saveError = '';
   final _scrollCtrl = ScrollController();
+  final _searchCtrl = TextEditingController();
+  Timer? _searchDebounce;
+  String _appliedQuery = '';
   bool _foundIufd = false;
   Map<String, dynamic>? _lastResult;
 
@@ -102,6 +108,8 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
     _nameCtrl.dispose();
     _uidCtrl.dispose();
     _weeksCtrl.dispose();
+    _searchDebounce?.cancel();
+    _searchCtrl.dispose();
     _scrollCtrl.dispose();
     _daysCtrl.dispose();
     super.dispose();
@@ -314,6 +322,49 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
     return value;
   }
 
+  bool get _searching => collapseSearchSpaces(_appliedQuery).isNotEmpty;
+
+  List<Map<String, dynamic>> get _visibleChecks =>
+      filterGaChecks(_entries, _appliedQuery);
+
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted) return;
+      setState(() => _appliedQuery = value);
+    });
+  }
+
+  void _clearSearch() {
+    _searchDebounce?.cancel();
+    _searchCtrl.clear();
+    setState(() => _appliedQuery = '');
+  }
+
+  Widget _searchField() {
+    final hasText = _searchCtrl.text.isNotEmpty;
+    return TextField(
+      controller: _searchCtrl,
+      textInputAction: TextInputAction.search,
+      onChanged: (value) {
+        setState(() {});
+        _onSearchChanged(value);
+      },
+      onTapOutside: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+      style: const TextStyle(color: _kText1, fontSize: 14),
+      decoration: _inputDeco(hint: 'Search by name or ID').copyWith(
+        prefixIcon: const Icon(Icons.search_rounded, color: _kText3, size: 20),
+        suffixIcon: hasText
+            ? IconButton(
+                tooltip: 'Clear search',
+                onPressed: _clearSearch,
+                icon: const Icon(Icons.close_rounded, color: _kText3, size: 18),
+              )
+            : null,
+      ),
+    );
+  }
+
   int get _crPendingCount =>
       _entries.where((e) => e['cr_pending'] == true).length;
 
@@ -426,6 +477,7 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
         onRefresh: _load,
         child: ListView(
           controller: _scrollCtrl,
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
           children: [
             const Text(
@@ -656,6 +708,8 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
               ),
             ),
             const SizedBox(height: 16),
+            _searchField(),
+            const SizedBox(height: 16),
             _card(
               title:
                   'Recent checks${user?.siteName != null ? ' — ${user!.siteName}' : ''}',
@@ -668,13 +722,41 @@ class _GestationLogScreenState extends State<GestationLogScreen> {
                           style: const TextStyle(
                               color: _kDanger, fontSize: 12)),
                     ),
+                  if (_searching)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          _visibleChecks.length == 1
+                              ? '1 result'
+                              : '${_visibleChecks.length} results',
+                          style: const TextStyle(
+                              color: _kText2, fontSize: 12),
+                        ),
+                      ),
+                    ),
                   if (!_loading && _entries.isEmpty)
                     const Padding(
                       padding: EdgeInsets.symmetric(vertical: 16),
                       child: Text('No checks logged yet.',
                           style: TextStyle(color: _kText3)),
+                    )
+                  else if (!_loading && _searching && _visibleChecks.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      child: Column(
+                        children: [
+                          const Text('No matching checks found',
+                              style: TextStyle(color: _kText3)),
+                          TextButton(
+                            onPressed: _clearSearch,
+                            child: const Text('Clear search'),
+                          ),
+                        ],
+                      ),
                     ),
-                  ..._entries.map(_entryCard),
+                  ..._visibleChecks.map(_entryCard),
                 ],
               ),
             ),

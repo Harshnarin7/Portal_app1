@@ -2747,12 +2747,12 @@ class _FormBBirthResuscitationState extends State<FormBBirthResuscitation> {
         Row(
           children: [
             Expanded(
-              child: _infoTile("5. Mobile No. — Mother", widget.motherPhone, c),
+              child: _infoTile("5. Mobile number - Primary", widget.motherPhone, c),
             ),
             const SizedBox(width: 10),
             Expanded(
               child: _infoTile(
-                "5. Mobile No. — Husband",
+                "5. Mobile number - Secondary",
                 widget.husbandPhone,
                 c,
               ),
